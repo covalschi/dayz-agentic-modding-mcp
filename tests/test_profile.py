@@ -242,6 +242,47 @@ def test_wrong_shaped_mods_in_local_is_rejected(tmp_path):
     assert "[section]" in r.hint
 
 
+def test_machine_port_defaults_to_2302(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.machine.port == 2302
+
+
+def test_machine_port_parses(tmp_path):
+    local = """
+    [machine]
+    port = 27016
+    """
+    p = load_profile(write(tmp_path, BASE, local)).data
+    assert p.machine.port == 27016
+
+
+def test_machine_port_non_numeric_is_rejected(tmp_path):
+    local = """
+    [machine]
+    port = "twenty-seven thousand"
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "machine.port" in r.error
+    assert "integer" in r.error
+
+
+def test_local_supplies_server_only_mods(tmp_path):
+    local = """
+    [mods]
+    required = ["@CF"]
+    server_only = ["@ServerOnlyMod"]
+    """
+    p = load_profile(write(tmp_path, BASE, local)).data
+    assert p.mods.server_only == ["@ServerOnlyMod"]
+    assert p.mods.required == ["@CF"]
+
+
+def test_server_only_mods_default_to_empty(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.mods.server_only == []
+
+
 def test_malformed_error_regex_is_rejected(tmp_path):
     bad = """
 [project]

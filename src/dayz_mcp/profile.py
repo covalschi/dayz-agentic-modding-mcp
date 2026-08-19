@@ -35,6 +35,7 @@ class BuildCfg:
 class ModsCfg:
     required: list[str] = field(default_factory=list)
     extra: list[str] = field(default_factory=list)
+    server_only: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +53,7 @@ class MachineCfg:
     game: str = ""
     tools: str = ""
     stand_root: str = ""
+    port: int = 2302
 
 
 @dataclass
@@ -239,10 +241,19 @@ def load_profile(path: str | Path) -> Result:
                 hint="write it as a [section] header, not a bare value",
             )
         lm = lm or {}
+
+        port_val = lm.get("port", 2302)
+        if not isinstance(port_val, int) or isinstance(port_val, bool):
+            return fail(
+                f"machine.port must be an integer, got {port_val!r}",
+                hint="use a numeric port, e.g. port = 2302",
+            )
+
         machine = MachineCfg(
             game=str(lm.get("game", "")),
             tools=str(lm.get("tools", "")),
             stand_root=str(lm.get("stand_root", "")),
+            port=port_val,
         )
 
         # Check [mods] is a table
@@ -256,6 +267,7 @@ def load_profile(path: str | Path) -> Result:
         mods = ModsCfg(
             required=[str(x) for x in lmods.get("required", [])],
             extra=[str(x) for x in lmods.get("extra", [])],
+            server_only=[str(x) for x in lmods.get("server_only", [])],
         )
     else:
         notes.append(f"no {LOCAL_NAME}: machine paths will be discovered automatically")
