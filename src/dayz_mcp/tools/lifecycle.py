@@ -8,7 +8,7 @@ from ..bridge.channel import CMD_FILENAME, STATE_FILENAME
 from ..compilecheck import client_cmd, judge
 from ..errors import Result, fail, ok
 from ..paths import GAME_PROBE
-from ..procs import is_alive, spawn, stop
+from ..procs import is_alive, spawn, stop, udp_port_holders
 from . import session
 from .project import require_project
 
@@ -26,6 +26,15 @@ SERVER_IMAGE = GAME_PROBE
 # client-compile job, so a compile check never writes into (or reads from) the
 # test stand the server boots against.
 CLIENT_PROFILE_DIRNAME = "clientprofile"
+
+# How long the no-ready-line path waits for the game port to be bound before
+# giving up on that signal and answering honestly. Bounded on purpose and
+# deliberately NOT `timeout`: the defect this branch exists to fix was waiting
+# the full timeout for a signal that would never come. Measured against the
+# real thing -- this project's stand binds udp/2302 16.9s after spawn, by the
+# pid we spawned -- so a server that is going to bind has done it long before
+# this, and one that has not is answered rather than waited on.
+PORT_READY_WAIT_SECONDS = 90.0
 
 # How long server_start lets a server settle before calling it started, when
 # the profile declares no ready line and there is therefore nothing to wait
@@ -194,10 +203,23 @@ def server_start(timeout: float = 420) -> Result:
     could not be removed is reported in `bridge_transport_left` and on the job,
     and never fails the boot.
 
-    Readiness means the profile's `expect.ready_line` appeared in a log written
-    by THIS run. With no ready line declared, the job finishes as soon as the
-    process is confirmed to have survived its first moments and says so -- that
-    is not the same claim, and the summary does not pretend otherwise.
+    It REFUSES if the game port is already held, naming the pids holding it. A
+    stand is shared -- one machine, one port, one profile directory -- and
+    booting into a held port produces a server that dies during world load with
+    nothing in its own log to say why. If the holder is a server this session
+    started, the hint says to stop it; if it is anyone else's, the hint says to
+    find out whose before stopping anything, because this tool only ever stops a
+    server it started itself.
+
+    Readiness has two independent signals, and the summary always names which
+    one answered. `expect.ready_line` appearing in a log written by THIS run
+    says the MOD finished loading. The game port being bound by the pid we
+    spawned says the ENGINE is up and listening -- which needs neither a mod nor
+    a declared line, and is the readiness verdict for a project that declares
+    none (measured on a real stand: bound 16.9s after spawn). With a ready line
+    declared it remains the verdict, since a bound port cannot say a mod loaded;
+    the port is then what tells "the boot failed" apart from "the server is
+    listening and it is the mod's line that never appeared".
     """
     guard = require_project()
     if guard:
@@ -245,6 +267,31 @@ def server_start(timeout: float = 420) -> Result:
                  f"link to somewhere else",
         )
 
+    # PRE-FLIGHT, and the one check that would have prevented the boot failure
+    # this signal was built for: a stand is shared -- one machine, one port, one
+    # -profiles directory -- and another tool (or another agent) may already be
+    # holding it. Starting anyway produces a server that dies during world load
+    # with nothing in its own log to say why, which is exactly how that failure
+    # presented. The holder is NOT ours to stop: this refuses and names it.
+    busy = udp_port_holders(prof.machine.port)
+    if busy:
+        # Whose it is decides what to do about it, and only one of the two
+        # answers is ours to act on.
+        ours = [holder for holder in busy if session.known_pid(holder)]
+        if ours:
+            hint = (f"that is a server this session started -- call server_stop(pid={ours[0]}) "
+                    "and try again")
+        else:
+            hint = ("something else is already using this stand's port -- another agent's "
+                    "server, or one started outside these tools. Find out whose it is "
+                    "before stopping anything (this tool only ever stops a server it "
+                    "started itself), or give this project its own machine.port")
+        return fail(
+            f"udp port {prof.machine.port} is already held by pid(s) "
+            f"{', '.join(str(x) for x in busy)}, so this server would not get it",
+            hint=hint,
+        )
+
     client_mods, server_mods = mod_list()
     store = session.jobs()
     job = store.create("boot")
@@ -261,9 +308,10 @@ def server_start(timeout: float = 420) -> Result:
     transport_note = ""
     if transport_left:
         transport_note = f" | WARNING: could not clear bridge transport: {'; '.join(transport_left)}"
+    port = prof.machine.port
     cmd = [
         str(Path(game) / SERVER_IMAGE), "-server", f"-config={cfg}",
-        f"-port={prof.machine.port}", f"-mod={client_mods}", f"-profiles={profiles}",
+        f"-port={port}", f"-mod={client_mods}", f"-profiles={profiles}",
     ]
     if server_mods:
         cmd.append(f"-serverMod={server_mods}")
@@ -303,26 +351,82 @@ def server_start(timeout: float = 420) -> Result:
                 if not is_alive(pid, image=SERVER_IMAGE):
                     store.fail(job.id, "the server process died moments after starting")
                     return
+                # With no ready line there used to be nothing left to do but
+                # dwell and admit readiness could not be determined. The port is
+                # a real signal for exactly this case: it needs neither a mod nor
+                # a declared line, and it is the server's own doing. Measured on
+                # this project's stand: bound 16.9s after spawn, by the very pid
+                # we spawned.
+                # BOUNDED by its own constant, not by `timeout`. Waiting the
+                # full timeout here would recreate the defect this branch was
+                # written to fix -- a project that cannot declare a ready line
+                # used to poll for a marker that could never match and fail
+                # seven minutes later. The bound is set against the measured
+                # bind time (16.9s on this project's stand), generously, so a
+                # server that is going to bind has long since done it; a server
+                # that has not by then is answered honestly instead of waited on.
+                deadline = time.time() + min(timeout, PORT_READY_WAIT_SECONDS)
+                while time.time() < deadline:
+                    if pid in udp_port_holders(port):
+                        store.finish(
+                            job.id, 0,
+                            summary=f"ready via port bind, pid {pid} holds udp/{port}; "
+                                    "expect.ready_line is empty, so this says the server is up "
+                                    "and listening, NOT that any mod finished loading"
+                                    f"{transport_note}",
+                        )
+                        return
+                    if not is_alive(pid, image=SERVER_IMAGE):
+                        store.fail(job.id, "the server process died before it bound its port")
+                        return
+                    time.sleep(2)
+                # Alive, never bound: the old honest answer, now naming the extra
+                # thing that was actually looked at. Deliberately not a failure --
+                # a server that does not bind this port is unusual, not proof of
+                # anything, and this configuration could not judge readiness at
+                # all before.
+                waited_for = min(timeout, PORT_READY_WAIT_SECONDS)
                 store.finish(
                     job.id, 0,
-                    summary=f"started, pid {pid}; expect.ready_line is empty, so readiness cannot "
-                            "be detected -- only errors will be judged (log_verdict once the "
-                            f"server has had time to write){transport_note}",
+                    summary=f"started, pid {pid}; expect.ready_line is empty and udp/{port} was "
+                            f"never observed bound within {waited_for:g}s, so readiness cannot be "
+                            f"detected -- only errors will be judged{transport_note}",
                 )
                 return
             deadline = time.time() + timeout
+            port_bound = False
             while time.time() < deadline:
                 if not is_alive(pid, image=SERVER_IMAGE):
                     store.fail(job.id, "the server process died before it was ready")
                     return
+                # Watched, not waited on. With a ready line declared, THAT is the
+                # readiness verdict: it says the mod finished loading, which the
+                # port cannot. The port answers a different question -- is the
+                # engine listening -- and its value here is telling two very
+                # different failures apart at the end.
+                if not port_bound and pid in udp_port_holders(port):
+                    port_bound = True
                 for log in profiles.glob("script_*.log"):
                     if log.stat().st_mtime < since:
                         continue
                     if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
                         store.add_artifact(job.id, log)
-                        store.finish(job.id, 0, summary=f"ready, pid {pid}{transport_note}")
+                        bound_note = f"; udp/{port} bound" if port_bound else ""
+                        store.finish(
+                            job.id, 0,
+                            summary=f"ready via expect.ready_line, pid {pid}{bound_note}"
+                                    f"{transport_note}",
+                        )
                         return
                 time.sleep(2)
+            if port_bound or pid in udp_port_holders(port):
+                store.fail(
+                    job.id,
+                    f"no ready line within {timeout}s -- but pid {pid} holds udp/{port}, so the "
+                    "server itself is up and listening: it is the mod's ready line that never "
+                    "appeared, not the boot that failed",
+                )
+                return
             store.fail(job.id, f"no ready line within {timeout}s")
         except Exception as exc:  # noqa: BLE001 - must reach the job, not just stderr
             store.fail(job.id, f"{type(exc).__name__}: {exc}")

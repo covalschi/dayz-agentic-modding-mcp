@@ -823,7 +823,11 @@ def test_bridge_status_clamps_a_silly_window(tmp_path, monkeypatch):
 
     def fake_heartbeat_detail(self, window=3.0):
         captured["window"] = window
-        return HeartbeatSample("unmeasurable", 0, None)
+        # Keywords, not positions: `gap` was inserted ahead of
+        # `previous_session_id`, and a positional call at the channel's own
+        # restarted branch silently carried a session id into the new slot when
+        # it landed. This fixture has no business knowing the field order.
+        return HeartbeatSample(status="unmeasurable", tick=0, session_id=None, gap=None)
 
     # Patched at the PUBLIC entry point this tool actually calls. An earlier
     # version reached past it to the channel's sampling internals, which then
@@ -1648,6 +1652,11 @@ async def test_the_tool_descriptions_do_not_contradict_the_code():
     assert "mailbox" in start
     assert "state file" in start
     assert "clear" in start or "remove" in start
+    # Readiness has two signals now, and which one answered changes what the
+    # answer means. An agent that does not know the port is one of them cannot
+    # read "ready via port bind" correctly.
+    assert "port" in start
+    assert "expect.ready_line" in listed["server_start"]
 
     # bridge_clear is not the only thing that empties the mailbox, and the
     # description must not go back to implying it is.
@@ -2022,3 +2031,76 @@ def test_the_unwired_answer_names_what_actually_works(tmp_path, monkeypatch):
     followed = tools.bridge_clear(force=True)
     assert followed.ok, f"the instruction led to a refusal: {followed.error} | {followed.hint}"
     assert followed.data["discarded_id"] == "spawn-2"
+
+
+# --- The two halves of "unknown", now that the gap is measurable -------------
+
+
+def _unmeasurable_status(tmp_path, monkeypatch, sample):
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    write_state(profiles, tick=9, session_id="w1")
+    monkeypatch.setattr(
+        "dayz_mcp.bridge.channel.Channel.heartbeat_detail", lambda self, window=3.0: sample
+    )
+    return tools.bridge_status(window=0.1)
+
+
+def test_a_gap_too_short_to_conclude_says_so_and_offers_the_window(tmp_path, monkeypatch):
+    """A measurement that happened but could not conclude. The window IS the
+    problem here, so the answer names the gap, names the publish interval the
+    gap has to clear, and points at the one knob that changes it."""
+    r = _unmeasurable_status(
+        tmp_path, monkeypatch,
+        HeartbeatSample(status="unmeasurable", tick=9, session_id="w1", gap=0.30),
+    )
+    assert not r.ok
+    assert r.data["state"] == "unknown"
+    assert "0.30s" in r.error
+    assert "1s" in r.error or "1.0s" in r.error  # the interval it has to clear
+    assert "window" in r.hint
+
+
+def test_a_lost_second_sample_does_not_blame_the_window(tmp_path, monkeypatch):
+    """The other half, and the one that matters: the gap was long enough, so
+    the window was never the problem. Telling the caller to enlarge it would be
+    the same false diagnosis in miniature -- this is a fact about the state
+    file, and the answer says which."""
+    r = _unmeasurable_status(
+        tmp_path, monkeypatch,
+        HeartbeatSample(status="unmeasurable", tick=9, session_id="w1", gap=2.40),
+    )
+    assert not r.ok
+    assert r.data["state"] == "unknown"
+    assert "2.40s" in r.error
+    assert "second sample could not be read" in r.error
+    assert "the window is not the problem" in r.hint
+    # It must not send them to enlarge a window that was already big enough.
+    assert "bigger window" not in r.hint
+    assert "window >=" not in r.hint
+
+
+def test_no_measurement_at_all_is_still_the_no_snapshot_family(tmp_path, monkeypatch):
+    """gap is None only when nothing could be measured at all -- that is not an
+    `unknown` about a window, it is "there is nothing readable there", and it
+    keeps the answers that say so."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(
+        "dayz_mcp.bridge.channel.Channel.heartbeat_detail",
+        lambda self, window=3.0: HeartbeatSample(
+            status="unmeasurable", tick=0, session_id=None, gap=None
+        ),
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "no_state_file"
+    assert r.data["session_id"] is None

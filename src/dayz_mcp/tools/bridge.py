@@ -93,14 +93,19 @@ STATUS_WINDOW_MAX = 10.0
 # protocol's 1 Hz publish interval on purpose: a document mangled by one in-place write
 # is repaired by the next one, so it cannot look the same across this gap,
 # while a genuinely old mod looks old however long you wait.
-SECOND_OPINION_SECONDS = 1.1
+# How often the protocol has the mod republish its state (spec: once a second).
+# A protocol fact, not the channel's implementation detail -- the channel
+# enforces the same rule from its own copy, and both are quoting the spec.
+MOD_PUBLISH_INTERVAL_SECONDS = 1.0
+
+SECOND_OPINION_SECONDS = MOD_PUBLISH_INTERVAL_SECONDS + 0.1
 
 # The shortest probe bridge_clear will run. The channel refuses to clear on a
 # "stalled" verdict taken over a window shorter than the mod's publish interval
 # -- correctly, since a live bridge that has simply not ticked again yet looks
 # identical to a frozen one there. Flooring the window means a caller's small
 # number never turns into a refusal about their own argument.
-CLEAR_PROBE_MIN_SECONDS = 1.1
+CLEAR_PROBE_MIN_SECONDS = MOD_PUBLISH_INTERVAL_SECONDS + 0.1
 
 # Every field the pre-session protocol had, and nothing else. Anything outside
 # this set in an otherwise old-looking document means the document was damaged
@@ -597,12 +602,31 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         # the only thing that answers the question, and it is why the raw
         # samples are taken above.
         if _a_sample_was_read(detail):
+            # Two different reasons a measurement failed, and only ONE of them
+            # is about the window. Telling a caller to enlarge a window that
+            # was never the problem is the miniature version of the false
+            # diagnosis this whole layer keeps having to remove.
+            gap = detail.gap
+            if gap is not None and gap < MOD_PUBLISH_INTERVAL_SECONDS:
+                return _not_alive(
+                    "unknown",
+                    observed,
+                    f"the two samples were only {gap:.2f}s apart -- less than the "
+                    f"{MOD_PUBLISH_INTERVAL_SECONDS:g}s the mod takes to publish a new tick -- "
+                    f"so the tick reading {tick} could not be compared with anything",
+                    hint=_window_hint(),
+                )
+            measured = f"{gap:.2f}s apart" if gap is not None else "far enough apart"
             return _not_alive(
                 "unknown",
                 observed,
-                f"read one sample at tick {tick}, but the second could not be read, "
-                "so whether the tick is advancing was not measured",
-                hint=_window_hint(),
+                f"read one sample at tick {tick}, and the two reads were {measured} -- long "
+                "enough to have shown movement -- but the second sample could not be read at "
+                "all, so nothing was compared",
+                hint="the window is not the problem here: the state file could not be read a "
+                     "second time. One torn read is ordinary, so call bridge_status again; if "
+                     "it keeps happening, the file is not being written completely and this "
+                     "tool will name the field once it can see one",
             )
         return _no_snapshot_answer({**base, "heartbeat": status}, channel, state_file, mailbox)
 

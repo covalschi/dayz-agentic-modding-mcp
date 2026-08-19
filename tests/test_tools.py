@@ -17,6 +17,7 @@ from dayz_mcp.packer import PackResult
 from dayz_mcp.procs import is_alive as procs_is_alive
 from dayz_mcp.procs import spawn as procs_spawn
 from dayz_mcp.procs import stop as procs_stop
+from dayz_mcp.procs import udp_port_holders as procs_udp_port_holders
 from dayz_mcp.profile import load_profile
 from dayz_mcp.tools import jobs_api, lifecycle, session
 
@@ -267,6 +268,11 @@ def test_server_start_finishes_promptly_when_no_ready_line_is_declared(tmp_path,
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    # The port signal is watched for on this path now, bounded by its own
+    # constant rather than by  -- squeezed here so the test still
+    # asserts what it was written to assert: this configuration answers
+    # promptly instead of waiting out a timeout for a signal that never comes.
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.2)
 
     began = time.time()
     started = tools.server_start(timeout=300)
@@ -1398,3 +1404,186 @@ def test_a_clean_boot_says_nothing_about_the_transport(tmp_path, monkeypatch):
     started = tools.server_start(timeout=5)
     assert started.ok, started.error
     assert "bridge_transport_left" not in started.data
+
+
+# --- Readiness by port bind, and the collision it was really built for -------
+#
+# The premise this work started from -- "the engine relaunches itself and
+# server_start reads that as death" -- turned out to be wrong, and the artifacts
+# say what actually happened: two agents booting stands on ONE shared port and
+# ONE shared -profiles directory. See the task report. What survives from it is
+# a readiness signal that needs neither our tracked pid nor a mod, and a
+# pre-flight check for the collision that really occurred.
+
+
+def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypatch):
+    """The check that would have prevented the failure. A stand is shared: one
+    machine, one port, one profile directory. Booting into a held port produces
+    a server that dies mid-world-load with nothing in its own log to say why.
+
+    The holder is not ours to stop -- it may be another agent's server -- so
+    this refuses and NAMES it rather than clearing the way."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [4242])
+    spawned = []
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn",
+                        lambda cmd, cwd: spawned.append(cmd) or 1)
+
+    r = tools.server_start(timeout=5)
+    assert not r.ok
+    assert "4242" in r.error
+    assert "2302" in r.error
+    assert not spawned, "it started a server into a port it knew was taken"
+    # Not an invitation to go killing things.
+    assert "only ever stops a server it started" in r.hint
+
+    # A holder this session DID start is a different situation with a different
+    # answer: it is ours, and server_stop is the way out.
+    session.set_server_pid(4242, "DayZDiag_x64.exe")
+    mine = tools.server_start(timeout=5)
+    assert not mine.ok
+    assert "server_stop(pid=4242)" in mine.hint
+
+
+def test_the_port_is_the_readiness_signal_when_no_ready_line_is_declared(tmp_path, monkeypatch):
+    """A project with no ready line used to get a three-second dwell and an
+    honest "cannot be determined". The port is a real signal for that case: the
+    server's own doing, needing neither a mod nor a declared line."""
+    session.reset()
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    holders = {"pids": []}
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders",
+                        lambda port: holders["pids"])
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+
+    started = tools.server_start(timeout=30)
+    assert started.ok, started.error
+    holders["pids"] = [4321]  # the server binds, a moment later
+
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    assert waited.data["status"] == "done", waited.data
+    assert "ready via port bind" in waited.data["summary"]
+    # And it must not overclaim: a bound port says the engine is listening, not
+    # that any mod finished loading.
+    assert "NOT that any mod finished loading" in waited.data["summary"]
+
+
+def test_a_declared_ready_line_stays_the_readiness_verdict(tmp_path, monkeypatch):
+    """The two signals answer different questions, so they are not alternatives
+    for the same verdict. With a ready line declared it remains THE answer --
+    the port cannot say a mod finished loading -- and the port is reported
+    beside it."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    # Free before the spawn (or the pre-flight refuses), held after it -- which
+    # is also the real sequence.
+    holders = {"pids": []}
+
+    def spawn_and_write_the_line(cmd, cwd):
+        profiles = Path(next(a for a in cmd if a.startswith("-profiles=")).split("=", 1)[1])
+        (profiles / "script_now.log").write_text("[MyMod] loaded\n", encoding="utf-8")
+        holders["pids"] = [4321]
+        return 4321
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", spawn_and_write_the_line)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: holders["pids"])
+
+    started = tools.server_start(timeout=20)
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    assert waited.data["status"] == "done", waited.data
+    assert "ready via expect.ready_line" in waited.data["summary"]
+    assert "udp/2302 bound" in waited.data["summary"]
+
+
+def test_a_missing_ready_line_over_a_listening_server_says_which_half_failed(tmp_path, monkeypatch):
+    """The failure worth telling apart: the server is up and listening, and it
+    is the MOD's line that never appeared. "no ready line within Ns" alone sends
+    the reader to look at the boot, which is fine."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    holders = {"pids": []}
+
+    def spawn_that_binds(cmd, cwd):
+        holders["pids"] = [4321]
+        return 4321
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", spawn_that_binds)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: holders["pids"])
+
+    started = tools.server_start(timeout=3)
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    assert waited.data["status"] == "failed"
+    assert "holds udp/2302" in waited.data["error"]
+    assert "ready line that never appeared" in waited.data["error"]
+
+
+def test_a_dead_server_is_still_reported_dead(tmp_path, monkeypatch):
+    """The premise that started this work claimed a boot which had really
+    succeeded was being called a failure. It was not: that server genuinely
+    died, and this must keep saying so."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [])
+
+    started = tools.server_start(timeout=5)
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    assert waited.data["status"] == "failed"
+    assert "died" in waited.data["error"]
+
+
+def test_udp_port_holders_parses_netstat_and_matches_the_whole_port(tmp_path, monkeypatch):
+    """Captured from the real thing on this machine. The suffix match must be
+    on ":2302" and not on the digits appearing anywhere -- ":12302" is a
+    different port on the same machine."""
+    captured = textwrap.dedent(
+        """
+        Active Connections
+
+          Proto  Local Address          Foreign Address        State           PID
+          UDP    0.0.0.0:2302           *:*                                    67688
+          UDP    0.0.0.0:12302          *:*                                    999
+          UDP    127.0.0.1:2302         *:*                                    67688
+          TCP    0.0.0.0:2302           0.0.0.0:0              LISTENING       555
+        """
+    ).strip()
+
+    class Done:
+        stdout = captured
+
+    monkeypatch.setattr("dayz_mcp.procs.subprocess.run", lambda *a, **kw: Done())
+    monkeypatch.setattr("dayz_mcp.procs.os.name", "nt")
+    assert procs_udp_port_holders(2302) == [67688]
+    assert procs_udp_port_holders(12302) == [999]
+    assert procs_udp_port_holders(9999) == []

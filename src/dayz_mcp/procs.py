@@ -59,6 +59,52 @@ def spawn(cmd: list[str], cwd: Path) -> int:
     return proc.pid
 
 
+def udp_port_holders(port: int) -> list[int]:
+    """Pids holding UDP `port`, as reported by netstat. Empty when nothing does.
+
+    A readiness signal that depends on neither our tracked pid nor the mod: a
+    DayZ server binds its game port, so something holding it is something
+    listening. `expect.ready_line` answers a different question (has the MOD
+    finished loading) and is not available at all to a project that declares
+    none.
+
+    Read out of netstat rather than by binding the port ourselves. Binding is
+    the technique that first suggests itself, and it is the one that can break
+    the very thing it measures: a probe that holds the port for even a moment
+    while the server is trying to bind it makes the server fail to start.
+    Reading a table cannot do that.
+
+    Returns [] on any failure (netstat missing, unparseable, non-Windows) --
+    this is evidence FOR liveness when it finds something, never evidence
+    against when it finds nothing, and every caller is written that way.
+    """
+    if os.name != "nt" or port <= 0:
+        return []
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed command, no user input
+            ["netstat", "-ano", "-p", "UDP"], capture_output=True, text=True,
+            check=False, timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    holders: list[int] = []
+    for line in out.splitlines():
+        parts = line.split()
+        # "UDP  0.0.0.0:2302  *:*  <pid>" -- the local address is the second
+        # column and the pid the last. Matched on the ":port" suffix so an
+        # address of 0.0.0.0, 127.0.0.1 or a specific interface all count,
+        # while a port that merely CONTAINS these digits (12302) does not.
+        if len(parts) < 4 or parts[0].upper() != "UDP":
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        try:
+            holders.append(int(parts[-1]))
+        except ValueError:
+            continue
+    return sorted(set(holders))
+
+
 def is_alive(pid: int, image: str = "") -> bool:
     """True if `pid` is a running process.
 
