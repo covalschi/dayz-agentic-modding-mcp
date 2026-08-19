@@ -394,6 +394,16 @@ def pack_one(
                 signing_note = f"private key found ({priv.stem}) but public key with matching stem not found"
                 if len(all_priv_keys) > 1:
                     signing_note = f"multiple private keys present (using {priv.stem}), public key not found"
+        elif not keys_dir.is_dir():
+            # An unsigned pbo stays a success -- plenty of builds never need a
+            # signature. It must not be a SILENT one: with no note at all,
+            # signed=False reads exactly like a signing attempt that failed,
+            # and the only way to tell them apart is to go digging in the pack
+            # log. Name the directory that was looked for, so the answer is
+            # "put a key pair here", not "find out why".
+            signing_note = f"no signing keys: {keys_dir} does not exist, so the pbo is unsigned"
+        else:
+            signing_note = f"no signing keys: {keys_dir} holds no *.biprivatekey, so the pbo is unsigned"
 
         # cfgconvert_note and staging_note (soft-degrades / disclosures set
         # above) and signing_note are independent concerns; any of them can

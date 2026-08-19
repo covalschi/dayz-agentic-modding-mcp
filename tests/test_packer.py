@@ -323,6 +323,74 @@ def test_pack_one_with_private_key_but_no_signer(tmp_path, monkeypatch):
     assert "signer" in result.note.lower()
 
 
+def test_pack_one_says_why_it_did_not_sign_when_there_is_no_keys_directory(tmp_path, monkeypatch):
+    """An unsigned build stays a success, but never a silent one. With no
+    <root>/keys at all the signing block was skipped entirely, so the result
+    was signed=False with an empty note -- indistinguishable from a signing
+    attempt that failed. The note must name the directory that was looked
+    for, so the answer is "put a key here", not "read the pack log"."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, root / "build.log")
+
+    assert result.error == ""       # unsigned is not a failure
+    assert result.pbo != ""
+    assert result.signed is False
+    assert str(root / "keys") in result.note
+    assert "unsigned" in result.note.lower()
+
+
+def test_pack_one_says_why_it_did_not_sign_when_the_keys_directory_is_empty(tmp_path, monkeypatch):
+    """The same silence, one step along: the directory exists (so "put a key
+    here" has already been half-followed) but holds no private key."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    keys_dir = root / "keys"
+    keys_dir.mkdir()
+    (keys_dir / "readme.txt").write_text("keys go here", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, root / "build.log")
+
+    assert result.error == ""
+    assert result.signed is False
+    assert str(keys_dir) in result.note
+    assert "biprivatekey" in result.note
+    assert "unsigned" in result.note.lower()
+
+
 # --- Requirement: a CfgConvert syntax gate before FileBank (FileBank does not
 # parse config.cpp at all; a syntax error there survives packing and only
 # surfaces after a multi-minute server boot) ---
