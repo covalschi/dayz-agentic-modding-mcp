@@ -738,10 +738,17 @@ def _no_snapshot_answer(data: dict, channel: Channel, state_file: Path, mailbox:
         # The bridge is not loaded, so nothing will ever claim this -- and the
         # moment the wiring is fixed, the first tick runs a command sent long
         # before. Better said here than discovered then.
+        # Says what actually works from HERE. A plain bridge_clear() refuses in
+        # this exact state -- the server is running, which is this tool's own
+        # liveness gate -- for a command nothing in that world can claim,
+        # because the bridge is not loaded. An instruction that leads to a
+        # refusal costs a call to find out, so it names the flag.
         waiting = (
             f"; a command has also been waiting unclaimed in {mailbox['path']} for "
             f"{mailbox['age_seconds']}s, and it will not expire on its own -- it waits for a "
-            "bridge that reads commands (bridge_clear discards it)"
+            "bridge that reads commands. Nothing in this world can claim it (the bridge is "
+            "not loaded), but the server IS running, so discarding it takes "
+            "bridge_clear(force=True), or server_stop first"
         )
     return _not_alive(
         "no_state_file",

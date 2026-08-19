@@ -7,6 +7,7 @@ project's -- are asserted here, because getting it wrong would look like a
 working build right up until the pbo turned out to hold someone else's mod.
 """
 import json
+import re
 import os
 import textwrap
 import threading
@@ -18,7 +19,8 @@ import pytest
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
 from dayz_mcp.errors import ok as errors_ok
-from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel
+from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel, HeartbeatSample
+from dayz_mcp.bridge.protocol import ParseRejection
 from dayz_mcp.packer import PackResult
 from dayz_mcp.tools import bridge, session
 
@@ -717,7 +719,9 @@ def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_pat
     monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
     write_state(profiles, tick=0)
 
-    r = tools.bridge_status(window=0.2)
+    # Same reason as the frozen test above: a stall verdict needs a gap the mod
+    # could have ticked across.
+    r = tools.bridge_status(window=1.2)
     assert not r.ok
     assert r.data["state"] not in ("unreadable_state", "outdated_bridge", "no_state_file")
     assert r.data["state"] == "frozen"
@@ -737,7 +741,12 @@ def test_bridge_status_reports_a_frozen_tick_as_not_alive(tmp_path, monkeypatch)
     monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
     write_state(profiles, tick=42)
 
-    r = tools.bridge_status(window=0.3)
+    # Longer than the mod's publish interval on purpose: a "same tick twice"
+    # verdict taken over a shorter gap is evidence of nothing -- the mod has not
+    # had a fair chance to write again -- so a frozen diagnosis must not be
+    # reachable from one. A test that asked for `frozen` over 0.3s was asserting
+    # exactly the wrong-diagnosis this rule exists to prevent.
+    r = tools.bridge_status(window=1.2)
     assert not r.ok
     assert r.data["state"] == "frozen"
     assert r.data["alive"] is False
@@ -812,11 +821,15 @@ def test_bridge_status_clamps_a_silly_window(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_sample_twice(self, window):
+    def fake_heartbeat_detail(self, window=3.0):
         captured["window"] = window
-        return None, None
+        return HeartbeatSample("unmeasurable", 0, None)
 
-    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel._sample_twice", fake_sample_twice)
+    # Patched at the PUBLIC entry point this tool actually calls. An earlier
+    # version reached past it to the channel's sampling internals, which then
+    # changed arity underneath the patch -- a test breaking on a private
+    # signature it had no business knowing.
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.heartbeat_detail", fake_heartbeat_detail)
     tools.bridge_status(window=10_000)
     assert captured["window"] == bridge.STATUS_WINDOW_MAX
 
@@ -1656,6 +1669,14 @@ async def test_the_tool_descriptions_do_not_contradict_the_code():
     # bridge_clear refuses on a running server before it probes anything.
     assert "session started is running" in listed["bridge_clear"]
 
+    # The window question was answered with documentation rather than a
+    # different number, which makes the documentation the deliverable: what a
+    # missing state file now costs, and the way out of paying it.
+    status_desc = listed["bridge_status"]
+    assert "window=0" in status_desc
+    assert "full window" in status_desc.lower()
+    assert re.search(r"\d+\.\d+s", status_desc), "the measured cost is gone"
+
 
 # --- M4b: the live session id, on every answer that read one ------------------
 
@@ -1907,3 +1928,97 @@ def test_bridge_clear_floors_its_probe_window(tmp_path, monkeypatch):
     assert captured["probe_window"] == bridge.CLEAR_PROBE_MIN_SECONDS
     tools.bridge_clear(probe_window=10_000)
     assert captured["probe_window"] == bridge.STATUS_WINDOW_MAX
+
+
+# --- Round 6: the halves that could rot silently ------------------------------
+
+
+def test_two_different_fields_failing_in_turn_is_not_a_schema_bug(tmp_path, monkeypatch):
+    """The SAME-FIELD half of the repeat requirement, which the top-level
+    counted-read test does not reach: it proves a rejection must appear twice,
+    not that it must be the same one twice.
+
+    A file being written through can reject on `tick` at one instant and on
+    `session_id` at the next -- two different fields, neither of them a
+    consistent shape anybody is publishing. Blaming either would send an author
+    to correct a field that is fine, which is the whole failure mode this
+    mechanism exists to prevent."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.01)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": "7", "session_id": "w"}), encoding="utf-8"
+    )
+
+    reads = {"n": 0}
+    fields = ["tick", "session_id"]
+
+    def a_different_field_each_time(self):
+        # Driven from the read, and counted, for the same reason the other
+        # repeat tests are: a timed version passes with the mechanism removed.
+        reads["n"] += 1
+        return ParseRejection(fields[min(reads["n"], len(fields)) - 1], "wrong", "x")
+
+    monkeypatch.setattr(
+        "dayz_mcp.bridge.channel.Channel.read_state_rejection", a_different_field_each_time
+    )
+
+    r = tools.bridge_status(window=0.1)
+
+    assert reads["n"] == 2, f"the rejection was checked {reads['n']} time(s), not twice"
+    assert r.data["state"] != "invalid_state", r.data
+    assert r.data["invalid_field"] is None
+
+
+def test_the_same_field_twice_is_still_named(tmp_path, monkeypatch):
+    """The other side of that rule, so the fix cannot be "never accuse"."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.01)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": "7", "session_id": "w"}), encoding="utf-8"
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "invalid_state", r.data
+    assert r.data["invalid_field"] == "tick"
+
+
+# --- The wiring-up state must not be sent into a refusal ----------------------
+
+
+def test_the_unwired_answer_names_what_actually_works(tmp_path, monkeypatch):
+    """The exact state a bridge is wired up in: server running, bridge not
+    loaded, a command already sent. The answer used to say bridge_clear discards
+    it -- and bridge_clear then refuses, on this tool's own liveness gate, for a
+    command nothing in that world can possibly claim. An instruction that leads
+    to a refusal is worse than none: it costs a call to find out.
+
+    Asserted by FOLLOWING it, not by matching a string."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    mailbox = profiles / CMD_FILENAME
+    mailbox.write_text('{"id": "spawn-2", "verb": "spawn", "args": {}}', encoding="utf-8")
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    status = tools.bridge_status(window=0.1)
+    assert status.data["state"] == "no_state_file"
+    assert status.data["mailbox"]["present"] is True
+
+    # What the answer says to do has to be a thing that works from here.
+    assert "force=True" in status.error or "force=True" in status.hint
+    assert not tools.bridge_clear().ok  # the plain call really would refuse
+    followed = tools.bridge_clear(force=True)
+    assert followed.ok, f"the instruction led to a refusal: {followed.error} | {followed.hint}"
+    assert followed.data["discarded_id"] == "spawn-2"
