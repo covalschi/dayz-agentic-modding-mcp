@@ -154,13 +154,35 @@ def server_start(timeout: float = 420) -> Result:
     return ok({"job_id": job.id, "since": since})
 
 
-def server_stop() -> Result:
-    pid = session.server_pid()
-    if not pid:
+def server_stop(pid: int = 0) -> Result:
+    """Stop a server this session is responsible for.
+
+    With no `pid`, stops the session's own currently tracked server (the
+    original behaviour). With `pid`, stops that specific process instead --
+    but only if this session started it at some point, or it was reported as
+    `orphaned_server_pid` by project_open after a project switch (see
+    session.known_pid). Any other pid is refused: this is the only way an
+    orphaned server can be reached at all, and it must not become a general
+    process killer.
+    """
+    if pid:
+        if not session.known_pid(pid):
+            return fail(
+                f"pid {pid} is not one this session started or reported as orphaned",
+                hint="server_stop(pid=...) only accepts a pid this session's own server_start "
+                     "produced, or a pid project_open reported as orphaned_server_pid",
+            )
+        stopped = stop(pid)
+        if pid == session.server_pid():
+            session.set_server_pid(0)
+        return ok({"stopped": stopped, "pid": pid})
+
+    session_pid = session.server_pid()
+    if not session_pid:
         return ok({"stopped": False, "reason": "no server was started by this session"})
-    stopped = stop(pid)
+    stopped = stop(session_pid)
     session.set_server_pid(0)
-    return ok({"stopped": stopped, "pid": pid})
+    return ok({"stopped": stopped, "pid": session_pid})
 
 
 def server_status(pulse_seconds: float = 1.0) -> Result:

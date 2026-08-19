@@ -14,6 +14,7 @@ from dayz_mcp.packer import PackResult
 from dayz_mcp.procs import is_alive as procs_is_alive
 from dayz_mcp.procs import spawn as procs_spawn
 from dayz_mcp.procs import stop as procs_stop
+from dayz_mcp.profile import load_profile
 from dayz_mcp.tools import jobs_api, lifecycle, session
 
 PROFILE = """
@@ -634,6 +635,111 @@ def test_opening_a_new_project_does_not_inherit_or_kill_a_previous_projects_serv
         # server_stop from B's session must be a no-op for A's process.
         stopped = tools.server_stop()
         assert stopped.data["stopped"] is False
+        assert procs_is_alive(real_pid)
+    finally:
+        procs_stop(real_pid)
+
+
+# --- Review round 2, regression fix: reopening the SAME project must not drop
+# a server this session already has running ---
+
+
+def test_reopening_the_same_project_keeps_the_running_server(tmp_path):
+    session.reset()
+    root = tmp_path / "proj"
+    root.mkdir()
+    make_project(root)
+    tools.project_open(str(root))
+
+    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    session.set_server_pid(real_pid)
+    try:
+        assert procs_is_alive(real_pid)
+
+        # Simulate an agent editing dayz-mcp.local.toml and reopening the same root.
+        reopened = tools.project_open(str(root))
+        assert reopened.ok, reopened.error
+        assert "orphaned_server_pid" not in reopened.data
+
+        assert session.server_pid() == real_pid
+        status = tools.project_status()
+        assert status.data["server_running"] is True
+
+        stopped = tools.server_stop()
+        assert stopped.data["stopped"] is True
+        assert stopped.data["pid"] == real_pid
+        assert not procs_is_alive(real_pid)
+    finally:
+        if procs_is_alive(real_pid):
+            procs_stop(real_pid)
+
+
+def test_set_project_resolves_paths_before_comparing_them(tmp_path):
+    """A relative-looking path to the same root (here, one with a redundant '.'
+    segment) must still count as the same project as the original absolute
+    Profile.root -- proving the comparison resolves both sides rather than
+    comparing raw strings."""
+    session.reset()
+    root = make_project(tmp_path)
+    loaded = load_profile(str(root))
+    assert loaded.ok, loaded.error
+    session.set_project(loaded.data, None, None)
+    session.set_server_pid(999)
+
+    loaded_again = load_profile(str(root) + "/.")
+    assert loaded_again.ok, loaded_again.error
+    switch = session.set_project(loaded_again.data, None, None)
+    assert switch["orphaned_server_pid"] == 0
+    assert session.server_pid() == 999
+
+
+# --- Review round 2: server_stop(pid=...) closes the orphaned-server
+# reachability hole, guarded against stopping an arbitrary pid ---
+
+
+def test_server_stop_with_pid_can_stop_an_orphaned_server(tmp_path):
+    session.reset()
+    root_a = tmp_path / "a"
+    root_a.mkdir()
+    make_project(root_a)
+    tools.project_open(str(root_a))
+
+    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    session.set_server_pid(real_pid)
+    try:
+        root_b = tmp_path / "b"
+        root_b.mkdir()
+        make_project(root_b)
+        opened_b = tools.project_open(str(root_b))
+        assert opened_b.data.get("orphaned_server_pid") == real_pid
+        assert session.server_pid() == 0  # B's own session has no server
+
+        # Without a pid, server_stop only ever touches B's own (absent) server.
+        blind = tools.server_stop()
+        assert blind.data["stopped"] is False
+        assert procs_is_alive(real_pid)
+
+        # With the orphaned pid, it can actually be reached and stopped.
+        stopped = tools.server_stop(pid=real_pid)
+        assert stopped.data["stopped"] is True
+        assert stopped.data["pid"] == real_pid
+        assert not procs_is_alive(real_pid)
+    finally:
+        if procs_is_alive(real_pid):
+            procs_stop(real_pid)
+
+
+def test_server_stop_refuses_a_pid_the_session_never_touched(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+
+    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    try:
+        # This session never started `real_pid` and was never told it is orphaned.
+        r = tools.server_stop(pid=real_pid)
+        assert not r.ok
+        assert str(real_pid) in r.error
         assert procs_is_alive(real_pid)
     finally:
         procs_stop(real_pid)
