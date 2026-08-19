@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 from pathlib import Path
 
-from ..bridge.channel import STATE_FILENAME, Channel
+from ..bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..packer import pack_one
@@ -99,6 +100,22 @@ def wiring_instructions() -> str:
         f'add "{bridge_mod_dir().as_posix()}" to mods.extra and "@{BRIDGE_MOD_NAME}" to '
         f"mods.server_only in dayz-mcp.local.toml, so server_start passes it as -serverMod"
     )
+
+
+def _mailbox_view(mailbox: Path) -> dict:
+    """What the command mailbox looks like from outside the game.
+
+    Reported on every answer, because "is a command sitting there" is a fact a
+    caller cannot get any other way and cannot guess from the rest: only the
+    MOD ever empties this file (it deletes it as it claims the command), so
+    with no mod running it is not a queue, it is a wedge -- and one that
+    survives into the next boot, since the -profiles directory is reused.
+    """
+    try:
+        age = round(max(0.0, time.time() - mailbox.stat().st_mtime), 1)
+    except OSError:
+        return {"present": False, "path": str(mailbox), "age_seconds": None}
+    return {"present": True, "path": str(mailbox), "age_seconds": age}
 
 
 def _window_hint() -> str:
@@ -280,6 +297,10 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                         file outlives the server that wrote it, and reading a
                         leftover snapshot as a live bridge is precisely the lie
                         this ordering prevents.
+      stale_command     the same, but with a command still sitting in the
+                        mailbox. Its own answer because the remedy is its own:
+                        nothing but the mod removes that file, and the next
+                        boot executes it instead of discarding it.
       no_state_file /   the server is up but the mod never published anything --
       unreadable_state  almost always "the bridge is not in -serverMod", or was
                         never built. Told apart because the fixes differ.
@@ -293,16 +314,35 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     window = max(0.0, min(window, STATUS_WINDOW_MAX))
     profiles = server_profiles_dir()
     state_file = profiles / STATE_FILENAME
+    mailbox = _mailbox_view(profiles / CMD_FILENAME)
     pid = session.server_pid()
     base = {
         "server_pid": pid,
         "state_file": str(state_file),
+        "mailbox": mailbox,
         "window": window,
         "tick": None,
         "advancing": None,
     }
 
     if not (pid and is_alive(pid, image=session.server_image())):
+        if mailbox["present"]:
+            # Not the same answer as "no server". Only the mod ever removes
+            # this file, so with nothing running it can never be claimed --
+            # and server_start reuses the -profiles directory, so the command
+            # does not expire, it WAITS. The next boot's first tick runs it,
+            # minutes or days later, as if it had just been sent.
+            return _not_alive(
+                "stale_command",
+                base,
+                f"no server is running, and a command has been sitting unclaimed in "
+                f"{mailbox['path']} for {mailbox['age_seconds']}s -- nothing can claim it "
+                "while the stand is down, and it will be executed by the first tick of the "
+                "NEXT boot rather than expiring",
+                hint=f"delete {mailbox['path']} before starting the server, unless that "
+                     "command really is meant to run on the next boot; then server_start and "
+                     "bridge_status again",
+            )
         return _not_alive(
             "no_server",
             base,
@@ -341,10 +381,20 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                      "parses means the mod is writing something it cannot finish -- check "
                      "log_verdict and log_tail for script errors, and rebuild with bridge_build",
             )
+        waiting = ""
+        if mailbox["present"]:
+            # The bridge is not loaded, so nothing will ever claim this -- and
+            # the moment the wiring is fixed, the first tick runs a command
+            # sent long before. Better said here than discovered then.
+            waiting = (
+                f"; a command has also been waiting unclaimed in {mailbox['path']} for "
+                f"{mailbox['age_seconds']}s, and it will run at the first tick once the "
+                "bridge does load"
+            )
         return _not_alive(
             "no_state_file",
             base,
-            f"the server is running but the bridge has never written {state_file}",
+            f"the server is running but the bridge has never written {state_file}{waiting}",
             hint=f"build it with bridge_build, then let the stand load it: {wiring_instructions()}",
         )
 

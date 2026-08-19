@@ -6,6 +6,14 @@ name and the prefix; the key pair is whatever lies in <root>/keys.
 The stale-pbo check exists because packing can fail without FileBank saying so:
 a running server holds the old pbo open, the new one is never written, and the
 build silently ships yesterday's code.
+
+Contract for callers, on signatures: a pbo that was genuinely rewritten never
+keeps a signature produced for an earlier one. `pack_one` clears every
+`<name>.pbo.*.bisign` beside a freshly written pbo before deciding whether it
+can sign a new one, so `signed=False` in the result means there is no signature
+on disk either -- not "the old one is still there". A build that FAILED (no
+pbo, or the stale-pbo refusal) leaves the previous pbo and its signature alone,
+because that pair still describes each other.
 """
 from __future__ import annotations
 
@@ -390,6 +398,23 @@ def pack_one(
                       "(a running server usually holds the old file open)",
             )
 
+        # A new pbo is on disk, so every signature next to it describes a file
+        # that no longer exists. Removing them is UNCONDITIONAL, and that is
+        # the point: this used to live two levels down, inside `if priv:` and
+        # then inside `if signer.exists():`, so a build with the key gone (or
+        # with the signer missing) left the previous signature sitting over the
+        # new artifact while the result said "unsigned". A stand that verifies
+        # signatures then rejects the mod, and every tool in the chain reports
+        # success -- worse than no signature at all, because there is no
+        # workflow in which keeping one is the desired outcome.
+        #
+        # Deliberately AFTER the stale-pbo check above, which returns early:
+        # when packing did not really happen the old pbo is still the old pbo,
+        # and its signature still describes it correctly. Only a pbo that was
+        # genuinely rewritten invalidates them.
+        for old_sig in out_dir.glob(f"{name}.pbo.*.bisign"):
+            old_sig.unlink(missing_ok=True)
+
         # Determine signing state and collect notes
         keys_dir = root / "keys"
         all_priv_keys = sorted(keys_dir.glob("*.biprivatekey")) if keys_dir.is_dir() else []
@@ -407,8 +432,8 @@ def pack_one(
         if priv:
             signer = Path(tools) / SIGNER_REL
             if signer.exists():
-                for old in out_dir.glob(f"{name}.pbo.*.bisign"):
-                    old.unlink()
+                # Stale signatures are already gone (above), for every path
+                # through this function rather than only for this one.
                 run_blocking(sign_cmd(signer, priv, pbo), root, log_path.with_suffix(".sign.log"), timeout=300)
                 signed = any(out_dir.glob(f"{name}.pbo.*.bisign"))
                 if len(all_priv_keys) > 1:

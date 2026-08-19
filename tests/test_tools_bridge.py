@@ -17,7 +17,7 @@ import pytest
 
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
-from dayz_mcp.bridge.channel import STATE_FILENAME
+from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME
 from dayz_mcp.packer import PackResult
 from dayz_mcp.tools import bridge, session
 
@@ -545,6 +545,84 @@ def test_bridge_status_says_no_server_rather_than_calling_the_bridge_dead(tmp_pa
     assert "server_start" in r.hint
     # It must not blame the bridge for something the bridge cannot control.
     assert "bridge is dead" not in r.error.lower()
+
+
+def test_bridge_status_reports_a_command_wedged_in_a_stopped_stand(tmp_path):
+    """Nothing but the mod ever empties the mailbox, and a stopped stand keeps
+    its profile directory. So a command sent while the server was down sits
+    there forever AND executes at the first tick of the next boot -- a specific,
+    diagnosable situation that nothing reported before this."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    mailbox = profiles / CMD_FILENAME
+    mailbox.write_text('{"id": "spawn-1", "verb": "spawn", "args": {}}', encoding="utf-8")
+
+    r = tools.bridge_status(window=0.1)
+    assert not r.ok
+    assert r.data["state"] == "stale_command"
+    assert r.data["mailbox"]["present"] is True
+    assert r.data["mailbox"]["path"] == str(mailbox)
+    assert r.data["mailbox"]["age_seconds"] is not None
+    # The hazard is not "a file is here", it is "this runs when you next boot".
+    assert "next" in r.error.lower() or "boot" in r.error.lower()
+    assert str(mailbox) in r.hint
+
+
+def test_bridge_status_surfaces_an_unclaimed_command_while_the_bridge_is_unwired(tmp_path, monkeypatch):
+    """The same wedge with the server UP: the bridge was never attached, so
+    nothing will ever claim the command. The state stays no_state_file -- that
+    is still the fix to make -- but the waiting command has to be visible, or
+    the agent wires the bridge and is then surprised by a command it sent
+    minutes ago running at the first tick."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    (profiles / CMD_FILENAME).write_text('{"id": "ping-1", "verb": "ping", "args": {}}', encoding="utf-8")
+
+    r = tools.bridge_status(window=0.1)
+    assert not r.ok
+    assert r.data["state"] == "no_state_file"
+    assert r.data["mailbox"]["present"] is True
+    assert "unclaimed" in r.error.lower() or "waiting" in r.error.lower()
+
+
+def test_bridge_status_reports_the_mailbox_on_every_path(tmp_path, monkeypatch):
+    """Including the healthy one: an empty mailbox is a fact worth stating
+    once, so a caller never has to guess whether the field is missing or the
+    mailbox is clear."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    stop = threading.Event()
+
+    def ticker():
+        n = 1
+        while not stop.is_set():
+            write_state(profiles, tick=n)
+            n += 1
+            time.sleep(0.02)
+
+    write_state(profiles, tick=1)
+    worker = threading.Thread(target=ticker, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.3)
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["mailbox"]["present"] is False
+    assert r.data["mailbox"]["age_seconds"] is None
 
 
 def test_bridge_status_does_not_read_a_leftover_state_file_as_a_live_bridge(tmp_path):

@@ -1258,3 +1258,103 @@ def test_pack_one_staging_dir_removed_after_success_and_after_failure(tmp_path, 
     assert result2.error != ""
     assert len(captured_staging_roots) == 2
     assert not captured_staging_roots[1].exists()
+
+
+# --- A signature that no longer describes the pbo beside it -------------------
+#
+# The cleanup used to sit inside `if priv:` and then inside `if signer.exists():`,
+# so a build with the key gone kept the previous signature over a brand-new pbo
+# while the result reported signed=False. A stand that verifies signatures then
+# rejects the mod, and every tool in the chain reports success.
+
+
+def _pbo_writing_filebank(root: Path, name: str = "MyMod", body: bytes = b"fresh pbo"):
+    def run(cmd, cwd, log_path, timeout=None):
+        out_dir = root / f"@{name}" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{name}.pbo").write_bytes(body)
+        return 0, "FileBank ok"
+    return run
+
+
+def _mod_source(root: Path, name: str = "MyMod") -> Path:
+    src = root / name
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    return src
+
+
+def _stub_filebank_tools(tmp_path: Path) -> Path:
+    tools = tmp_path / "tools"
+    (tools / "Bin" / "PboUtils").mkdir(parents=True, exist_ok=True)
+    (tools / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
+    return tools
+
+
+def test_pack_one_removes_a_signature_it_cannot_replace(tmp_path, monkeypatch):
+    """No key pair at all: the build is unsigned, and the leftover signature
+    from when there WAS a key must not survive next to the new pbo."""
+    root = tmp_path / "root"
+    _mod_source(root)
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    stale = out_dir / "MyMod.pbo.OldKey.bisign"
+    stale.write_bytes(b"signature of a pbo that no longer exists")
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _pbo_writing_filebank(root))
+    result = pack_one("MyMod", root, _stub_filebank_tools(tmp_path), root / "build.log")
+
+    assert result.error == "", result.error
+    assert result.signed is False
+    assert not stale.exists(), "a signature survived a rebuild it does not describe"
+    assert not list(out_dir.glob("*.bisign"))
+
+
+def test_pack_one_removes_a_stale_signature_when_the_signer_is_missing(tmp_path, monkeypatch):
+    """The other half of the old nesting: a key IS present, but the signing
+    executable is not, so nothing new can be written -- and the old signature
+    used to stay."""
+    root = tmp_path / "root"
+    _mod_source(root)
+    keys = root / "keys"
+    keys.mkdir()
+    (keys / "TheKey.biprivatekey").write_bytes(b"private")
+    (keys / "TheKey.bikey").write_bytes(b"public")
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    stale = out_dir / "MyMod.pbo.TheKey.bisign"
+    stale.write_bytes(b"old signature")
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _pbo_writing_filebank(root))
+    result = pack_one("MyMod", root, _stub_filebank_tools(tmp_path), root / "build.log")
+
+    assert result.error == ""
+    assert result.signed is False
+    assert "signer executable not found" in result.note
+    assert not stale.exists()
+
+
+def test_pack_one_keeps_the_signature_when_the_build_did_not_happen(tmp_path, monkeypatch):
+    """The limit of the rule. On the stale-pbo refusal the OLD pbo is still on
+    disk untouched, so its signature still describes it exactly -- deleting it
+    would turn a detected non-build into a broken artifact."""
+    root = tmp_path / "root"
+    src = _mod_source(root)
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    pbo = out_dir / "MyMod.pbo"
+    pbo.write_bytes(b"yesterday's pbo")
+    sig = out_dir / "MyMod.pbo.TheKey.bisign"
+    sig.write_bytes(b"signature that still matches it")
+    old = time.time() - 5000
+    os.utime(pbo, (old, old))
+    os.utime(sig, (old, old))
+    newer = time.time() - 100
+    os.utime(src / "config.cpp", (newer, newer))
+
+    # FileBank's silent skip: exit 0, nothing written.
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", lambda *a, **kw: (0, "nothing to do"))
+    result = pack_one("MyMod", root, _stub_filebank_tools(tmp_path), root / "build.log")
+
+    assert "stale pbo" in result.error
+    assert sig.exists(), "a detected non-build destroyed a signature that was still valid"

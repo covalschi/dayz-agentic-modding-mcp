@@ -115,6 +115,12 @@ server_only = ["@DZMCP_Bridge"]
 the stand boots perfectly well and `bridge_status` reports that the bridge never
 wrote any state — which is true, and easy to mistake for a broken bridge.
 
+`bridge_status` also reports the command mailbox, because only the mod ever
+empties it: a command sent while the stand was down, or before the bridge was
+attached, is not discarded — it waits in the profile directory and runs at the
+first tick of the next boot. That state comes back as `stale_command`, with the
+file to delete if that is not what you want.
+
 ## Known limitations
 
 * **Stale-pbo detection is mtime-based, not content-based.** `mod_build`

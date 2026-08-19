@@ -1241,3 +1241,41 @@ def test_server_start_refuses_when_a_custom_config_resolves_outside_stand_root(t
     r = tools.server_start(timeout=5)
     assert not r.ok
     assert "outside stand_root" in r.error
+
+
+# --- Phase-1 defect, reachable through the tool a real user calls: a rebuild
+# with the signing key gone used to leave the PREVIOUS signature over the new
+# pbo, while mod_build reported the build as unsigned and successful. ---
+
+
+def test_mod_build_does_not_leave_a_signature_over_a_pbo_it_no_longer_describes(tmp_path, monkeypatch):
+    """The user-facing half of packer.py's stale-signature fix: this goes
+    through mod_build and the REAL packer, with only FileBank stubbed out. A
+    project that was signed once, then builds on a machine without the private
+    key, must end up with no signature at all -- not one covering a pbo that
+    was replaced underneath it, which a signature-verifying stand rejects while
+    every tool in the chain reports success."""
+    session.reset()
+    root = make_project(tmp_path)
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    stale = out_dir / "MyMod.pbo.TheKey.bisign"
+    stale.write_bytes(b"signed when this machine still had the key")
+
+    tools_root = tmp_path / "tools"
+    (tools_root / "Bin" / "PboUtils").mkdir(parents=True)
+    (tools_root / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    def filebank_that_writes(cmd, cwd, log_path, timeout=None):
+        (out_dir / "MyMod.pbo").write_bytes(b"a genuinely new pbo")
+        return 0, "FileBank ok"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", filebank_that_writes)
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: str(tools_root))
+    tools.project_open(str(root))
+
+    waited = tools.job_wait(tools.mod_build().data["job_id"], timeout=20)
+    assert waited.data["status"] == "done", waited.data
+    assert "unsigned" in waited.data["summary"]
+    assert not stale.exists(), "the old signature outlived the pbo it described"
+    assert not list(out_dir.glob("*.bisign"))
