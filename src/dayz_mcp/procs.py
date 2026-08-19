@@ -27,12 +27,13 @@ def run_blocking(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8", errors="replace") as fh:
         try:
-            proc = subprocess.run(  # noqa: S603 - command is assembled by us
+            proc = subprocess.Popen(  # noqa: S603 - command is assembled by us
                 cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT,
-                timeout=timeout, check=False,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
-            code = proc.returncode
+            code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            stop(proc.pid)
             fh.write(f"\n[dayz-mcp] timeout after {timeout}s\n")
             code = 124
         except OSError as exc:
