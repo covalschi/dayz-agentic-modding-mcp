@@ -100,7 +100,7 @@ def test_build_runs_as_a_job_and_reports_packing_results(tmp_path, monkeypatch):
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir: [
+        lambda names, root, tools_root, log_dir, exclude=None: [
             PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
         ],
     )
@@ -117,7 +117,7 @@ def test_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir: [PackResult(name="MyMod", error="stale pbo")],
+        lambda names, root, tools_root, log_dir, exclude=None: [PackResult(name="MyMod", error="stale pbo")],
     )
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
     job_id = tools.mod_build().data["job_id"]
@@ -192,7 +192,7 @@ def test_server_start_returns_since_matching_the_job_it_created(tmp_path, monkey
     tools.project_open(str(root))
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 111)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: False)  # dies instantly
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)  # dies instantly
 
     started = tools.server_start(timeout=5)
     assert started.ok, started.error
@@ -217,7 +217,7 @@ def test_server_start_does_not_delete_pre_existing_logs(tmp_path, monkeypatch):
     old_log.write_text("leftover from a previous boot\n", encoding="utf-8")
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 999)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: False)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
 
     job_id = tools.server_start(timeout=5).data["job_id"]
     tools.job_wait(job_id, timeout=5)
@@ -239,7 +239,7 @@ def test_server_start_ignores_a_stale_log_that_already_contains_the_marker(tmp_p
     os.utime(stale, (old_time, old_time))
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 999)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: True)  # keeps "running"
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)  # keeps "running"
 
     job_id = tools.server_start(timeout=3).data["job_id"]
     waited = tools.job_wait(job_id, timeout=8)
@@ -255,7 +255,7 @@ def test_server_start_refuses_when_already_running(tmp_path, monkeypatch):
     root = make_project(tmp_path)
     tools.project_open(str(root))
     session.set_server_pid(4242)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     r = tools.server_start()
     assert not r.ok
     assert "already running" in r.error
@@ -280,7 +280,7 @@ def test_server_start_uses_the_configured_port(tmp_path, monkeypatch):
         return 123
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: False)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
 
     job_id = tools.server_start(timeout=5).data["job_id"]
     tools.job_wait(job_id, timeout=5)
@@ -368,7 +368,7 @@ def test_server_start_passes_an_absolute_config_path(tmp_path, monkeypatch):
         return 123
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid: False)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
 
     job_id = tools.server_start(timeout=5).data["job_id"]
     tools.job_wait(job_id, timeout=5)
@@ -493,7 +493,7 @@ def test_mod_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, m
     tools.project_open(str(root))
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
 
-    def boom(names, root, tools_root, log_dir):
+    def boom(names, root, tools_root, log_dir, exclude=None):
         raise RuntimeError("simulated packer crash")
 
     monkeypatch.setattr("dayz_mcp.tools.build.pack_all", boom)
@@ -535,7 +535,7 @@ def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
     note = "private key present but signer executable not found at C:/tools/Bin/DsUtils/DSSignFile.exe"
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir: [
+        lambda names, root, tools_root, log_dir, exclude=None: [
             PackResult(
                 name="MyMod",
                 pbo=str(root / "@MyMod/addons/MyMod.pbo"),
@@ -765,7 +765,7 @@ def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path
     started = threading.Event()
     release = threading.Event()
 
-    def slow_pack_all(names, root, tools_root, log_dir):
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None):
         started.set()
         assert release.wait(timeout=10), "test never released the worker"
         return [

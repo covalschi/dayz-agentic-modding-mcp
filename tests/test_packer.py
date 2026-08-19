@@ -4,7 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from dayz_mcp.packer import (
-    PackResult, filebank_cmd, find_keys, newest_source_mtime, pack_all, pack_one, sign_cmd,
+    DEFAULT_EXCLUDE, PackResult, config_syntax_cmd, filebank_cmd, find_excluded, find_keys,
+    newest_source_mtime, pack_all, pack_one, sign_cmd,
 )
 
 
@@ -320,3 +321,199 @@ def test_pack_one_with_private_key_but_no_signer(tmp_path, monkeypatch):
     assert result.error == ""
     assert result.signed is False
     assert "signer" in result.note.lower()
+
+
+# --- Requirement: a CfgConvert syntax gate before FileBank (FileBank does not
+# parse config.cpp at all; a syntax error there survives packing and only
+# surfaces after a multi-minute server boot) ---
+
+
+def test_config_syntax_command_shape():
+    cmd = config_syntax_cmd(
+        Path("C:/T/CfgConvert.exe"), Path("C:/r/MyMod/config.cpp"), Path("C:/tmp/out.bin")
+    )
+    assert cmd[0].endswith("CfgConvert.exe")
+    assert "-bin" in cmd
+    assert "-dst" in cmd
+    assert cmd[-1].endswith("config.cpp")
+
+
+def _make_cfgconvert_stub(tools: Path) -> Path:
+    cfgconvert_dir = tools / "Bin" / "CfgConvert"
+    cfgconvert_dir.mkdir(parents=True, exist_ok=True)
+    exe = cfgconvert_dir / "CfgConvert.exe"
+    exe.write_text("stub", encoding="utf-8")
+    return exe
+
+
+def test_pack_one_rejects_a_config_cpp_syntax_error_before_filebank_runs(tmp_path, monkeypatch):
+    """FileBank does not parse config.cpp, so a syntax error there would
+    otherwise survive packing silently. CfgConvert must catch it and refuse to
+    pack, naming the file, before FileBank is ever invoked."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods { garbage", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    _make_cfgconvert_stub(tools)
+
+    log_path = root / "build.log"
+    calls = []
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        calls.append(cmd)
+        return 1, "Error: config.cpp(1): ';' encountered instead of '}'"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+
+    assert result.error != ""
+    assert "config.cpp" in result.error
+    # FileBank must never have been invoked: exactly the one CfgConvert call.
+    assert len(calls) == 1
+    assert calls[0][0].endswith("CfgConvert.exe")
+
+
+def test_pack_one_proceeds_when_cfgconvert_is_not_available(tmp_path, monkeypatch):
+    """When DayZ Tools does not have CfgConvert (e.g. a partial install), the
+    gate must not block packing outright -- FileBank is still the thing doing
+    the real work, and this is a bonus authoritative check, not a hard
+    dependency."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    # No CfgConvert.exe anywhere under tools.
+
+    log_path = root / "build.log"
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+    assert result.error == ""
+    assert result.pbo != ""
+
+
+def test_pack_one_runs_cfgconvert_with_cwd_in_the_configs_own_folder(tmp_path, monkeypatch):
+    """Relative #include directives in config.cpp only resolve if CfgConvert
+    runs with its working directory set to config.cpp's own folder."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    _make_cfgconvert_stub(tools)
+
+    log_path = root / "build.log"
+    captured_cwd = []
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        captured_cwd.append(Path(cwd))
+        if str(cmd[0]).endswith("CfgConvert.exe"):
+            return 0, "ok"
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+    assert result.error == ""
+    assert captured_cwd[0] == src_dir
+
+
+# --- Requirement: refuse to pack instead of silently including .git/.blend/etc ---
+
+
+def test_find_excluded_reports_a_nested_git_directory(tmp_path):
+    (tmp_path / "config.cpp").write_text("", encoding="utf-8")
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    found = find_excluded(tmp_path, DEFAULT_EXCLUDE)
+    assert found == [".git"]
+
+
+def test_find_excluded_matches_blend_globs():
+    import fnmatch
+    assert fnmatch.fnmatch("scene.blend", "*.blend")
+    assert fnmatch.fnmatch("scene.blend1", "*.blend1")
+    assert not fnmatch.fnmatch("scene.blend", "*.blend1")
+
+
+def test_pack_one_refuses_when_git_is_present(tmp_path):
+    """FileBank packs the source directory whole. A .git folder inside it
+    would end up in the published pbo -- refuse instead of shipping it."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (src_dir / ".git").mkdir()
+    (src_dir / ".git" / "config").write_text("", encoding="utf-8")
+
+    log_path = root / "build.log"
+    # tools deliberately does not exist -- proves the refusal happens before
+    # packing is even attempted, not as a side effect of FileBank being missing.
+    result = pack_one("MyMod", root, tmp_path / "no-such-tools", log_path)
+
+    assert result.error != ""
+    assert ".git" in result.error
+    assert result.pbo == ""
+
+
+def test_pack_one_succeeds_with_git_present_when_exclude_list_is_empty(tmp_path, monkeypatch):
+    """An empty exclude list (explicit opt-out) must not block packing."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (src_dir / ".git").mkdir()
+    (src_dir / ".git" / "config").write_text("", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, exclude=[])
+    assert result.error == ""
+    assert result.pbo != ""

@@ -16,6 +16,7 @@ from pathlib import Path
 GAME_PROBE = "DayZDiag_x64.exe"
 FILEBANK_REL = "Bin/PboUtils/FileBank.exe"
 SIGNER_REL = "Bin/DsUtils/DSSignFile.exe"
+CFGCONVERT_REL = "Bin/CfgConvert/CfgConvert.exe"
 TOOLS_PROBE = FILEBANK_REL
 
 

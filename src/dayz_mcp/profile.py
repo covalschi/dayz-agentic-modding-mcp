@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import Result, fail, ok
+from .packer import DEFAULT_EXCLUDE
 
 MAIN_NAME = "dayz-mcp.toml"
 LOCAL_NAME = "dayz-mcp.local.toml"
@@ -29,6 +30,9 @@ LOCAL_NAME = "dayz-mcp.local.toml"
 class BuildCfg:
     mods: list[str] = field(default_factory=list)
     pre_script: str = ""
+    # What pack_one refuses to ship inside a mod's pbo -- see packer.py's
+    # DEFAULT_EXCLUDE for why these three are the default.
+    exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
 
 
 @dataclass
@@ -135,9 +139,18 @@ def load_profile(path: str | Path) -> Result:
             hint='write it as mods = ["MyMod"], not a bare value',
         )
 
+    # Check build.exclude is a list
+    exclude_val = b.get("exclude", list(DEFAULT_EXCLUDE))
+    if not isinstance(exclude_val, list):
+        return fail(
+            f"build.exclude must be a list, got {type(exclude_val).__name__}",
+            hint='write it as exclude = [".git", "*.blend"], not a bare value',
+        )
+
     build = BuildCfg(
         mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
+        exclude=[str(x) for x in exclude_val],
     )
     if not build.mods:
         return fail(
@@ -146,10 +159,21 @@ def load_profile(path: str | Path) -> Result:
                  "the pbo and the @folder all follow from the name",
         )
     for mod in build.mods:
-        if not (root / mod).is_dir():
+        mod_dir = root / mod
+        if not mod_dir.is_dir():
             return fail(
-                f"source directory not found for {mod}: {root / mod}",
+                f"source directory not found for {mod}: {mod_dir}",
                 hint="build.mods names directories next to the profile",
+            )
+        # A folder without its own config.cpp packs into a pbo the engine
+        # silently ignores (CfgPatches/CfgMods never register), so nothing
+        # ever tells the person who built it that it did nothing.
+        if not (mod_dir / "config.cpp").is_file():
+            return fail(
+                f"{mod}/config.cpp not found",
+                hint=f"a mod folder needs its own config.cpp to be packed into anything the "
+                     f"engine will load; create {mod_dir / 'config.cpp'}, or remove {mod} "
+                     "from build.mods",
             )
     if build.pre_script and not (root / build.pre_script).exists():
         return fail(

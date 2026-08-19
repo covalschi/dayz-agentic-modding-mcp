@@ -54,7 +54,7 @@ def project_status() -> Result:
             "name": prof.name,
             "root": str(prof.root),
             "server_pid": pid,
-            "server_running": is_alive(pid) if pid else False,
+            "server_running": is_alive(pid, image=session.server_image()) if pid else False,
             "jobs": [j.to_dict() for j in session.jobs().all()[-10:]],
         }
     )

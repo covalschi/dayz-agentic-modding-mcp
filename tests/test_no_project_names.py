@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {
     "@MyMod", "@Dep", "@SomeDependency", "@CF", "@B",
     # Python decorators and metadata
-    "@dataclass", "@pytest", "@functools", "@folder",
+    "@dataclass", "@pytest", "@functools", "@folder", "@contextmanager",
     # Generic examples and test fixtures
     "@Name", "@ModName", "@ServerOnlyMod",
 }

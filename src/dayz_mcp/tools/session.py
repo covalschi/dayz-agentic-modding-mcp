@@ -9,14 +9,14 @@ from ..profile import Profile
 
 _state: dict = {
     "profile": None, "jobs": None, "game": None, "tools": None,
-    "server_pid": 0, "known_pids": set(),
+    "server_pid": 0, "server_image": "", "known_pids": set(),
 }
 
 
 def reset() -> None:
     _state.update({
         "profile": None, "jobs": None, "game": None, "tools": None,
-        "server_pid": 0, "known_pids": set(),
+        "server_pid": 0, "server_image": "", "known_pids": set(),
     })
 
 
@@ -58,7 +58,11 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
 
     orphaned_server_pid = 0
     if not same_project:
-        if prev_pid and is_alive(prev_pid):
+        # Pass the recorded image name (may be "", meaning "not known" -- then
+        # this degrades to the old pid-only check): a dead server's pid can be
+        # recycled by an unrelated Windows process, and a bare pid check would
+        # then report someone else's process as this project's orphaned server.
+        if prev_pid and is_alive(prev_pid, image=_state["server_image"]):
             orphaned_server_pid = prev_pid
         _state["server_pid"] = 0
         store = JobStore(Path(profile.root) / ".dayz-mcp" / "jobs")
@@ -91,10 +95,25 @@ def server_pid() -> int:
     return int(_state["server_pid"] or 0)
 
 
-def set_server_pid(pid: int) -> None:
+def set_server_pid(pid: int, image: str = "") -> None:
+    """Record the pid this session's server is running under.
+
+    `image` (e.g. "DayZDiag_x64.exe") is what `is_alive` checks against a
+    recycled pid -- see its docstring. Clearing the pid (pid=0, the normal
+    server_stop path) intentionally leaves the last known image in place
+    rather than blanking it: it is a project-wide constant, not something
+    tied to one particular boot, and a later server_stop(pid=...) for a pid
+    orphaned by a project switch (see set_project) still needs it.
+    """
     _state["server_pid"] = pid
+    if image:
+        _state["server_image"] = image
     if pid:
         _state["known_pids"].add(int(pid))
+
+
+def server_image() -> str:
+    return str(_state["server_image"] or "")
 
 
 def known_pid(pid: int) -> bool:

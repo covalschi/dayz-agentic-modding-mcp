@@ -1,5 +1,6 @@
 from pathlib import Path
 import textwrap
+from dayz_mcp.packer import DEFAULT_EXCLUDE
 from dayz_mcp.profile import load_profile
 
 BASE = """
@@ -49,6 +50,18 @@ def test_missing_source_directory_is_rejected(tmp_path):
     r = load_profile(d)
     assert not r.ok
     assert "MyMod" in r.error
+
+
+def test_mod_folder_without_config_cpp_is_rejected(tmp_path):
+    """A folder without its own config.cpp packs into a pbo the engine will
+    silently ignore -- load_profile must refuse before that ever happens,
+    not just when the folder itself is missing."""
+    d = write(tmp_path, BASE)
+    (d / "MyMod" / "config.cpp").unlink()
+    r = load_profile(d)
+    assert not r.ok
+    assert "MyMod/config.cpp" in r.error
+    assert "config.cpp" in r.hint
 
 
 def test_missing_profile_is_a_clear_failure(tmp_path):
@@ -281,6 +294,28 @@ def test_local_supplies_server_only_mods(tmp_path):
 def test_server_only_mods_default_to_empty(tmp_path):
     p = load_profile(write(tmp_path, BASE)).data
     assert p.mods.server_only == []
+
+
+# --- Requirement: build.exclude (what pack_one refuses to ship whole) is a
+# profile-level key with a safe default ---
+
+
+def test_build_exclude_defaults_to_git_and_blend(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.build.exclude == list(DEFAULT_EXCLUDE)
+
+
+def test_build_exclude_can_be_overridden(tmp_path):
+    custom = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nexclude = [".svn"]')
+    p = load_profile(write(tmp_path, custom)).data
+    assert p.build.exclude == [".svn"]
+
+
+def test_build_exclude_as_scalar_is_rejected(tmp_path):
+    bad = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nexclude = ".git"')
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "build.exclude must be a list" in r.error
 
 
 def test_malformed_error_regex_is_rejected(tmp_path):

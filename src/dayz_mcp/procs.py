@@ -29,6 +29,10 @@ def run_blocking(
         try:
             proc = subprocess.Popen(  # noqa: S603 - command is assembled by us
                 cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT,
+                # This server talks MCP over stdio: its own stdin is a live
+                # JSON-RPC pipe. Without this, a child inherits that handle and
+                # can read from it, stealing input meant for the server.
+                stdin=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
             code = proc.wait(timeout=timeout)
@@ -46,12 +50,25 @@ def run_blocking(
 def spawn(cmd: list[str], cwd: Path) -> int:
     proc = subprocess.Popen(  # noqa: S603
         cmd, cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        # See run_blocking: never let a spawned process (the test server, the
+        # diagnostic client) inherit this server's own live stdin pipe.
+        stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     return proc.pid
 
 
-def is_alive(pid: int) -> bool:
+def is_alive(pid: int, image: str = "") -> bool:
+    """True if `pid` is a running process.
+
+    Windows recycles process ids: a pid recorded for a server that has since
+    died can be handed out to something completely unrelated, and a bare pid
+    check would then report our server as up when it is not -- exactly the
+    direction this project cannot afford to lie in (see `server_status`).
+    When `image` is given (a caller that knows what it spawned, e.g. the
+    exe name `server_start` recorded), the process must also carry that
+    image name in `tasklist`, not just occupy the pid.
+    """
     if pid <= 0:
         return False
     if os.name == "nt":
@@ -59,7 +76,11 @@ def is_alive(pid: int) -> bool:
             ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
             capture_output=True, text=True, check=False,
         ).stdout
-        return str(pid) in out
+        if str(pid) not in out:
+            return False
+        if image and image.lower() not in out.lower():
+            return False
+        return True
     try:
         os.kill(pid, 0)
     except OSError:

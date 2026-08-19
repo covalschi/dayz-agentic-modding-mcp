@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..compilecheck import client_cmd, judge
 from ..errors import Result, fail, ok
+from ..paths import GAME_PROBE
 from ..procs import is_alive, spawn, stop
 from . import session
 from .project import require_project
@@ -14,6 +15,11 @@ from .project import require_project
 # it is actually growing. Kept small and capped so the tool is a quick health check,
 # not a disguised long wait -- long operations belong behind a job_id.
 STATUS_PULSE_MAX = 10.0
+
+# The executable server_start spawns -- also the vanilla probe file paths.py
+# uses to recognise a game install, hence the shared import rather than a
+# second copy of the literal.
+SERVER_IMAGE = GAME_PROBE
 
 
 def _stand() -> Path:
@@ -70,9 +76,10 @@ def server_start(timeout: float = 420) -> Result:
     prof = session.profile()
 
     # A second boot on top of a live one would fight the first for the same port
-    # and the same profiles directory instead of failing loudly.
+    # and the same profiles directory instead of failing loudly. Checked against
+    # the recorded image, not just the pid -- see is_alive's docstring.
     running_pid = session.server_pid()
-    if running_pid and is_alive(running_pid):
+    if running_pid and is_alive(running_pid, image=session.server_image()):
         return fail(
             f"a server is already running for this session (pid {running_pid})",
             hint="call server_stop first, or server_status to check on the running one",
@@ -110,7 +117,7 @@ def server_start(timeout: float = 420) -> Result:
     profiles = stand / "profiles"
     profiles.mkdir(parents=True, exist_ok=True)
     cmd = [
-        str(Path(game) / "DayZDiag_x64.exe"), "-server", f"-config={cfg}",
+        str(Path(game) / SERVER_IMAGE), "-server", f"-config={cfg}",
         f"-port={prof.machine.port}", f"-mod={client_mods}", f"-profiles={profiles}",
     ]
     if server_mods:
@@ -131,11 +138,11 @@ def server_start(timeout: float = 420) -> Result:
             # inside this thread would leave the job stuck in "running" forever. The
             # `since` cutoff below is what tells this run's log apart from theirs.
             pid = spawn(cmd, Path(game))
-            session.set_server_pid(pid)
+            session.set_server_pid(pid, SERVER_IMAGE)
             marker = prof.expect.ready_line
             deadline = time.time() + timeout
             while time.time() < deadline:
-                if not is_alive(pid):
+                if not is_alive(pid, image=SERVER_IMAGE):
                     store.fail(job.id, "the server process died before it was ready")
                     return
                 for log in profiles.glob("script_*.log"):
@@ -164,7 +171,14 @@ def server_stop(pid: int = 0) -> Result:
     session.known_pid). Any other pid is refused: this is the only way an
     orphaned server can be reached at all, and it must not become a general
     process killer.
+
+    Either way, the pid is checked against the recorded image name before it
+    is handed to `stop()` (which calls `taskkill`): a recycled Windows pid can
+    belong to an unrelated process by the time this runs, and killing that
+    process instead would be a worse outcome than the stale bookkeeping this
+    guards against.
     """
+    image = session.server_image()
     if pid:
         if not session.known_pid(pid):
             return fail(
@@ -172,6 +186,10 @@ def server_stop(pid: int = 0) -> Result:
                 hint="server_stop(pid=...) only accepts a pid this session's own server_start "
                      "produced, or a pid project_open reported as orphaned_server_pid",
             )
+        if not is_alive(pid, image=image):
+            if pid == session.server_pid():
+                session.set_server_pid(0)
+            return ok({"stopped": True, "pid": pid})
         stopped = stop(pid)
         if pid == session.server_pid():
             session.set_server_pid(0)
@@ -180,6 +198,9 @@ def server_stop(pid: int = 0) -> Result:
     session_pid = session.server_pid()
     if not session_pid:
         return ok({"stopped": False, "reason": "no server was started by this session"})
+    if not is_alive(session_pid, image=image):
+        session.set_server_pid(0)
+        return ok({"stopped": True, "pid": session_pid})
     stopped = stop(session_pid)
     session.set_server_pid(0)
     return ok({"stopped": stopped, "pid": session_pid})
@@ -197,7 +218,7 @@ def server_status(pulse_seconds: float = 1.0) -> Result:
     if guard:
         return guard
     pid = session.server_pid()
-    running = is_alive(pid) if pid else False
+    running = is_alive(pid, image=session.server_image()) if pid else False
 
     profiles = _stand() / "profiles"
     log = _newest(profiles, "script_*.log")

@@ -47,7 +47,7 @@ def mod_build() -> Result:
                     store.fail(job.id, f"pre_script failed with {code}: {tail[-300:]}")
                     return
 
-            results = pack_all(prof.build.mods, prof.root, Path(tools_root), log_dir)
+            results = pack_all(prof.build.mods, prof.root, Path(tools_root), log_dir, exclude=prof.build.exclude)
             for log in sorted(log_dir.glob("pack-*.log")):
                 store.add_artifact(job.id, log)
 

@@ -10,6 +10,10 @@ name = "my-mod"
 mods = ["MyMod"]
 # Optional: run before packing, for projects that generate code first.
 pre_script = ""
+# Optional: mod_build refuses to pack a source folder containing any of these
+# (FileBank packs the whole folder, so they would otherwise ship inside the
+# pbo). This is the default; only list it to change it.
+exclude = [".git", "*.blend", "*.blend1"]
 
 [expect]
 # The line your mod prints when it has finished loading. The server does not
