@@ -19,6 +19,18 @@ pre_script = ""
 # (FileBank packs the whole folder, so they would otherwise ship inside the
 # pbo). This is the default; only list it to change it.
 exclude = [".git", "*.blend", "*.blend1"]
+# Optional: where a mod's source actually lives, if not the default
+# <root>/<name>. "." means the mod's config.cpp sits at the repository root
+# itself, next to this file -- a common layout this key exists to support.
+# A mod absent here just uses the default; nothing changes for it.
+# [build.sources]
+# MyMod = "."
+# Optional: pack a filtered copy instead of refusing when `exclude` finds
+# something. Needed for a mod whose source is the repository root (it always
+# contains at least .git) -- off by default because copying a tree safely
+# requires the stale-pbo check below to measure the ORIGINAL source, which
+# only this server's own packer.py can guarantee.
+stage = false
 
 [expect]
 # The line your mod prints when it has finished loading. The server does not

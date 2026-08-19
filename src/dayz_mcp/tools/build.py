@@ -6,6 +6,7 @@ from pathlib import Path
 from ..errors import Result, fail, ok
 from ..packer import pack_all
 from ..procs import powershell_cmd, run_blocking
+from ..profile import resolve_mod_dir
 from . import session
 from .project import require_project
 
@@ -47,7 +48,11 @@ def mod_build() -> Result:
                     store.fail(job.id, f"pre_script failed with {code}: {tail[-300:]}")
                     return
 
-            results = pack_all(prof.build.mods, prof.root, Path(tools_root), log_dir, exclude=prof.build.exclude)
+            sources = {mod: resolve_mod_dir(prof.root, prof.build.sources, mod) for mod in prof.build.mods}
+            results = pack_all(
+                prof.build.mods, prof.root, Path(tools_root), log_dir,
+                exclude=prof.build.exclude, sources=sources, stage=prof.build.stage,
+            )
             for log in sorted(log_dir.glob("pack-*.log")):
                 store.add_artifact(job.id, log)
 

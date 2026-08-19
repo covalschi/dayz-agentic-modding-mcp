@@ -648,3 +648,240 @@ def test_pack_one_succeeds_with_git_present_when_exclude_list_is_empty(tmp_path,
     result = pack_one("MyMod", root, tools, log_path, exclude=[])
     assert result.error == ""
     assert result.pbo != ""
+
+
+# --- Requirement: opt-in staging lets a mod whose source is the repository
+# root (config.cpp next to dayz-mcp.toml, README.md, keys/, its own .git)
+# be packed, by copying a filtered copy instead of refusing ---
+
+
+def test_pack_one_stages_and_packs_a_root_layout_mod(tmp_path, monkeypatch):
+    """A mod whose source is the repository root itself packs successfully
+    under stage=True even though the root contains a .git directory that
+    would otherwise refuse packing outright."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (root / "README.md").write_text("hello", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert result.error == ""
+    assert result.pbo == str(root / "@MyMod" / "addons" / "MyMod.pbo")
+    assert Path(result.pbo).exists()
+
+
+def test_pack_one_staged_copy_omits_excluded_entries(tmp_path, monkeypatch):
+    """The staged copy handed to FileBank must not contain anything matching
+    `exclude`, and the omission must be visible in PackResult.note rather
+    than silent."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("x", encoding="utf-8")
+    (root / "notes.txt").write_text("keep me", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    seen = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])  # filebank_cmd's last positional arg is the src directory
+        seen["has_git"] = (staged_src / ".git").exists()
+        seen["has_notes"] = (staged_src / "notes.txt").exists()
+        seen["has_config"] = (staged_src / "config.cpp").exists()
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert result.error == ""
+    assert seen["has_git"] is False
+    assert seen["has_notes"] is True
+    assert seen["has_config"] is True
+    assert "staged copy omitted" in result.note
+    assert ".git" in result.note
+
+
+def test_pack_one_staging_never_copies_the_keys_directory(tmp_path, monkeypatch):
+    """The signing key directory must never end up inside a staged copy, even
+    though it is not in DEFAULT_EXCLUDE -- a root-layout mod's source is the
+    same directory as the profile root, which is exactly where the private
+    signing key lives (root/keys). Letting it ride along would embed the
+    private key inside the published pbo."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    keys_dir = root / "keys"
+    keys_dir.mkdir()
+    (keys_dir / "secret.biprivatekey").write_text("do not ship me", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    seen = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])
+        seen["has_keys"] = (staged_src / "keys").exists()
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert result.error == ""
+    assert seen["has_keys"] is False
+    assert "keys" in result.note
+
+
+def test_pack_one_staging_never_copies_its_own_output_folder(tmp_path, monkeypatch):
+    """On a root-layout mod, the built @Name folder is a subdirectory of the
+    source being staged. Copying it would pack a previous build's pbo into
+    the new one, growing without bound on every rebuild."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    # Simulate a previous build already sitting there.
+    prior = root / "@MyMod" / "addons"
+    prior.mkdir(parents=True)
+    (prior / "MyMod.pbo").write_bytes(b"old pbo bytes from a previous build")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    seen = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])
+        seen["has_output_folder"] = (staged_src / "@MyMod").exists()
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert result.error == ""
+    assert seen["has_output_folder"] is False
+
+
+def test_pack_one_stale_guard_uses_original_source_not_staged_copy(tmp_path, monkeypatch):
+    """The single most important property of staging: the stale-pbo
+    comparison must measure the ORIGINAL `src` tree, never the staged copy.
+    Reproduced by mutating `src` itself (not the copy) to a future mtime
+    from inside the fake FileBank call -- by that point staging has already
+    taken its copy, so a correct implementation still catches this because
+    it re-reads `src` live; an implementation that measured the (frozen,
+    now out-of-date) copy would not, and this test would then fail to see
+    "stale pbo" in the result."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    future = time.time() + 1000
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        # Staging already copied `src` by the time this runs. Touching the
+        # ORIGINAL now simulates the live source tree changing after that
+        # copy was taken.
+        os.utime(root / "config.cpp", (future, future))
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert "stale pbo" in result.error
+
+
+def test_pack_one_staging_dir_removed_after_success_and_after_failure(tmp_path, monkeypatch):
+    """The temporary staging directory must be gone once pack_one returns,
+    whether packing succeeded or FileBank itself failed."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    captured_staging_roots = []
+
+    def make_fake(filebank_code):
+        def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+            staged_src = Path(cmd[-1])
+            captured_staging_roots.append(staged_src.parent)  # mkdtemp()'s own dir
+            if filebank_code != 0:
+                return filebank_code, "FileBank error: simulated failure"
+            out_dir = root / "@MyMod" / "addons"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pbo = out_dir / "MyMod.pbo"
+            pbo.write_text("fake pbo data", encoding="utf-8")
+            return 0, "FileBank success"
+        return fake_run_blocking
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", make_fake(0))
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+    assert result.error == ""
+    assert len(captured_staging_roots) == 1
+    assert not captured_staging_roots[0].exists()
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", make_fake(1))
+    result2 = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+    assert result2.error != ""
+    assert len(captured_staging_roots) == 2
+    assert not captured_staging_roots[1].exists()

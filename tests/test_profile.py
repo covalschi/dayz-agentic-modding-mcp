@@ -1,7 +1,7 @@
 from pathlib import Path
 import textwrap
 from dayz_mcp.packer import DEFAULT_EXCLUDE
-from dayz_mcp.profile import load_profile
+from dayz_mcp.profile import load_profile, resolve_mod_dir
 
 BASE = """
 [project]
@@ -341,6 +341,79 @@ def test_build_exclude_as_scalar_is_rejected(tmp_path):
     r = load_profile(write(tmp_path, bad))
     assert not r.ok
     assert "build.exclude must be a list" in r.error
+
+
+# --- Requirement: build.sources lets a mod's source live somewhere other
+# than <root>/<name> -- e.g. "." for a mod whose config.cpp sits at the
+# repository root, next to dayz-mcp.toml itself ---
+
+
+def test_sources_defaults_to_root_name_when_mod_is_absent(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.build.sources == {}
+    assert resolve_mod_dir(p.root, p.build.sources, "MyMod") == (tmp_path / "MyMod").resolve()
+
+
+def test_sources_can_point_a_mod_at_the_repository_root(tmp_path):
+    profile_text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\n\n[build.sources]\nMyMod = "."')
+    d = write(tmp_path, profile_text)
+    (d / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    r = load_profile(d)
+    assert r.ok, r.error
+    assert r.data.build.sources == {"MyMod": "."}
+    assert resolve_mod_dir(r.data.root, r.data.build.sources, "MyMod") == tmp_path.resolve()
+
+
+def test_sources_missing_config_cpp_names_the_resolved_path(tmp_path):
+    (tmp_path / "elsewhere").mkdir()
+    profile_text = BASE.replace(
+        'mods = ["MyMod"]', 'mods = ["MyMod"]\n\n[build.sources]\nMyMod = "elsewhere"'
+    )
+    d = write(tmp_path, profile_text)
+    r = load_profile(d)
+    assert not r.ok
+    assert "config.cpp" in r.error
+    assert "elsewhere" in r.hint
+
+
+def test_sources_escaping_the_profile_directory_is_rejected(tmp_path):
+    profile_text = BASE.replace(
+        'mods = ["MyMod"]', 'mods = ["MyMod"]\n\n[build.sources]\nMyMod = "../outside"'
+    )
+    d = write(tmp_path, profile_text)
+    r = load_profile(d)
+    assert not r.ok
+    assert "MyMod" in r.error
+    assert "escapes" in r.error
+
+
+def test_sources_as_scalar_is_rejected(tmp_path):
+    bad = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nsources = "."')
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "build.sources must be a table" in r.error
+
+
+# --- Requirement: build.stage opts into packing a filtered copy instead of
+# refusing when excluded entries are present ---
+
+
+def test_stage_defaults_to_false(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.build.stage is False
+
+
+def test_stage_can_be_enabled(tmp_path):
+    on = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nstage = true')
+    p = load_profile(write(tmp_path, on)).data
+    assert p.build.stage is True
+
+
+def test_stage_non_boolean_is_rejected(tmp_path):
+    bad = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nstage = "yes"')
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "build.stage must be a boolean" in r.error
 
 
 def test_malformed_error_regex_is_rejected(tmp_path):

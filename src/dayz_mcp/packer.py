@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import shutil
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,26 +122,32 @@ def pack_one(
     log_path: Path,
     mod_dir: Path | None = None,
     exclude: list[str] | None = None,
+    src: Path | None = None,
+    stage: bool = False,
 ) -> PackResult:
     root = Path(root)
-    src = root / name
+    src = Path(src) if src is not None else root / name
     mod_dir = Path(mod_dir) if mod_dir else root / f"@{name}"
     out_dir = mod_dir / "addons"
 
     # FileBank packs the source directory whole: a nested .git, a stray
     # .blend, anything matching `exclude` (default DEFAULT_EXCLUDE) would
-    # silently ride along into the published pbo. Refuse rather than copy the
-    # tree to a staging directory first -- a copy is always newer than the
-    # sources and would permanently disable the stale-pbo check below.
+    # silently ride along into the published pbo. Without `stage`, refuse
+    # rather than copy the tree to a staging directory first -- a copy is
+    # always newer than the sources and would silently disable the stale-pbo
+    # check below *if that check measured the copy*. `stage` (below) makes
+    # copying safe again by never doing that.
     patterns = list(exclude) if exclude is not None else list(DEFAULT_EXCLUDE)
-    if patterns:
+    if not stage and patterns:
         excluded = find_excluded(src, patterns)
         if excluded:
             return PackResult(
                 name,
                 error=f"refusing to pack {src}: found {', '.join(excluded)}, which FileBank "
                       "would pack whole into the published artifact -- remove it from the mod "
-                      "source, or drop it from build.exclude if it belongs there",
+                      "source, drop it from build.exclude if it belongs there, or set "
+                      "build.stage = true to pack a filtered copy instead (e.g. for a mod whose "
+                      "source is the repository root itself)",
             )
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +160,9 @@ def pack_one(
     # survives packing and only surfaces after a multi-minute server boot.
     # CfgConvert answers authoritatively in seconds. Skipped quietly if this
     # DayZ Tools install lacks it: FileBank is still what actually packs, and
-    # this is a fast extra check, not a hard dependency.
+    # this is a fast extra check, not a hard dependency. Always reads the
+    # ORIGINAL `src`, never a staged copy -- staging (if any) happens below,
+    # after this, and config.cpp is never something staging would omit.
     cfgconvert_note = ""
     cfg = src / "config.cpp"
     if cfg.exists():
@@ -187,74 +197,136 @@ def pack_one(
                 # did not already catch.
                 return PackResult(name, error=f"{cfg} failed CfgConvert's syntax check: {tail[-300:]}")
 
-    code, tail = run_blocking(filebank_cmd(filebank, name, src, out_dir), root, log_path, timeout=1800)
-    if code != 0:
-        return PackResult(name, error=f"FileBank exit {code}: {tail[-300:]}")
+    staging_dir: Path | None = None
+    staging_note = ""
+    pack_src = src
+    if stage:
+        # Copy `src` into a temp directory, omitting anything matching
+        # `patterns` (plus two entries staging always omits regardless of
+        # `exclude`, below) -- then pack THAT. Safe only because the
+        # stale-pbo comparison further down measures `src`, the ORIGINAL
+        # tree, never this copy: a copy is always newer than its sources
+        # (it was just written), so measuring it would make that check pass
+        # unconditionally and silently disable the whole guard. That is the
+        # one reason staging was forbidden before it had this explicit
+        # opt-in with this rule attached.
+        staging_ignore = list(dict.fromkeys([
+            *patterns,
+            # The signing key directory only ends up *inside* `src` when a
+            # mod's source is (or contains) the profile root -- exactly the
+            # layout staging exists for -- but if it does, it must never be
+            # copied into something that gets packed into a published pbo,
+            # regardless of what the user's own `exclude` says.
+            "keys",
+            # Likewise the mod's own output folder: on a root-layout mod it
+            # is a subdirectory of `src`, and copying it would pack any
+            # previously-built pbo into the new one, growing without bound
+            # on every rebuild.
+            mod_dir.name,
+        ]))
+        omitted = find_excluded(src, staging_ignore)
+        staging_dir = Path(tempfile.mkdtemp(prefix="dayz-mcp-stage-"))
+        pack_src = staging_dir / name
+        shutil.copytree(src, pack_src, ignore=shutil.ignore_patterns(*staging_ignore))
+        if omitted:
+            staging_note = f"staged copy omitted: {', '.join(omitted)}"
 
-    pbo = out_dir / f"{name}.pbo"
-    if not pbo.exists():
-        return PackResult(name, error=f"{pbo} was not produced")
+    try:
+        code, tail = run_blocking(filebank_cmd(filebank, name, pack_src, out_dir), root, log_path, timeout=1800)
+        if code != 0:
+            return PackResult(name, error=f"FileBank exit {code}: {tail[-300:]}")
 
-    # KNOWN FALSE POSITIVE: this compares mtimes, and `git checkout` changes a
-    # file's mtime without changing its content -- so a perfectly good pbo
-    # built right after switching branches can be flagged "stale" here even
-    # though nothing needs rebuilding. A mature tool in this space moved to a
-    # content hash for exactly this reason; that rewrite is out of scope for
-    # now (see README), so a "stale pbo" error after a branch switch should be
-    # read as this false positive, not as a packing failure.
-    if pbo.stat().st_mtime < newest_source_mtime(src):
-        return PackResult(
-            name,
-            pbo=str(pbo),
-            error="stale pbo: it is older than the sources, so packing did not really happen "
-                  "(a running server usually holds the old file open)",
-        )
+        pbo = out_dir / f"{name}.pbo"
+        if not pbo.exists():
+            return PackResult(name, error=f"{pbo} was not produced")
 
-    # Determine signing state and collect notes
-    keys_dir = root / "keys"
-    all_priv_keys = sorted(keys_dir.glob("*.biprivatekey")) if keys_dir.is_dir() else []
-    priv, pub = find_keys(keys_dir)
-    signed = False
-    signing_note = ""
+        # KNOWN FALSE POSITIVE: this compares mtimes, and `git checkout`
+        # changes a file's mtime without changing its content -- so a
+        # perfectly good pbo built right after switching branches can be
+        # flagged "stale" here even though nothing needs rebuilding. A mature
+        # tool in this space moved to a content hash for exactly this reason;
+        # that rewrite is out of scope for now (see README), so a "stale
+        # pbo" error after a branch switch should be read as this false
+        # positive, not as a packing failure.
+        #
+        # MUST measure `src` here, never `pack_src` / the staging copy: the
+        # copy was written moments ago by shutil.copytree above and is
+        # therefore always newer than the pbo that was just built from it,
+        # which would make this comparison never fire and silently disable
+        # the guard entirely under `stage = true`. This is the one thing
+        # that makes staging different from the tree-copy this project
+        # explicitly forbids elsewhere.
+        if pbo.stat().st_mtime < newest_source_mtime(src):
+            return PackResult(
+                name,
+                pbo=str(pbo),
+                error="stale pbo: it is older than the sources, so packing did not really happen "
+                      "(a running server usually holds the old file open)",
+            )
 
-    # Copy public key to mod output if it exists
-    if pub:
-        keys_out = mod_dir / "keys"
-        keys_out.mkdir(parents=True, exist_ok=True)
-        (keys_out / pub.name).write_bytes(pub.read_bytes())
+        # Determine signing state and collect notes
+        keys_dir = root / "keys"
+        all_priv_keys = sorted(keys_dir.glob("*.biprivatekey")) if keys_dir.is_dir() else []
+        priv, pub = find_keys(keys_dir)
+        signed = False
+        signing_note = ""
 
-    # Attempt signing if private key is present
-    if priv:
-        signer = Path(tools) / SIGNER_REL
-        if signer.exists():
-            for old in out_dir.glob(f"{name}.pbo.*.bisign"):
-                old.unlink()
-            run_blocking(sign_cmd(signer, priv, pbo), root, log_path.with_suffix(".sign.log"), timeout=300)
-            signed = any(out_dir.glob(f"{name}.pbo.*.bisign"))
-            if len(all_priv_keys) > 1:
-                signing_note = f"multiple private keys present, using {priv.stem}"
-        else:
-            # Private key exists but signer executable is missing
-            signing_note = f"private key present but signer executable not found at {signer}"
-            if len(all_priv_keys) > 1:
-                signing_note = f"multiple private keys present (using {priv.stem}), but signer not found at {signer}"
-        # Check for missing public key only if we haven't already set a note about the signer
-        if not pub and not signing_note:
-            signing_note = f"private key found ({priv.stem}) but public key with matching stem not found"
-            if len(all_priv_keys) > 1:
-                signing_note = f"multiple private keys present (using {priv.stem}), public key not found"
+        # Copy public key to mod output if it exists
+        if pub:
+            keys_out = mod_dir / "keys"
+            keys_out.mkdir(parents=True, exist_ok=True)
+            (keys_out / pub.name).write_bytes(pub.read_bytes())
 
-    # cfgconvert_note (a soft-degrade of the syntax gate, set above) and
-    # signing_note are independent concerns; both can legitimately apply.
-    note = "; ".join(x for x in (cfgconvert_note, signing_note) if x)
+        # Attempt signing if private key is present
+        if priv:
+            signer = Path(tools) / SIGNER_REL
+            if signer.exists():
+                for old in out_dir.glob(f"{name}.pbo.*.bisign"):
+                    old.unlink()
+                run_blocking(sign_cmd(signer, priv, pbo), root, log_path.with_suffix(".sign.log"), timeout=300)
+                signed = any(out_dir.glob(f"{name}.pbo.*.bisign"))
+                if len(all_priv_keys) > 1:
+                    signing_note = f"multiple private keys present, using {priv.stem}"
+            else:
+                # Private key exists but signer executable is missing
+                signing_note = f"private key present but signer executable not found at {signer}"
+                if len(all_priv_keys) > 1:
+                    signing_note = (
+                        f"multiple private keys present (using {priv.stem}), but signer not found at {signer}"
+                    )
+            # Check for missing public key only if we haven't already set a note about the signer
+            if not pub and not signing_note:
+                signing_note = f"private key found ({priv.stem}) but public key with matching stem not found"
+                if len(all_priv_keys) > 1:
+                    signing_note = f"multiple private keys present (using {priv.stem}), public key not found"
 
-    return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed, note=note)
+        # cfgconvert_note and staging_note (soft-degrades / disclosures set
+        # above) and signing_note are independent concerns; any of them can
+        # legitimately apply at once.
+        note = "; ".join(x for x in (cfgconvert_note, staging_note, signing_note) if x)
+
+        return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed, note=note)
+    finally:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def pack_all(
-    names: list[str], root: Path, tools: Path, log_dir: Path, exclude: list[str] | None = None
+    names: list[str],
+    root: Path,
+    tools: Path,
+    log_dir: Path,
+    exclude: list[str] | None = None,
+    sources: dict[str, Path] | None = None,
+    stage: bool = False,
 ) -> list[PackResult]:
     out: list[PackResult] = []
     for name in names:
-        out.append(pack_one(name, root, tools, Path(log_dir) / f"pack-{name}.log", exclude=exclude))
+        mod_src = (sources or {}).get(name)
+        out.append(
+            pack_one(
+                name, root, tools, Path(log_dir) / f"pack-{name}.log",
+                exclude=exclude, src=mod_src, stage=stage,
+            )
+        )
     return out

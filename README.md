@@ -19,7 +19,9 @@ two-part profile:
 Mixing the halves is rejected on load: that is how a repository stops building on
 anyone else's machine. Start from `dayz-mcp.example.toml`.
 
-A mod is declared once, by name: sources in `<root>/Name`, output `@Name/addons/Name.pbo`.
+A mod is declared once, by name: sources in `<root>/Name` by default, output
+`@Name/addons/Name.pbo`. `build.sources` can redirect a mod's source elsewhere
+(e.g. `"."` for a mod whose `config.cpp` sits at the repository root itself).
 
 ## Tools
 
@@ -55,9 +57,13 @@ Nothing blocks except `job_wait`, and that always takes a timeout.
 * **A mod source folder is packed whole.** `mod_build` refuses to pack a mod
   whose source directory contains anything matching `build.exclude`
   (default: `.git`, `*.blend`, `*.blend1`) rather than silently shipping it
-  inside the published pbo. It does not stage a filtered copy first: a copy
-  is always newer than the sources, which would permanently disable the
-  stale-pbo check above.
+  inside the published pbo. By default it does not stage a filtered copy
+  first: a copy is always newer than the sources, which would permanently
+  disable the stale-pbo check above *if that check measured the copy*.
+  `build.stage = true` opts into copying anyway -- safe only because the
+  stale-pbo comparison always measures the original source tree, never the
+  copy. This is the layout a mod whose source is the repository root needs
+  (it always contains at least `.git`).
 
 ## Install
 

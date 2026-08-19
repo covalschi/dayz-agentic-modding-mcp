@@ -33,6 +33,15 @@ class BuildCfg:
     # What pack_one refuses to ship inside a mod's pbo -- see packer.py's
     # DEFAULT_EXCLUDE for why these three are the default.
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
+    # Where a declared mod's source actually lives, relative to the profile
+    # directory, keyed by mod name -- "." means the repository root itself. A
+    # mod absent here defaults to <root>/<name>, exactly as before this key
+    # existed. See resolve_mod_dir.
+    sources: dict[str, str] = field(default_factory=dict)
+    # Opt-in: pack a filtered copy instead of refusing when `exclude` finds
+    # something. See packer.py's pack_one for why this needs an explicit
+    # opt-in rather than being the default.
+    stage: bool = False
 
 
 @dataclass
@@ -71,6 +80,27 @@ class Profile:
     machine: MachineCfg
     own_mod_dirs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+
+def resolve_mod_dir(root: Path, sources: dict[str, str], mod: str) -> Path:
+    """Where a declared mod's source actually lives.
+
+    `sources[mod]` if set (relative to `root`; "." means `root` itself, the
+    common layout for a mod whose config.cpp sits at the repository root
+    rather than in a named subfolder), otherwise the default `<root>/<mod>`.
+    Shared between load_profile's own validation and callers (tools/build.py)
+    that need the same resolved path later, so the formula lives in one place.
+    """
+    return (Path(root) / sources.get(mod, mod)).resolve()
+
+
+def _is_within(path: Path, base: Path) -> bool:
+    """True if `path` is `base` or lives underneath it (both already resolved)."""
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
 
 
 def _read_toml(path: Path) -> tuple[dict | None, str]:
@@ -148,10 +178,28 @@ def load_profile(path: str | Path) -> Result:
             hint='write it as exclude = [".git", "*.blend"], not a bare value',
         )
 
+    # Check build.sources is a table
+    sources_val = b.get("sources", {})
+    if not isinstance(sources_val, dict):
+        return fail(
+            f"build.sources must be a table, got {type(sources_val).__name__}",
+            hint='write it as a [build.sources] section with modname = "path" entries',
+        )
+
+    # Check build.stage is a boolean
+    stage_val = b.get("stage", False)
+    if not isinstance(stage_val, bool):
+        return fail(
+            f"build.stage must be a boolean, got {type(stage_val).__name__}",
+            hint="write it as stage = true or stage = false",
+        )
+
     build = BuildCfg(
         mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
         exclude=[str(x) for x in exclude_val],
+        sources={str(k): str(v) for k, v in sources_val.items()},
+        stage=stage_val,
     )
     if not build.mods:
         return fail(
@@ -159,12 +207,20 @@ def load_profile(path: str | Path) -> Result:
             hint='list the mods to pack, e.g. mods = ["MyMod"]; the source directory, '
                  "the pbo and the @folder all follow from the name",
         )
+    root_resolved = root.resolve()
     for mod in build.mods:
-        mod_dir = root / mod
+        mod_dir = resolve_mod_dir(root, build.sources, mod)
+        if not _is_within(mod_dir, root_resolved):
+            return fail(
+                f"build.sources.{mod} escapes the profile directory: {build.sources[mod]}",
+                hint='sources paths must resolve inside the mod repository -- use "." for the '
+                     'repository root itself, not ".." or an absolute path elsewhere',
+            )
         if not mod_dir.is_dir():
             return fail(
                 f"source directory not found for {mod}: {mod_dir}",
-                hint="build.mods names directories next to the profile",
+                hint="build.mods names directories next to the profile, or set "
+                     'build.sources.<mod> to redirect it (e.g. "." for the repository root)',
             )
         # A folder without its own config.cpp packs into a pbo the engine
         # silently ignores (CfgPatches/CfgMods never register), so nothing

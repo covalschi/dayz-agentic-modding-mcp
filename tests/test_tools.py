@@ -103,7 +103,7 @@ def test_build_runs_as_a_job_and_reports_packing_results(tmp_path, monkeypatch):
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None: [
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
             PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
         ],
     )
@@ -120,7 +120,7 @@ def test_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None: [PackResult(name="MyMod", error="stale pbo")],
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [PackResult(name="MyMod", error="stale pbo")],
     )
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
     job_id = tools.mod_build().data["job_id"]
@@ -497,7 +497,7 @@ def test_mod_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, m
     tools.project_open(str(root))
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
 
-    def boom(names, root, tools_root, log_dir, exclude=None):
+    def boom(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
         raise RuntimeError("simulated packer crash")
 
     monkeypatch.setattr("dayz_mcp.tools.build.pack_all", boom)
@@ -539,7 +539,7 @@ def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
     note = "private key present but signer executable not found at C:/tools/Bin/DsUtils/DSSignFile.exe"
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None: [
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
             PackResult(
                 name="MyMod",
                 pbo=str(root / "@MyMod/addons/MyMod.pbo"),
@@ -799,7 +799,7 @@ def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path
     started = threading.Event()
     release = threading.Event()
 
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None):
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
         started.set()
         assert release.wait(timeout=10), "test never released the worker"
         return [
