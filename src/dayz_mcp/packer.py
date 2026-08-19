@@ -153,6 +153,7 @@ def pack_one(
     # CfgConvert answers authoritatively in seconds. Skipped quietly if this
     # DayZ Tools install lacks it: FileBank is still what actually packs, and
     # this is a fast extra check, not a hard dependency.
+    cfgconvert_note = ""
     cfg = src / "config.cpp"
     if cfg.exists():
         cfgconvert = Path(tools) / CFGCONVERT_REL
@@ -164,7 +165,26 @@ def pack_one(
                 log_path.with_suffix(".cfgconvert.log"),
                 timeout=120,
             )
-            if code != 0 or "error" in tail.lower():
+            # The compiled output is only useful as an on/off signal here --
+            # nothing downstream reads it, so it should not linger next to
+            # the real build artifacts.
+            syntax_out.unlink(missing_ok=True)
+            if code == 127:
+                # run_blocking's own "cannot start" code: CfgConvert.exe
+                # exists as a file but could not actually be run (wrong
+                # architecture, broken permissions, a placeholder). That is a
+                # broken toolchain, not a config problem -- soft-degrade the
+                # same way a missing signer does, rather than blocking a
+                # possibly-correct build over a check that could not run.
+                cfgconvert_note = f"CfgConvert found at {cfgconvert} but could not be run: {tail[-200:]}"
+            elif code != 0:
+                # The exit code alone is the gate. A substring search of the
+                # output was tried and dropped: CfgConvert's own success
+                # message can legitimately contain the word "error" (e.g.
+                # "Config : 0 errors, 0 warnings" -- confirmed against the
+                # real binary), so that check only ever risked rejecting a
+                # correct config.cpp, never caught anything the exit code
+                # did not already catch.
                 return PackResult(name, error=f"{cfg} failed CfgConvert's syntax check: {tail[-300:]}")
 
     code, tail = run_blocking(filebank_cmd(filebank, name, src, out_dir), root, log_path, timeout=1800)
@@ -195,7 +215,7 @@ def pack_one(
     all_priv_keys = sorted(keys_dir.glob("*.biprivatekey")) if keys_dir.is_dir() else []
     priv, pub = find_keys(keys_dir)
     signed = False
-    note = ""
+    signing_note = ""
 
     # Copy public key to mod output if it exists
     if pub:
@@ -212,17 +232,21 @@ def pack_one(
             run_blocking(sign_cmd(signer, priv, pbo), root, log_path.with_suffix(".sign.log"), timeout=300)
             signed = any(out_dir.glob(f"{name}.pbo.*.bisign"))
             if len(all_priv_keys) > 1:
-                note = f"multiple private keys present, using {priv.stem}"
+                signing_note = f"multiple private keys present, using {priv.stem}"
         else:
             # Private key exists but signer executable is missing
-            note = f"private key present but signer executable not found at {signer}"
+            signing_note = f"private key present but signer executable not found at {signer}"
             if len(all_priv_keys) > 1:
-                note = f"multiple private keys present (using {priv.stem}), but signer not found at {signer}"
+                signing_note = f"multiple private keys present (using {priv.stem}), but signer not found at {signer}"
         # Check for missing public key only if we haven't already set a note about the signer
-        if not pub and not note:
-            note = f"private key found ({priv.stem}) but public key with matching stem not found"
+        if not pub and not signing_note:
+            signing_note = f"private key found ({priv.stem}) but public key with matching stem not found"
             if len(all_priv_keys) > 1:
-                note = f"multiple private keys present (using {priv.stem}), public key not found"
+                signing_note = f"multiple private keys present (using {priv.stem}), public key not found"
+
+    # cfgconvert_note (a soft-degrade of the syntax gate, set above) and
+    # signing_note are independent concerns; both can legitimately apply.
+    note = "; ".join(x for x in (cfgconvert_note, signing_note) if x)
 
     return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed, note=note)
 

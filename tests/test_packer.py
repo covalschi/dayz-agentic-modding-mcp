@@ -349,7 +349,12 @@ def _make_cfgconvert_stub(tools: Path) -> Path:
 def test_pack_one_rejects_a_config_cpp_syntax_error_before_filebank_runs(tmp_path, monkeypatch):
     """FileBank does not parse config.cpp, so a syntax error there would
     otherwise survive packing silently. CfgConvert must catch it and refuse to
-    pack, naming the file, before FileBank is ever invoked."""
+    pack, naming the file and line, before FileBank is ever invoked. The exit
+    code alone is the gate -- this fake mirrors CfgConvert's real diagnostic
+    text on an actual syntax error (confirmed against the real binary on a
+    broken config.cpp: exit 1, then a line naming the file and line number,
+    then "Error reading config file '<path>'"), not a stand-in string that
+    happens to contain the word "error"."""
     root = tmp_path / "root"
     root.mkdir()
     src_dir = root / "MyMod"
@@ -364,10 +369,14 @@ def test_pack_one_rejects_a_config_cpp_syntax_error_before_filebank_runs(tmp_pat
 
     log_path = root / "build.log"
     calls = []
+    diagnostic = (
+        "File config.cpp, line 40: /CfgMods/MyMod/defs/: Missing '}'\n"
+        "Error reading config file 'config.cpp'\n"
+    )
 
     def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
         calls.append(cmd)
-        return 1, "Error: config.cpp(1): ';' encountered instead of '}'"
+        return 1, diagnostic
 
     monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
 
@@ -375,9 +384,46 @@ def test_pack_one_rejects_a_config_cpp_syntax_error_before_filebank_runs(tmp_pat
 
     assert result.error != ""
     assert "config.cpp" in result.error
+    assert "line 40" in result.error
     # FileBank must never have been invoked: exactly the one CfgConvert call.
     assert len(calls) == 1
     assert calls[0][0].endswith("CfgConvert.exe")
+
+
+def test_pack_one_accepts_a_cfgconvert_success_that_mentions_the_word_error(tmp_path, monkeypatch):
+    """CfgConvert's own success message can legitimately contain the word
+    "error" -- e.g. "Config : 0 errors, 0 warnings", confirmed against the
+    real binary. The exit code alone must gate packing; a substring search of
+    the output would refuse a perfectly valid config.cpp on a message like
+    this one."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    _make_cfgconvert_stub(tools)
+
+    log_path = root / "build.log"
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        if str(cmd[0]).endswith("CfgConvert.exe"):
+            return 0, "Config : 0 errors, 0 warnings"
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+    assert result.error == ""
+    assert result.pbo != ""
 
 
 def test_pack_one_proceeds_when_cfgconvert_is_not_available(tmp_path, monkeypatch):
@@ -448,6 +494,82 @@ def test_pack_one_runs_cfgconvert_with_cwd_in_the_configs_own_folder(tmp_path, m
     assert captured_cwd[0] == src_dir
 
 
+def test_pack_one_soft_degrades_when_cfgconvert_cannot_be_run(tmp_path, monkeypatch):
+    """An existing but unrunnable CfgConvert.exe (wrong architecture, broken
+    permissions, a placeholder) makes run_blocking return its own "cannot
+    start" code, 127. That means the gate itself could not run -- a broken
+    toolchain, not a config problem -- and must not block packing, the same
+    soft-degrade already applied when the signer executable is missing."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    cfgconvert = _make_cfgconvert_stub(tools)
+
+    log_path = root / "build.log"
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        if str(cmd[0]).endswith("CfgConvert.exe"):
+            return 127, "[dayz-mcp] cannot start: [WinError 216] not a valid Win32 application"
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+    assert result.error == ""
+    assert result.pbo != ""
+    assert str(cfgconvert) in result.note
+
+
+def test_pack_one_deletes_the_temporary_cfgconvert_output(tmp_path, monkeypatch):
+    """The compiled .bin CfgConvert writes as part of the syntax check is
+    only useful as an on/off signal here -- nothing downstream reads it, and
+    it must not linger next to the real build artifacts."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+    _make_cfgconvert_stub(tools)
+
+    log_path = root / "build.log"
+    written_bin = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        if str(cmd[0]).endswith("CfgConvert.exe"):
+            out_path = Path(cmd[cmd.index("-dst") + 1])
+            out_path.write_bytes(b"fake compiled config")
+            written_bin["path"] = out_path
+            return 0, "Config : 0 errors, 0 warnings"
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path)
+    assert result.error == ""
+    assert "path" in written_bin
+    assert not written_bin["path"].exists()
+
+
 # --- Requirement: refuse to pack instead of silently including .git/.blend/etc ---
 
 
@@ -460,11 +582,20 @@ def test_find_excluded_reports_a_nested_git_directory(tmp_path):
     assert found == [".git"]
 
 
-def test_find_excluded_matches_blend_globs():
-    import fnmatch
-    assert fnmatch.fnmatch("scene.blend", "*.blend")
-    assert fnmatch.fnmatch("scene.blend1", "*.blend1")
-    assert not fnmatch.fnmatch("scene.blend", "*.blend1")
+def test_find_excluded_matches_blend_globs(tmp_path):
+    """Exercises the FILE branch of find_excluded (a real .blend on disk),
+    which test_find_excluded_reports_a_nested_git_directory's directory-only
+    fixture never touches -- a version of this test that only asserted raw
+    fnmatch.fnmatch() behaviour, without calling find_excluded at all, would
+    pass regardless of whether that branch worked."""
+    (tmp_path / "config.cpp").write_text("", encoding="utf-8")
+    (tmp_path / "scene.blend").write_bytes(b"fake blend data")
+    (tmp_path / "scene.blend1").write_bytes(b"fake blend backup")
+    (tmp_path / "notes.txt").write_text("keep me", encoding="utf-8")
+
+    found = find_excluded(tmp_path, DEFAULT_EXCLUDE)
+
+    assert sorted(found) == ["scene.blend", "scene.blend1"]
 
 
 def test_pack_one_refuses_when_git_is_present(tmp_path):

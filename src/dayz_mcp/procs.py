@@ -1,6 +1,7 @@
 """Process plumbing: the only module allowed to start and kill things."""
 from __future__ import annotations
 
+import csv
 import os
 import shutil
 import signal
@@ -72,13 +73,22 @@ def is_alive(pid: int, image: str = "") -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
+        # /FO CSV, not the default table format: the default truncates the
+        # Image Name column at 25 characters (confirmed against real
+        # tasklist output on this machine with a 51-character executable
+        # name), so a substring match against it would falsely report a
+        # genuinely running long-named process as dead. CSV rows also give
+        # each field its own column instead of a fixed-width one, so
+        # matching by field is exact rather than "somewhere in the line".
         out = subprocess.run(  # noqa: S603
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, check=False,
         ).stdout
-        if str(pid) not in out:
+        rows = [row for row in csv.reader(out.splitlines()) if len(row) >= 2]
+        matched = [row for row in rows if row[1] == str(pid)]
+        if not matched:
             return False
-        if image and image.lower() not in out.lower():
+        if image and not any(row[0].lower() == image.lower() for row in matched):
             return False
         return True
     try:

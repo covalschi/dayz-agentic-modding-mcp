@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sys
 import time
 from contextlib import contextmanager
@@ -118,6 +119,30 @@ def test_is_alive_checks_image_name_not_just_pid(tmp_path):
     try:
         assert is_alive(pid)  # backward compatible: no image means pid-only
         assert is_alive(pid, image=real_image)
+        assert not is_alive(pid, image="definitely-not-this-image.exe")
+    finally:
+        stop(pid)
+
+
+def test_is_alive_is_not_fooled_by_tasklists_25_char_image_truncation(tmp_path):
+    """tasklist's default table format (what /NH alone produces) truncates
+    the Image Name column at 25 characters -- confirmed against real
+    tasklist output on this machine with a 51-character executable name. A
+    substring match against that truncated output would falsely report a
+    genuinely running long-named process as dead, and that is exactly the
+    direction is_alive must never lie in (see server_status)."""
+    long_name = "this_is_a_very_long_executable_name_for_testing.exe"
+    assert len(long_name) > 25
+    cmd_exe = shutil.which("cmd") or r"C:\Windows\System32\cmd.exe"
+    long_exe = tmp_path / long_name
+    shutil.copy(cmd_exe, long_exe)
+
+    # A self-contained, long-lived child under that long name -- cmd.exe does
+    # not depend on sibling files the way a copied python.exe would.
+    pid = spawn([str(long_exe), "/c", "ping", "127.0.0.1", "-n", "20"], tmp_path)
+    try:
+        assert is_alive(pid)
+        assert is_alive(pid, image=long_name)
         assert not is_alive(pid, image="definitely-not-this-image.exe")
     finally:
         stop(pid)
