@@ -164,6 +164,27 @@ def test_log_verdict_fails_when_a_counter_is_short(tmp_path):
     assert any("items" in reason for reason in r.data["reasons"])
 
 
+def test_server_log_lookup_goes_through_the_one_profiles_dir_owner(tmp_path, monkeypatch):
+    """The server's -profiles directory has exactly one definition
+    (lifecycle.server_profiles_dir). logs.py held a character-for-character copy
+    of its formula, which is the same "two owners for one path" arrangement that
+    already broke both client-side log tools once -- so this asserts the copy is
+    gone by moving the owner and watching the log tools follow."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand", "the stand's own log\n")
+    tools.project_open(str(root))
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "script_9.log").write_text("moved with the owner\n", encoding="utf-8")
+    monkeypatch.setattr("dayz_mcp.tools.logs.server_profiles_dir", lambda: elsewhere)
+
+    r = tools.log_tail()
+    assert r.ok, r.error
+    assert r.data["lines"] == ["moved with the owner"]
+
+
 def test_log_tail_filters(tmp_path):
     session.reset()
     root = make_project(tmp_path)

@@ -145,9 +145,11 @@ def test_bridge_build_packs_the_servers_own_sources_not_the_projects(tmp_path, m
     # build then fails "not produced". Staging copies the source into a
     # directory named after the mod, which is the supported way out.
     assert captured["stage"] is True
-    # Signing keys come from the project's own keys/ directory, so the bridge
-    # carries the same signature the stand already trusts for that project.
-    assert captured["root"] == Path(project)
+    # `root` is what pack_one reads keys/ from -- OUR repository, which has
+    # none, so the bridge is built unsigned and no project's private key is
+    # ever touched. See the unsigned tests below for why that is the ruling.
+    assert captured["root"] == repo
+    assert captured["root"] != Path(project)
     # Nothing about the project's own sources may end up in the bridge pbo.
     assert Path(project) not in captured["src"].parents
 
@@ -174,6 +176,30 @@ def test_bridge_build_reports_the_built_pbo_in_the_job_summary(tmp_path, monkeyp
     assert "staged copy included" in waited.data["summary"]
     # The path is what a profile has to name to actually load the thing.
     assert str(repo / f"@{bridge.BRIDGE_MOD_NAME}") in waited.data["summary"]
+
+
+def test_bridge_build_summary_tells_the_agent_how_to_attach_the_bridge(tmp_path, monkeypatch):
+    """A built bridge that nothing loads is invisible: the stand boots fine and
+    bridge_status then reports "never wrote state". The instructions have to
+    arrive with the build, not only after a boot has already been spent
+    without them."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr(
+        "dayz_mcp.tools.bridge.pack_one",
+        lambda name, root, tools_root, log_path, **kw: PackResult(
+            name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=10, signed=False,
+        ),
+    )
+    job_id = tools.bridge_build().data["job_id"]
+    summary = tools.job_wait(job_id, timeout=15).data["summary"]
+    assert "mods.extra" in summary
+    assert "server_only" in summary
+    assert f"@{bridge.BRIDGE_MOD_NAME}" in summary
 
 
 def test_bridge_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch):
@@ -245,6 +271,52 @@ def test_bridge_build_refuses_a_second_build_while_one_is_running(tmp_path, monk
     assert tools.job_wait(first.data["job_id"], timeout=10).data["status"] == "done"
 
 
+def test_bridge_build_refuses_a_second_build_after_switching_projects(tmp_path, monkeypatch):
+    """The lock has to protect the resource that actually exists. There is ONE
+    @DZMCP_Bridge output directory per process, fed by whichever project is
+    open; a per-project in-flight check lets project_open(B) walk straight past
+    a build still running for project A, and the two then write the same pbo.
+    The spec requires acceptance on two projects, so this is a normal sequence,
+    not a contrived one."""
+    session.reset()
+    a = make_project(tmp_path / "a")
+    b = make_project(tmp_path / "b")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(a))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_one(name, root, tools_root, log_path, **kw):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return PackResult(name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False)
+
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", slow_pack_one)
+
+    first = tools.bridge_build()
+    assert first.ok, first.error
+    assert started.wait(timeout=10), "worker never started"
+
+    assert tools.project_open(str(b)).ok
+    second = tools.bridge_build()
+    assert not second.ok, "switching projects walked past the in-flight bridge build"
+    assert first.data["job_id"] in second.error or first.data["job_id"] in second.hint
+
+    release.set()
+    # Job records are per project, so A's job is only visible from A.
+    tools.project_open(str(a))
+    assert tools.job_wait(first.data["job_id"], timeout=10).data["status"] == "done"
+
+    # Once it is finished, the next project may build again.
+    tools.project_open(str(b))
+    third = tools.bridge_build()
+    assert third.ok, third.error
+    assert tools.job_wait(third.data["job_id"], timeout=10).data["status"] == "done"
+
+
 def test_bridge_build_does_not_block_a_normal_mod_build(tmp_path, monkeypatch):
     """The in-flight check is per KIND: a bridge build and a project build
     touch different output directories and must not lock each other out."""
@@ -292,6 +364,105 @@ def _stub_tools(tmp_path: Path) -> Path:
     (tools_root / "Bin" / "PboUtils").mkdir(parents=True)
     (tools_root / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
     return tools_root
+
+
+def _filebank_that_writes(repo: Path):
+    def run(cmd, cwd, log_path, timeout=None):
+        out_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{bridge.BRIDGE_MOD_NAME}.pbo").write_text("fresh pbo", encoding="utf-8")
+        return 0, "FileBank ok"
+    return run
+
+
+def _project_with_keys(tmp_path: Path) -> Path:
+    """A project carrying a signing key pair, exactly like a real one."""
+    project = make_project(tmp_path / "project")
+    keys = project / "keys"
+    keys.mkdir()
+    (keys / "ProjectKey.biprivatekey").write_bytes(b"private")
+    (keys / "ProjectKey.bikey").write_bytes(b"public")
+    return project
+
+
+def test_bridge_build_never_consumes_the_projects_signing_key(tmp_path, monkeypatch):
+    """The bridge is the server's own server-side mod. It must not be signed
+    with a user's private key: that key is the project's identity, one global
+    output directory fed by per-project keys means every build re-signs the
+    same pbo with whoever is open, and a -serverMod pbo is never handed to a
+    client to verify in the first place."""
+    session.reset()
+    project = _project_with_keys(tmp_path)
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: str(_stub_tools(tmp_path)))
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_that_writes(repo))
+
+    job_id = tools.bridge_build().data["job_id"]
+    waited = tools.job_wait(job_id, timeout=20)
+    assert waited.data["status"] == "done", waited.data
+
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    assert not list((mod_dir / "addons").glob("*.bisign")), "the bridge was signed"
+    assert not (mod_dir / "keys").exists(), "a project's public key was copied into our mod"
+    assert "ProjectKey" not in waited.data["summary"]
+    assert "unsigned" in waited.data["summary"]
+
+
+def test_bridge_build_clears_a_signature_left_by_an_earlier_build(tmp_path, monkeypatch):
+    """The measured symptom of the old design: pack_one only unlinks stale
+    .bisign files inside `if priv:`, so a build that signs nothing leaves the
+    PREVIOUS project's signature next to a pbo it no longer covers -- while the
+    summary says "(unsigned)". A stand that verifies signatures rejects that,
+    and bridge_status then blames the wiring, sending the agent to fix
+    something already correct."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    (mod_dir / "addons").mkdir(parents=True)
+    stale_sig = mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo.OldProjectKey.bisign"
+    stale_sig.write_bytes(b"signature of a pbo that no longer exists")
+    (mod_dir / "keys").mkdir()
+    (mod_dir / "keys" / "OldProjectKey.bikey").write_bytes(b"public")
+
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: str(_stub_tools(tmp_path)))
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_that_writes(repo))
+
+    job_id = tools.bridge_build().data["job_id"]
+    assert tools.job_wait(job_id, timeout=20).data["status"] == "done"
+
+    assert not stale_sig.exists(), "a stale signature survived the build"
+    assert not (mod_dir / "keys").exists(), "another project's public key survived the build"
+    assert (mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo").exists()
+
+
+def test_bridge_build_clears_a_stale_signature_even_when_the_build_fails(tmp_path, monkeypatch):
+    """A failed build leaves the OLD pbo in place. A signature next to it is
+    worse than none: it makes an out-of-date artifact look verified."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    (mod_dir / "addons").mkdir(parents=True)
+    old_pbo = mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo"
+    old_pbo.write_text("yesterday's bridge", encoding="utf-8")
+    old = time.time() - 5000
+    os.utime(old_pbo, (old, old))
+    stale_sig = mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo.OldProjectKey.bisign"
+    stale_sig.write_bytes(b"signature")
+
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: str(_stub_tools(tmp_path)))
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", lambda *a, **kw: (0, "FileBank: nothing to do"))
+
+    job_id = tools.bridge_build().data["job_id"]
+    assert tools.job_wait(job_id, timeout=20).data["status"] == "failed"
+    assert not stale_sig.exists()
 
 
 def test_bridge_build_is_covered_by_the_stale_pbo_guard(tmp_path, monkeypatch):
@@ -425,6 +596,26 @@ def test_bridge_status_tells_an_unreadable_state_file_from_a_missing_one(tmp_pat
     assert not r.ok
     assert r.data["state"] == "unreadable_state"
     assert STATE_FILENAME in r.data["state_file"]
+
+
+def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_path, monkeypatch):
+    """"Parsed, and the tick is 0" is a different fact from "nothing parseable
+    in there". Reporting the second sends the reader off to hunt script errors
+    and rebuild the mod for a file that is perfectly well-formed."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    write_state(profiles, tick=0)
+
+    r = tools.bridge_status(window=0.2)
+    assert not r.ok
+    assert r.data["state"] != "unreadable_state"
+    assert r.data["tick"] == 0
+    assert "rebuild" not in r.hint
+    assert "log_verdict" not in r.hint
 
 
 def test_bridge_status_reports_a_frozen_tick_as_not_alive(tmp_path, monkeypatch):

@@ -5,7 +5,7 @@ from pathlib import Path
 from ..errors import Result, fail, ok
 from ..verdict import build_verdict
 from . import session
-from .lifecycle import newest_client_profile
+from .lifecycle import newest_client_profile, server_profiles_dir
 from .project import require_project
 
 # What to change when there is no log to judge -- different for each source,
@@ -33,8 +33,10 @@ def _newest_log(source: str) -> Path | None:
         if folder is None:
             return None
     else:
-        prof = session.profile()
-        folder = Path(prof.machine.stand_root or prof.root / "testenv") / "profiles"
+        # server_profiles_dir, not a second copy of its formula: this line held
+        # that formula character for character, which is the same "two owners
+        # for one path" arrangement the client side already got wrong once.
+        folder = server_profiles_dir()
     if not folder.is_dir():
         return None
     logs = sorted(folder.glob("script_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)

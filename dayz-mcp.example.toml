@@ -5,6 +5,15 @@
 # committed), for example:
 #   [machine]
 #   config = "serverDZ.cfg"  # the server config file inside stand_root
+#
+# To let the stand load the bridge mod (bridge_build packs it from this
+# server's own repository, and prints this path in its job summary), the same
+# local file carries:
+#   [mods]
+#   extra       = ["<path to the mcp server>/@DZMCP_Bridge"]
+#   server_only = ["@DZMCP_Bridge"]   # routes it to -serverMod, not -mod
+# Attaching it is deliberately opt-in: the bridge is one more pbo in the stand,
+# and a run without it has to stay possible.
 
 [project]
 name = "my-mod"

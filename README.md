@@ -80,7 +80,7 @@ in its notes.
 | `job_status(job_id)` | status of a long-running job |
 | `job_wait(job_id, timeout)` | wait for a job to finish |
 | `job_artifacts(job_id)` | retrieve outputs from a completed job |
-| `bridge_build()` | pack and sign the bridge mod, whose sources ship with this server (`bridge/`), not with your project; returns a job id |
+| `bridge_build()` | pack the bridge mod, whose sources ship with this server (`bridge/`), not with your project; returns a job id. Built **unsigned** — see below |
 | `bridge_status(window)` | is the bridge inside the running game still ticking: reports the tick number and whether it advanced over `window` seconds. Succeeds only for a tick that actually moved |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
@@ -90,6 +90,30 @@ is how it tells a slow boot from a hung one — and `bridge_status` samples the
 bridge's tick twice, `window` apart, capped at the same 10 seconds, for the same
 reason. Everything else returns immediately; work that takes minutes happens
 behind a job id.
+
+### The bridge mod
+
+`bridge_build` packs `bridge/` **from this server's own repository** into
+`@DZMCP_Bridge` beside it. It is the server's mod, not yours: one copy serves
+every project, nothing is written into your repository except the job record,
+and no project's signing key is used — a `-serverMod` pbo is never handed to a
+client to verify, so it is built **unsigned** and its output folder is kept free
+of signatures and keys.
+
+Building it does not load it. That stays your profile's decision, because the
+bridge is an extra pbo in the stand and a run without it has to remain possible.
+To attach it, add two lines to `dayz-mcp.local.toml` (the same two
+`bridge_build`'s job summary prints):
+
+```toml
+[mods]
+extra       = ["<path printed by bridge_build>/@DZMCP_Bridge"]
+server_only = ["@DZMCP_Bridge"]
+```
+
+`server_only` is what routes it to `-serverMod` instead of `-mod`. Without it
+the stand boots perfectly well and `bridge_status` reports that the bridge never
+wrote any state — which is true, and easy to mistake for a broken bridge.
 
 ## Known limitations
 
