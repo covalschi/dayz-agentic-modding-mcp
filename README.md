@@ -80,12 +80,16 @@ in its notes.
 | `job_status(job_id)` | status of a long-running job |
 | `job_wait(job_id, timeout)` | wait for a job to finish |
 | `job_artifacts(job_id)` | retrieve outputs from a completed job |
+| `bridge_build()` | pack and sign the bridge mod, whose sources ship with this server (`bridge/`), not with your project; returns a job id |
+| `bridge_status(window)` | is the bridge inside the running game still ticking: reports the tick number and whether it advanced over `window` seconds. Succeeds only for a tick that actually moved |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
-seconds** however large a value is passed. One other tool sleeps: `server_status`
+seconds** however large a value is passed. Two other tools sleep: `server_status`
 samples the log twice, `pulse_seconds` apart, capped at 10 seconds — that pause
-is how it tells a slow boot from a hung one. Everything else returns
-immediately; work that takes minutes happens behind a job id.
+is how it tells a slow boot from a hung one — and `bridge_status` samples the
+bridge's tick twice, `window` apart, capped at the same 10 seconds, for the same
+reason. Everything else returns immediately; work that takes minutes happens
+behind a job id.
 
 ## Known limitations
 

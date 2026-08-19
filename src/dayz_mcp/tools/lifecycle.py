@@ -41,6 +41,19 @@ def _stand() -> Path:
     return Path(prof.machine.stand_root or prof.root / "testenv")
 
 
+def server_profiles_dir() -> Path:
+    """The -profiles directory the server boots against.
+
+    THE definition of that location. server_start passes it on the command
+    line, server_status reads the log it collects, and the bridge tools read
+    the state file the mod writes into it ($profile: resolves to exactly this
+    directory inside the game). Computing it separately in each of those places
+    is how the client-side log location ended up with two disagreeing owners
+    (see client_profile_dir) -- one formula, one owner.
+    """
+    return _stand() / "profiles"
+
+
 def _is_within(path: Path, base: Path) -> bool:
     """True if `path` is `base` or lives underneath it.
 
@@ -175,7 +188,7 @@ def server_start(timeout: float = 420) -> Result:
     # log_verdict is given this back as `since` so it never judges a log left over
     # from an earlier boot.
     since = job.started
-    profiles = stand / "profiles"
+    profiles = server_profiles_dir()
     profiles.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(Path(game) / SERVER_IMAGE), "-server", f"-config={cfg}",
@@ -306,7 +319,7 @@ def server_status(pulse_seconds: float = 1.0) -> Result:
     pid = session.server_pid()
     running = is_alive(pid, image=session.server_image()) if pid else False
 
-    profiles = _stand() / "profiles"
+    profiles = server_profiles_dir()
     log = _newest(profiles, "script_*.log")
     if log is None:
         return ok({"pid": pid, "running": running, "log": None, "growing": None, "stalled_seconds": None})

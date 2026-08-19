@@ -53,6 +53,7 @@ for _fn in (
     tools.server_start, tools.server_status, tools.server_stop, tools.client_compile_check,
     tools.log_verdict, tools.log_tail,
     tools.job_status, tools.job_wait, tools.job_artifacts,
+    tools.bridge_build, tools.bridge_status,
 ):
     mcp.tool()(_wrap(_fn))
 
