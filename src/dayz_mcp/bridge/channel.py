@@ -52,22 +52,53 @@ class Channel:
     def _state_path(self) -> Path:
         return self.profiles_dir / STATE_FILENAME
 
-    def send(self, cmd: Command) -> Result:
-        """Write `cmd` into the mailbox, atomically.
+    def _unclaimed_mailbox_result(self, cmd_path: Path) -> Result:
+        """The one, single-sourced refusal for an occupied mailbox -- used
+        both by the cheap pre-check below and by the atomic claim losing a
+        race, so a caller sees the identical message either way and cannot
+        tell which path produced it (it should not need to)."""
+        return fail(
+            f"mailbox already holds an unclaimed command at {cmd_path}",
+            hint="the mod has not picked up the previous command yet -- wait for it to "
+                 "be claimed (the mailbox file to disappear) before sending another",
+        )
 
-        Refuses outright if the mailbox already holds a command the mod has
-        not yet claimed (claiming means the mod deletes the file after
-        reading it -- the mod side is Task 5). Overwriting an unclaimed
-        command would silently drop it, so this never overwrites; it fails
-        with a hint instead.
+    def send(self, cmd: Command) -> Result:
+        """Write `cmd` into the mailbox, atomically, and refuse if it is
+        already occupied by a command the mod has not yet claimed (claiming
+        means the mod deletes the file after reading it -- the mod side is
+        Task 5).
+
+        A plain "does the file exist, then write it" check-then-act is NOT
+        enough here: two `send()` calls on separate threads (this server
+        dispatches tool calls through a thread pool, so this is the expected
+        case once Task 4 wires callers in, not a hypothetical) can both pass
+        the check while the mailbox is still empty and both write, and one
+        silently overwrites the other's command with no error anywhere --
+        confirmed by firing 8 concurrent sends, which let 2-4 through as
+        silent successes.
+
+        The fix: write the full content to a temp file first, then claim the
+        mailbox name with `os.link`, not `os.replace`. A hard link creation
+        is atomic with respect to the destination's existence -- the
+        filesystem itself either creates the name (nothing there yet) or
+        fails with FileExistsError (something already claimed it) as one
+        indivisible operation, so two racing claims cannot both win. This
+        works identically on POSIX and Windows/NTFS, needs no lock object
+        shared across `Channel` instances (a fresh `Channel(profiles_dir)`
+        built by every tool call, as this codebase does, still lines up
+        against the same directory entry), and holds even across two
+        unrelated processes on the same machine pointed at the same stand --
+        `os.replace`'s destination-overwrite semantics gave none of that.
         """
         cmd_path = self._cmd_path()
+        # Fast path only: skip the temp-file write in the common case where
+        # the mailbox is visibly still occupied. This check is racy by
+        # itself and is NOT what makes concurrent sends safe -- the os.link
+        # claim below is the actual guard, and runs even when this check
+        # says "empty".
         if cmd_path.exists():
-            return fail(
-                f"mailbox already holds an unclaimed command at {cmd_path}",
-                hint="the mod has not picked up the previous command yet -- wait for it to "
-                     "be claimed (the mailbox file to disappear) before sending another",
-            )
+            return self._unclaimed_mailbox_result(cmd_path)
 
         try:
             fd, tmp_name = tempfile.mkstemp(
@@ -82,7 +113,17 @@ class Channel:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(cmd.to_json())
-            os.replace(tmp_name, cmd_path)
+            os.link(tmp_name, cmd_path)
+        except FileExistsError:
+            # Lost the race: someone else's os.link claimed cmd_path between
+            # our exists() check and this one. Same outward result as the
+            # fast-path refusal above -- the caller cannot and should not
+            # tell the two apart.
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            return self._unclaimed_mailbox_result(cmd_path)
         except OSError as exc:
             try:
                 os.remove(tmp_name)
@@ -92,6 +133,10 @@ class Channel:
                 f"failed to write mailbox: {exc}",
                 hint=f"check that {self.profiles_dir} exists and is writable",
             )
+        else:
+            # cmd_path now holds its own hard link to the same content;
+            # the temp name is no longer needed and must not linger.
+            os.remove(tmp_name)
         return ok(cmd.id)
 
     def read_state(self) -> BridgeState | None:

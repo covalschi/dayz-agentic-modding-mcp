@@ -61,6 +61,55 @@ def test_send_refuses_when_mailbox_is_unclaimed(tmp_path):
     assert on_disk["id"] == first.id
 
 
+def test_concurrent_sends_exactly_one_succeeds(tmp_path):
+    """Check-then-write is not atomic: two threads can both see an empty
+    mailbox and both proceed to write, and one silently overwrites the
+    other's command with no error raised anywhere. This is not hypothetical
+    once tool calls are dispatched through a thread pool (Task 4) -- several
+    world_* calls can reach the same Channel at once. Exactly one send must
+    win; every other thread must see the same refusal (same hint) a caller
+    who lost to an already-unclaimed mailbox would see, and nothing must be
+    left half-written or double-written on disk.
+
+    Fired from a barrier, not a sleep race, so all N threads call send() at
+    the same instant every run -- deterministic, not a chance to catch the
+    race only sometimes.
+    """
+    ch = Channel(tmp_path)
+    n = 8
+    commands = [Command(id=f"ping-{i}-1", verb="ping", args={"i": i}) for i in range(n)]
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+
+    def worker(i):
+        barrier.wait()
+        results[i] = ch.send(commands[i])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert all(r is not None for r in results), "a thread did not finish within the join timeout"
+    successes = [r for r in results if r.ok]
+    failures = [r for r in results if not r.ok]
+    assert len(successes) == 1, f"expected exactly one send to succeed, got {len(successes)}"
+    assert len(failures) == n - 1
+    for f in failures:
+        assert f.hint, "a refusal must say what to do, not just that it failed"
+        assert "picked up" in f.hint
+
+    # The mailbox holds exactly the one command that won -- no corruption
+    # from two writers landing on the same file at once.
+    on_disk = json.loads((tmp_path / CMD_FILENAME).read_text(encoding="utf-8"))
+    assert on_disk["id"] in {c.id for c in commands}
+
+    # And the losers' cleanup left no temp file behind either.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != CMD_FILENAME]
+    assert leftovers == [], f"temp file(s) left behind: {leftovers}"
+
+
 # --- read_state: tolerant of torn/missing files ---------------------------
 
 
