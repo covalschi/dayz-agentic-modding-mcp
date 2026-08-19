@@ -50,3 +50,79 @@ def test_known_engine_noise_is_separated_from_warnings():
     got = classify(lines("boot_noise.log"), forbid=[], noise=DEFAULT_NOISE)
     assert got["warnings"] == []
     assert sum(n["count"] for n in got["noise"]) == 3
+
+
+def test_crash_line_containing_noise_substring_lands_in_crashes_not_noise():
+    """Crashes must take priority over noise. A crash line containing a noise
+    substring must not be silently bucketed as noise."""
+    got = classify(
+        ["Exception Code 0xC0000005: primary storage handle was not closed before shutdown"],
+        forbid=[],
+        noise=DEFAULT_NOISE,
+    )
+    assert len(got["crashes"]) == 1
+    assert "Exception Code" in got["crashes"][0]["text"]
+    assert got["noise"] == []
+
+
+def test_crash_regex_does_not_false_positive_on_benign_words():
+    """Words like 'Crash' and 'Fatal' appear in normal log messages.
+    Only specific markers indicate an actual crash."""
+    # These should NOT be detected as crashes
+    benign_lines = [
+        "Crash reporter initialized, dump folder set",
+        "Fatal errors so far: 0",
+        "CrashDumps directory: /some/path",
+    ]
+    got = classify(benign_lines, forbid=[], noise=[])
+    assert got["crashes"] == []
+    # They should be treated as warnings instead (contain no ERROR keyword)
+    # or noise/nothing, depending on other patterns
+
+
+def test_exception_code_marker_is_detected_as_crash():
+    """Exception Code is a specific marker of an actual crash."""
+    got = classify(
+        ["11:15:30 SCRIPT    : Exception Code 0xC0000005, memory address 0x12345678"],
+        forbid=[],
+        noise=[],
+    )
+    assert len(got["crashes"]) == 1
+    assert "Exception Code" in got["crashes"][0]["text"]
+
+
+def test_access_violation_code_is_detected_as_crash():
+    """ACCESS_VIOLATION is a specific marker of an actual crash."""
+    got = classify(
+        ["11:15:30 SCRIPT    : Segmentation fault: ACCESS_VIOLATION at address 0x00000000"],
+        forbid=[],
+        noise=[],
+    )
+    assert len(got["crashes"]) == 1
+    assert "ACCESS_VIOLATION" in got["crashes"][0]["text"]
+
+
+def test_0xc0000005_code_is_detected_as_crash():
+    """0xC0000005 is a Windows access violation code."""
+    got = classify(
+        ["11:15:30 SCRIPT    : Exception 0xC0000005 in module",],
+        forbid=[],
+        noise=[],
+    )
+    assert len(got["crashes"]) == 1
+    assert "0xC0000005" in got["crashes"][0]["text"]
+
+
+def test_group_key_preserves_identity_for_long_lines_differing_after_120_chars():
+    """Two long lines identical for the first 116 chars but different afterwards
+    must produce different groups, not collapse into one."""
+    base = "WARNING: MyMod: this is a very long warning message about some configuration issue that spans more than"
+    long_a = base + " one hundred twenty characters and ends with A"
+    long_b = base + " one hundred twenty characters and ends with B"
+
+    got = classify([long_a, long_b], forbid=[], noise=[])
+    # Should have 2 distinct warning groups
+    assert len(got["warnings"]) == 2
+    # Each should have count=1 (not merged)
+    assert got["warnings"][0]["count"] == 1
+    assert got["warnings"][1]["count"] == 1

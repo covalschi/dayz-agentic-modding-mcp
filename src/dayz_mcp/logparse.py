@@ -19,7 +19,7 @@ _NUMBER = re.compile(r"\d+")
 _TIMESTAMP = re.compile(r"^\s*\d{1,2}:\d{2}:\d{2}(\.\d+)?\s*")
 _WARNING = re.compile(r"\bWARNING\b", re.IGNORECASE)
 _ERROR = re.compile(r"\bERROR\b", re.IGNORECASE)
-_CRASH = re.compile(r"(Exception Code|ACCESS_VIOLATION|Crash|Fatal)", re.IGNORECASE)
+_CRASH = re.compile(r"(Exception Code|ACCESS_VIOLATION|0xC0000005)", re.IGNORECASE)
 
 
 def find_ready_line(lines: list[str], marker: str) -> str | None:
@@ -37,18 +37,19 @@ def parse_counters(line: str) -> dict[str, int]:
 
 def group_key(line: str) -> str:
     """Collapse a line to its shape so repeats of the same complaint about
-    different objects land in one group."""
+    different objects land in one group. Returns the full normalized line
+    to preserve grouping identity for lines that differ only after 120 chars."""
     s = _TIMESTAMP.sub("", line.strip())
     s = _QUOTED.sub("<x>", s)
     s = _NUMBER.sub("#", s)
-    return " ".join(s.split())[:120]
+    return " ".join(s.split())
 
 
 def _bucket(store: dict[str, dict], line: str) -> None:
     key = group_key(line)
     entry = store.get(key)
     if entry is None:
-        store[key] = {"group": key, "count": 1, "sample": line.strip()}
+        store[key] = {"group": key[:120], "count": 1, "sample": line.strip()}
     else:
         entry["count"] += 1
 
@@ -62,9 +63,8 @@ def classify(lines: list[str], forbid: list[str], noise: list[str]) -> dict:
     for line in lines:
         if not line.strip():
             continue
-        if any(n and n in line for n in noise):
-            _bucket(noises, line)
-            continue
+        # Order matters: forbid → crash → error → noise → warning
+        # Noise must come after all more serious categories to avoid swallowing fatal lines
         if any(f and f in line for f in forbid):
             errors.append({"kind": "forbidden", "text": line.strip()})
             continue
@@ -73,6 +73,9 @@ def classify(lines: list[str], forbid: list[str], noise: list[str]) -> dict:
             continue
         if _ERROR.search(line):
             errors.append({"kind": "error", "text": line.strip()})
+            continue
+        if any(n and n in line for n in noise):
+            _bucket(noises, line)
             continue
         if _WARNING.search(line):
             _bucket(warnings, line)
