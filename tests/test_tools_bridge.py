@@ -1070,3 +1070,209 @@ def test_stale_command_points_at_the_tool_that_fixes_it(tmp_path):
     r = tools.bridge_status(window=0.1)
     assert r.data["state"] == "stale_command"
     assert "bridge_clear" in r.hint
+
+
+# --- The in-flight slot must never outlive the build it stands for -----------
+
+
+def test_a_failure_before_the_build_starts_does_not_wedge_every_later_build(tmp_path, monkeypatch):
+    """store.start() used to sit OUTSIDE the worker's try. Anything failing
+    there -- an antivirus lock on job.json, a removed .dayz-mcp -- killed the
+    thread before its finally, so the in-flight slot was never released: the
+    job stayed queued forever and every later bridge_build in the process was
+    refused, naming a job that would never run. The traceback reached stderr
+    and nowhere else."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr(
+        "dayz_mcp.tools.bridge.pack_one",
+        lambda name, root, tools_root, log_path, **kw: PackResult(
+            name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False),
+    )
+
+    store = session.jobs()
+    real_start = store.start
+    calls = {"n": 0}
+
+    def start_that_fails_once(job_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError("job.json is locked by something else")
+        return real_start(job_id)
+
+    monkeypatch.setattr(store, "start", start_that_fails_once)
+
+    first = tools.bridge_build()
+    assert first.ok, first.error
+    waited = tools.job_wait(first.data["job_id"], timeout=15)
+    assert waited.data["status"] == "failed", waited.data
+    assert "PermissionError" in waited.data["error"]
+
+    # The slot has to be free again: this is the wedge.
+    second = tools.bridge_build()
+    assert second.ok, f"the process is wedged: {second.error} | {second.hint}"
+    assert tools.job_wait(second.data["job_id"], timeout=15).data["status"] == "done"
+
+
+def test_a_thread_that_never_starts_does_not_wedge_every_later_build(tmp_path, monkeypatch):
+    """The other end of the same hole: the slot is claimed before the worker
+    thread exists, so a Thread.start() that raises leaves nothing to release
+    it."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr(
+        "dayz_mcp.tools.bridge.pack_one",
+        lambda name, root, tools_root, log_path, **kw: PackResult(
+            name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False),
+    )
+
+    class ThreadingThatCannotStart:
+        @staticmethod
+        def Thread(*args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(bridge, "threading", ThreadingThatCannotStart)
+    refused = tools.bridge_build()
+    assert not refused.ok
+    assert "thread" in refused.error.lower()
+    monkeypatch.undo()
+
+    # Same monkeypatches as above, minus the broken threading.
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr(
+        "dayz_mcp.tools.bridge.pack_one",
+        lambda name, root, tools_root, log_path, **kw: PackResult(
+            name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False),
+    )
+    again = tools.bridge_build()
+    assert again.ok, f"the process is wedged: {again.error} | {again.hint}"
+    assert tools.job_wait(again.data["job_id"], timeout=15).data["status"] == "done"
+
+
+def test_the_refusal_names_the_project_that_can_actually_show_the_job(tmp_path, monkeypatch):
+    """Job stores are per project. After a switch, the refusal named a job that
+    job_status and job_wait both answer "unknown job" for -- and that hint sends
+    the agent hunting an imaginary typo."""
+    session.reset()
+    a = make_project(tmp_path / "a")
+    b = make_project(tmp_path / "b")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(a))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_one(name, root, tools_root, log_path, **kw):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return PackResult(name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False)
+
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", slow_pack_one)
+    first = tools.bridge_build()
+    assert started.wait(timeout=10)
+
+    assert tools.project_open(str(b)).ok
+    refused = tools.bridge_build()
+    assert not refused.ok
+    # The job really is unreachable from here...
+    assert not tools.job_status(first.data["job_id"]).ok
+    # ...so the refusal has to say where it lives.
+    assert str(a) in refused.hint or a.name in refused.hint
+    assert "project_open" in refused.hint
+
+    release.set()
+    tools.project_open(str(a))
+    assert tools.job_wait(first.data["job_id"], timeout=10).data["status"] == "done"
+
+
+# --- The strip must not fail silently, and must run when packing raises ------
+
+
+def test_a_keys_folder_that_cannot_be_removed_fails_the_build(tmp_path, monkeypatch):
+    """ignore_errors=True let an undeletable keys/ survive while the job
+    reported success and the summary said "(unsigned)" -- the exact
+    accumulate-every-project's-key state this strip exists to prevent, now with
+    no signal at all."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    (mod_dir / "keys").mkdir(parents=True)
+    (mod_dir / "keys" / "SomeoneElse.bikey").write_bytes(b"public")
+
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr(
+        "dayz_mcp.tools.bridge.pack_one",
+        lambda name, root, tools_root, log_path, **kw: PackResult(
+            name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False),
+    )
+
+    class ShutilThatCannotRemove:
+        @staticmethod
+        def rmtree(path, *args, **kwargs):
+            raise PermissionError(f"{path} is held open")
+
+    monkeypatch.setattr(bridge, "shutil", ShutilThatCannotRemove)
+
+    waited = tools.job_wait(tools.bridge_build().data["job_id"], timeout=15)
+    assert waited.data["status"] == "failed", waited.data
+    assert "keys" in waited.data["error"]
+    assert (mod_dir / "keys").exists()  # and it really did survive, as reported
+
+
+def test_the_strip_runs_even_when_packing_raises(tmp_path, monkeypatch):
+    """The strip lives in a finally so a crash mid-pack cannot leave a
+    signature over an artifact nobody rebuilt. Moving it to a sequential call
+    leaves every other bridge test green, so this is the one that notices."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    (mod_dir / "addons").mkdir(parents=True)
+    sig = mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo.OldKey.bisign"
+    sig.write_bytes(b"signature")
+
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+
+    def boom(name, root, tools_root, log_path, **kw):
+        raise RuntimeError("simulated packer crash")
+
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", boom)
+
+    waited = tools.job_wait(tools.bridge_build().data["job_id"], timeout=15)
+    assert waited.data["status"] == "failed"
+    assert "simulated packer crash" in waited.data["error"]
+    assert not sig.exists(), "a crash left a signature over a pbo nobody rebuilt"
+
+
+def test_the_stale_command_answer_is_true_before_the_mod_reads_commands(tmp_path):
+    """The file's survival across a boot is measured; the mod claiming it is
+    not -- the shipped bridge reads no mailbox yet. The wording has to be true
+    now and once that lands."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text('{"id": "c-9", "verb": "ping", "args": {}}', encoding="utf-8")
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "stale_command"
+    # It must not assert as fact something only a later version of the mod does.
+    assert "will be executed by the first tick" not in r.error
+    assert "expire" in r.error or "survive" in r.error
+    assert "bridge_clear" in r.hint

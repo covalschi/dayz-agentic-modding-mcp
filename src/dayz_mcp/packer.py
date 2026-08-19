@@ -7,13 +7,17 @@ The stale-pbo check exists because packing can fail without FileBank saying so:
 a running server holds the old pbo open, the new one is never written, and the
 build silently ships yesterday's code.
 
-Contract for callers, on signatures: a pbo that was genuinely rewritten never
-keeps a signature produced for an earlier one. `pack_one` clears every
-`<name>.pbo.*.bisign` beside a freshly written pbo before deciding whether it
-can sign a new one, so `signed=False` in the result means there is no signature
-on disk either -- not "the old one is still there". A build that FAILED (no
-pbo, or the stale-pbo refusal) leaves the previous pbo and its signature alone,
-because that pair still describes each other.
+Contract for callers, on signatures: a build that SUCCEEDS never leaves a
+signature produced for an earlier pbo. `pack_one` clears every
+`<name>.pbo.*.bisign` beside the new pbo before deciding whether it can sign a
+new one, so `signed=False` in a successful result means there is no signature
+on disk either -- not "the old one is still there".
+
+A build that FAILS leaves both the pbo and its signature alone. Usually that is
+exactly right, because nothing was rewritten. It is deliberately NOT a promise
+that the two still match: FileBank can rewrite the pbo and the run still be
+refused as stale, e.g. when a source file is saved during a multi-minute pack.
+Read a failed build as "state unknown, rebuild", not as "unchanged".
 """
 from __future__ import annotations
 

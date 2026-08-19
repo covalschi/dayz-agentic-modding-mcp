@@ -66,7 +66,12 @@ BRIDGE_BUILD_KIND = "bridge-build"
 # a build still running for project A, and both then write the same pbo. The
 # spec asks for acceptance on two projects, so that sequence is routine.
 _build_guard = threading.Lock()
-_build_in_flight: dict = {"job_id": "", "store": None}
+# `project` is the root of the project whose job store holds `job_id`. Kept
+# because the refusal has to be actionable from a DIFFERENT project: job stores
+# are per project, so after a switch job_status/job_wait answer "unknown job"
+# for a job that is perfectly real -- and their hint then sends the reader
+# hunting a typo.
+_build_in_flight: dict = {"job_id": "", "store": None, "project": ""}
 
 # How long bridge_status may spend watching the tick. The mod publishes once a
 # second, so anything under ~2s can see the same tick twice and call a healthy
@@ -134,9 +139,9 @@ def _window_hint() -> str:
     )
 
 
-def _strip_signing_artifacts(mod_dir: Path) -> None:
+def _strip_signing_artifacts(mod_dir: Path) -> list[str]:
     """Leave nothing behind that claims this pbo is signed, or that carries
-    anyone's key.
+    anyone's key. Returns what it could NOT remove -- empty on success.
 
     The bridge is built unsigned (see the module docstring), which pack_one
     handles correctly for the pbo itself -- but its stale-signature cleanup
@@ -150,14 +155,32 @@ def _strip_signing_artifacts(mod_dir: Path) -> None:
     Run whatever the build did, including when it failed: a failed build leaves
     the OLD pbo in place, and a signature next to an out-of-date artifact is
     worse than no signature at all.
+
+    BOTH halves report. The keys half used to pass `ignore_errors=True`, so a
+    directory that could not be removed (held open by a scanner, a permission
+    change) survived in silence while the job reported success and the summary
+    said "(unsigned)" -- the precise accumulate-every-project's-key state this
+    exists to prevent, with no signal left anywhere. Reported rather than
+    raised, so a failure here cannot replace the packing exception it may be
+    cleaning up after; the caller decides what to do with both.
     """
+    problems: list[str] = []
     addons = mod_dir / "addons"
     if addons.is_dir():
         for sig in addons.glob("*.bisign"):
-            sig.unlink(missing_ok=True)
+            try:
+                sig.unlink()
+            except OSError as exc:
+                problems.append(f"{sig}: {exc}")
     # Every project ever opened on this machine used to leave its public key
     # here. Our own mod folder is not a collection of unrelated projects' keys.
-    shutil.rmtree(mod_dir / "keys", ignore_errors=True)
+    keys_dir = mod_dir / "keys"
+    if keys_dir.exists():
+        try:
+            shutil.rmtree(keys_dir)
+        except OSError as exc:
+            problems.append(f"{keys_dir}: {exc}")
+    return problems
 
 
 def _not_alive(state: str, data: dict, error: str, hint: str) -> Result:
@@ -172,23 +195,38 @@ def _not_alive(state: str, data: dict, error: str, hint: str) -> Result:
     return Result(False, {"state": state, "alive": False, **data}, error, hint)
 
 
-def _bridge_build_in_flight() -> str:
-    """The id of a bridge build still running anywhere in this process, or "".
+def _bridge_build_in_flight() -> tuple[str, str]:
+    """(job id, owning project root) of a bridge build still running anywhere
+    in this process, or ("", "").
 
     Held with the store that owns it and re-checked against that store rather
     than trusted as a flag: a worker that somehow never cleared the slot would
     otherwise block every later build for the life of the process, and a job's
-    own recorded status is the fact of the matter either way. Call under
-    `_build_guard`.
+    own recorded status is the fact of the matter either way.
+
+    That re-check is a backstop, not the mechanism -- it only rescues a slot
+    whose job status CHANGED, and the paths that used to leak a slot (a failure
+    before `store.start`, a thread that never started) left the job sitting at
+    "queued" forever, which this would faithfully keep refusing on. The real
+    fix is that every one of those paths now releases the slot itself.
+
+    Call under `_build_guard`.
     """
     job_id = str(_build_in_flight["job_id"] or "")
     if not job_id:
-        return ""
+        return "", ""
     store = _build_in_flight["store"]
     job = store.get(job_id) if store is not None else None
     if job is None or job.status not in (QUEUED, RUNNING):
-        return ""
-    return job_id
+        return "", ""
+    return job_id, str(_build_in_flight["project"] or "")
+
+
+def _release_build_slot(job_id: str) -> None:
+    """Give the output directory back, if this job is still the one holding it."""
+    with _build_guard:
+        if _build_in_flight["job_id"] == job_id:
+            _build_in_flight.update(job_id="", store=None, project="")
 
 
 def bridge_build() -> Result:
@@ -216,28 +254,42 @@ def bridge_build() -> Result:
 
     store = session.jobs()
     mod_dir = bridge_mod_dir()
+    project_root = str(session.profile().root)
     # Claiming the output directory and creating the job happen together under
     # one lock, or two callers both pass the check before either has a job to
     # be seen. See _build_in_flight for why this is not the project's job store.
     with _build_guard:
-        busy = _bridge_build_in_flight()
+        busy, owner = _bridge_build_in_flight()
         if busy:
-            return fail(
-                f"a bridge build is already running (job {busy})",
-                hint=f"wait for it with job_wait('{busy}'), or look at it with job_status('{busy}') "
-                     f"-- there is one {mod_dir.name} output directory, shared by every project, "
-                     "so this refusal holds across a project switch too",
-            )
+            shared = (f"there is one {mod_dir.name} output directory, shared by every project, "
+                      "so this refusal holds across a project switch too")
+            if owner and owner != project_root:
+                # The job is real, but invisible from here: job stores are per
+                # project. Saying "job_wait('...')" without this would send the
+                # caller to a tool that answers "unknown job", whose own hint
+                # then blames a typo.
+                hint = (f"that build belongs to the project at {owner}, and job_* tools only "
+                        f"answer for the project that is open -- reopen it with "
+                        f"project_open('{owner}') before job_wait('{busy}'). {shared}")
+            else:
+                hint = (f"wait for it with job_wait('{busy}'), or look at it with "
+                        f"job_status('{busy}') -- {shared}")
+            return fail(f"a bridge build is already running (job {busy})", hint=hint)
         job = store.create(BRIDGE_BUILD_KIND)
-        _build_in_flight.update(job_id=job.id, store=store)
+        _build_in_flight.update(job_id=job.id, store=store, project=project_root)
     log_dir = store.artifacts_dir(job.id)
 
     def run() -> None:
-        store.start(job.id)
-        # An uncaught exception here must still resolve the job, or it stays
-        # "running" forever and the traceback goes only to the server's stderr,
-        # where the calling agent never sees it.
+        # EVERYTHING that can fail lives inside this try, `store.start`
+        # included. It used to sit above it, and anything failing there -- an
+        # antivirus lock on job.json, a removed .dayz-mcp -- killed the thread
+        # before its `finally`: the slot was never released, the job stayed
+        # "queued" forever, and every later bridge_build in the process was
+        # refused, naming a job that would never run. The only trace was a
+        # traceback on stderr, where the calling agent never looks.
+        leftovers: list[str] = []
         try:
+            store.start(job.id)
             try:
                 result = pack_one(
                     BRIDGE_MOD_NAME,
@@ -266,11 +318,22 @@ def bridge_build() -> Result:
                 # Whatever happened -- built, refused, or raised -- the output
                 # directory must not be left claiming a signature or holding
                 # someone's key.
-                _strip_signing_artifacts(mod_dir)
+                leftovers = _strip_signing_artifacts(mod_dir)
             for log in sorted(log_dir.glob("pack-*.log")):
                 store.add_artifact(job.id, log)
             if result.error:
                 store.fail(job.id, f"{result.name}: {result.error}")
+                return
+            if leftovers:
+                # A pbo was built, but the folder still holds a signature or
+                # someone's key. Reporting success here would put the artifact
+                # back in exactly the state the strip exists to prevent, with
+                # a summary saying "(unsigned)" over a signed folder.
+                store.fail(
+                    job.id,
+                    "the bridge was packed, but its output directory still holds signing "
+                    f"artifacts that could not be removed: {'; '.join(leftovers)}",
+                )
                 return
             # "(unsigned)" is stated, not implied: it is the intended outcome
             # here, and a reader who knows mod_build's summaries would otherwise
@@ -281,13 +344,29 @@ def bridge_build() -> Result:
             summary = f"{summary} | to load it: {wiring_instructions()}"
             store.finish(job.id, 0, summary=summary)
         except Exception as exc:  # noqa: BLE001 - must reach the job, not just stderr
-            store.fail(job.id, f"{type(exc).__name__}: {exc}")
+            message = f"{type(exc).__name__}: {exc}"
+            if leftovers:
+                message += f"; and the output directory still holds: {'; '.join(leftovers)}"
+            store.fail(job.id, message)
         finally:
-            with _build_guard:
-                if _build_in_flight["job_id"] == job.id:
-                    _build_in_flight.update(job_id="", store=None)
+            _release_build_slot(job.id)
 
-    threading.Thread(target=run, daemon=True).start()
+    try:
+        # Construction as well as start(): both allocate, and a process out of
+        # threads or memory can fail at either. Anything that escapes here
+        # leaves a claimed slot with no worker to release it.
+        threading.Thread(target=run, daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 - the slot is already claimed
+        # The slot was taken above, and with no worker there is nothing to
+        # release it. Same wedge as a failure inside the worker, reached from
+        # the other side.
+        _release_build_slot(job.id)
+        store.fail(job.id, f"the build thread could not be started: {type(exc).__name__}: {exc}")
+        return fail(
+            f"could not start the build thread: {type(exc).__name__}: {exc}",
+            hint="the process is out of threads or memory -- wait for other jobs to finish "
+                 "(job_status) and try again",
+        )
     return ok({"job_id": job.id, "mod_dir": str(mod_dir)})
 
 
@@ -346,15 +425,18 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
             # Not the same answer as "no server". Only the mod ever removes
             # this file, so with nothing running it can never be claimed --
             # and server_start reuses the -profiles directory, so the command
-            # does not expire, it WAITS. The next boot's first tick runs it,
-            # minutes or days later, as if it had just been sent.
+            # does not expire, it WAITS. That the file survives a boot is
+            # measured; that the mod then runs it is not yet -- the shipped
+            # bridge reads no mailbox at all today. So the wording states the
+            # part that is true now and stays true once command reading lands,
+            # rather than asserting a behaviour the current mod does not have.
             return _not_alive(
                 "stale_command",
                 base,
                 f"no server is running, and a command has been sitting unclaimed in "
                 f"{mailbox['path']} for {mailbox['age_seconds']}s -- nothing can claim it "
-                "while the stand is down, and it will be executed by the first tick of the "
-                "NEXT boot rather than expiring",
+                "while the stand is down, and it does not expire: the file survives into the "
+                "next boot, where the bridge will claim it as soon as the mod reads commands",
                 hint="discard it with bridge_clear() before starting the server, unless that "
                      "command really is meant to run on the next boot; then server_start and "
                      f"bridge_status again (the file itself is {mailbox['path']})",
@@ -464,8 +546,8 @@ def _no_snapshot_answer(data: dict, state_file: Path, mailbox: dict) -> Result:
         # before. Better said here than discovered then.
         waiting = (
             f"; a command has also been waiting unclaimed in {mailbox['path']} for "
-            f"{mailbox['age_seconds']}s, and it will run at the first tick once the "
-            "bridge does load (bridge_clear discards it)"
+            f"{mailbox['age_seconds']}s, and it will not expire on its own -- it waits for a "
+            "bridge that reads commands (bridge_clear discards it)"
         )
     return _not_alive(
         "no_state_file",
