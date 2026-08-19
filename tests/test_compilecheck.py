@@ -49,3 +49,11 @@ def test_error_before_mission_is_a_failure_not_unknown():
 def test_missing_rpt_is_a_failure():
     got = judge([], [], expect())
     assert got["status"] in ("fail", "unknown")
+
+
+def test_malformed_error_regex_in_judge_produces_reported_failure_not_exception():
+    e = expect(error_regex=["("])
+    got = judge([], ["Module: Mission"], e)
+    assert got["status"] == "fail"
+    assert "regex patterns in configuration are invalid" in got["reason"] or "malformed" in got["reason"]
+    assert any("malformed" in e for e in got["errors"])

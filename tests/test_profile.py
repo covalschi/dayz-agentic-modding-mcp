@@ -240,3 +240,22 @@ def test_wrong_shaped_mods_in_local_is_rejected(tmp_path):
     assert not r.ok
     assert "[mods] must be a table" in r.error
     assert "[section]" in r.hint
+
+
+def test_malformed_error_regex_is_rejected(tmp_path):
+    bad = """
+[project]
+name = "my-mod"
+
+[build]
+mods = ["MyMod"]
+
+[expect]
+ready_line = "MyMod loaded"
+error_regex = ["("]
+"""
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "error_regex[0]" in r.error
+    assert "valid regular expression" in r.error
+    assert "escape the characters" in r.hint

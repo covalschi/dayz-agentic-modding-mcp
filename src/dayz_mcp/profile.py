@@ -14,6 +14,7 @@ One mod is declared once, as a name. The source directory (<root>/Name), the pbo
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -194,6 +195,16 @@ def load_profile(path: str | Path) -> Result:
     )
     if not expect.ready_line:
         notes.append("expect.ready_line is empty: readiness cannot be detected, only errors")
+
+    # Validate error_regex patterns
+    for i, pattern in enumerate(expect.error_regex):
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            return fail(
+                f"expect.error_regex[{i}] is not a valid regular expression: {exc}",
+                hint="fix the pattern, or escape the characters you meant literally",
+            )
 
     mods = ModsCfg()
     machine = MachineCfg()

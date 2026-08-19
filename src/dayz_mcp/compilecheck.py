@@ -27,17 +27,38 @@ def client_cmd(game: Path, mods: str, profiles: Path) -> list[str]:
     ]
 
 
-def _matches(lines: list[str], patterns: list[str]) -> list[str]:
+def _matches(lines: list[str], patterns: list[str]) -> tuple[list[str], list[str]]:
+    """Search lines for patterns, returning (matches, invalid_patterns).
+
+    On regex compilation error, skips that pattern and records it, so that
+    a malformed pattern does not silently reduce the set of things being searched.
+    """
     out: list[str] = []
+    invalid: list[str] = []
     for pat in patterns:
-        rx = re.compile(pat)
-        out += [ln.strip() for ln in lines if rx.search(ln)]
-    return out
+        try:
+            rx = re.compile(pat)
+            out += [ln.strip() for ln in lines if rx.search(ln)]
+        except re.error as exc:
+            invalid.append(f"{pat!r}: {exc}")
+    return out, invalid
 
 
 def judge(rpt_lines: list[str], script_lines: list[str], expect: ExpectCfg) -> dict:
     patterns = list(FATAL_PATTERNS) + list(expect.error_regex)
-    errors = _matches(rpt_lines, patterns) + _matches(script_lines, patterns)
+    rpt_errors, rpt_invalid = _matches(rpt_lines, patterns)
+    script_errors, script_invalid = _matches(script_lines, patterns)
+    invalid = rpt_invalid + script_invalid
+
+    # If any patterns were malformed, report them as a failure
+    if invalid:
+        return {
+            "status": "fail",
+            "errors": [f"malformed regex pattern: {p}" for p in invalid],
+            "reason": "regex patterns in configuration are invalid",
+        }
+
+    errors = rpt_errors + script_errors
     if errors:
         return {"status": "fail", "errors": errors[:25], "reason": "compilation errors"}
 
