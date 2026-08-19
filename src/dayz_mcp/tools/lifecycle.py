@@ -21,6 +21,11 @@ STATUS_PULSE_MAX = 10.0
 # second copy of the literal.
 SERVER_IMAGE = GAME_PROBE
 
+# The diagnostic client gets its own throwaway -profiles directory, one per
+# client-compile job, so a compile check never writes into (or reads from) the
+# test stand the server boots against.
+CLIENT_PROFILE_DIRNAME = "clientprofile"
+
 
 def _stand() -> Path:
     prof = session.profile()
@@ -67,6 +72,44 @@ def mod_list(profiles_extra: str = "") -> tuple[str, str]:
 def _newest(folder: Path, pattern: str) -> Path | None:
     items = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return items[0] if items else None
+
+
+def client_profile_dir(job_id: str) -> Path:
+    """Where the diagnostic client for `job_id` keeps its profile (and so its
+    logs). THE definition of that location -- client_compile_check spawns the
+    client against it and tools/logs.py reads it back through
+    newest_client_profile below, so neither side computes the path itself.
+
+    They did compute it independently once, and disagreed: the client was run
+    against the job's artifacts while log_verdict(source="client") looked under
+    machine.stand_root, a directory nothing ever creates. Both client-side log
+    tools failed for every project, and their hint sent the user to change
+    stand_root -- which would not have helped, because stand_root was never
+    involved. The recurrence is what this function exists to prevent; the
+    symptom was only the visible half.
+    """
+    return session.jobs().artifacts_dir(job_id) / CLIENT_PROFILE_DIRNAME
+
+
+def newest_client_profile() -> Path | None:
+    """The profile directory of the LATEST client compile check, or None if
+    this project has never run one.
+
+    Strictly the latest, even when that run produced no log at all (it died
+    before spawning the client, say) -- deliberately not "the latest one that
+    happens to hold a log", which would answer a question about this run with
+    the previous run's output. That is the same mistake `since` exists to
+    prevent on the server side, and it is worse here: nothing in the reply
+    would say the log belongs to an older run. An empty directory therefore
+    reads as "no client log found", which is the truth.
+    """
+    store = session.jobs()
+    if store is None:
+        return None
+    checks = [j for j in store.all() if j.kind == "client-compile"]
+    if not checks:
+        return None
+    return client_profile_dir(max(checks, key=lambda j: j.started).id)
 
 
 def server_start(timeout: float = 420) -> Result:
@@ -269,7 +312,7 @@ def client_compile_check(extra_mods: str = "", wait_seconds: float = 120) -> Res
 
     store = session.jobs()
     job = store.create("client-compile")
-    profiles = store.artifacts_dir(job.id) / "clientprofile"
+    profiles = client_profile_dir(job.id)
     profiles.mkdir(parents=True, exist_ok=True)
 
     def run() -> None:

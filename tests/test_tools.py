@@ -466,6 +466,108 @@ def test_client_compile_check_excludes_server_only_mods(tmp_path, monkeypatch):
     assert "@ServerOnlyMod" not in mod_arg
 
 
+# --- Final review, item 2: log_verdict(source="client") and log_tail(source=
+# "client") looked under machine.stand_root, a directory nothing ever creates.
+# The client's logs live with the job that produced them. ---
+
+
+def _run_fake_client_compile(monkeypatch, log_text: str, rpt_text: str = "clean\n") -> str:
+    """Run client_compile_check with a stand-in for the diagnostic client that
+    writes its logs where the real one does: the -profiles directory the tool
+    hands to the executable. Returns the job id."""
+
+    def fake_spawn(cmd, cwd):
+        profiles = Path(next(a for a in cmd if a.startswith("-profiles=")).split("=", 1)[1])
+        (profiles / "script_1.log").write_text(log_text, encoding="utf-8")
+        (profiles / "crash.RPT").write_text(rpt_text, encoding="utf-8")
+        return 4242
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.stop", lambda pid: True)
+    job_id = tools.client_compile_check(wait_seconds=0).data["job_id"]
+    waited = tools.job_wait(job_id, timeout=15)
+    # Terminal either way: whether the check itself passed is the business of
+    # the test that cares (log_tail, for one, must work on a failing run).
+    assert waited.data["status"] in ("done", "failed"), waited.data
+    return job_id
+
+
+def test_log_verdict_judges_the_client_log_the_compile_check_produced(tmp_path, monkeypatch):
+    """The whole point of source="client": after a compile check, ask for a
+    verdict on what the client wrote. This failed for every project -- the
+    lookup went to <stand>/clientprofile while the check writes into the job's
+    own artifacts -- and no test ever passed source="client"."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
+    tools.project_open(str(root))
+    _run_fake_client_compile(monkeypatch, "SCRIPT : [MyMod] loaded: items=12\nModule: Mission\n")
+
+    r = tools.log_verdict(source="client")
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["verdict"] == "pass"
+    assert r.data["counters"]["items"] == 12
+    assert "clientprofile" in r.data["log"]
+
+
+def test_log_tail_reads_the_client_log_the_compile_check_produced(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
+    tools.project_open(str(root))
+    _run_fake_client_compile(monkeypatch, "one\nSCRIPT (E): boom\ntwo\n")
+
+    r = tools.log_tail(source="client", pattern="SCRIPT (E)")
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["lines"] == ["SCRIPT (E): boom"]
+    assert "clientprofile" in r.data["log"]
+
+
+def test_client_log_tools_do_not_send_the_user_to_change_stand_root(tmp_path):
+    """With no compile check run yet there is genuinely no client log -- but
+    the hint must name the thing that would produce one. It used to say
+    "check machine.stand_root", a setting the client side never reads."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=12\n")
+    tools.project_open(str(root))
+
+    for r in (tools.log_verdict(source="client"), tools.log_tail(source="client")):
+        assert not r.ok
+        assert "stand_root" not in r.hint
+        assert "client_compile_check" in r.hint
+
+
+def test_client_verdict_does_not_answer_for_a_run_that_produced_nothing(tmp_path, monkeypatch):
+    """A compile check that died before the client ever wrote a line has no
+    log -- and must say so, rather than quietly handing back the PREVIOUS
+    run's log as this run's verdict. Same discipline as `since` on the server
+    side, and stricter here because nothing in the reply would reveal the
+    substitution."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
+    tools.project_open(str(root))
+    first = _run_fake_client_compile(monkeypatch, "SCRIPT : [MyMod] loaded: items=12\nModule: Mission\n")
+    assert tools.log_verdict(source="client").data["counters"]["items"] == 12
+
+    def boom(cmd, cwd):
+        raise RuntimeError("client never started")
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", boom)
+    later = tools.client_compile_check(wait_seconds=0).data["job_id"]
+    assert tools.job_wait(later, timeout=10).data["status"] == "failed"
+    assert lifecycle.client_profile_dir(later).is_dir()  # created, but empty
+
+    r = tools.log_verdict(source="client")
+    assert not r.ok, f"answered with a stale log: {r.data}"
+    # The earlier run's log is still on disk and still readable -- through its
+    # own job, which is where a question about it belongs.
+    assert (lifecycle.client_profile_dir(first) / "script_1.log").exists()
+
+
 # --- Review round 1, Finding 1 (Critical): worker bodies must not hang the job on
 # an uncaught exception ---
 
