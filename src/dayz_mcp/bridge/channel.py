@@ -11,8 +11,10 @@ specs/2026-08-19-dayz-mcp-phase2-bridge.md Sec 3, hub repo):
    module treats a single such read as unremarkable. Only a short run of
    failures (see `_read_state_tolerant`) is treated as a real signal.
 2. Python CAN write atomically, and must: `send` writes the mailbox to a
-   temporary file in the same directory and `os.replace`s it into place, so
-   the mod never observes a half-written command.
+   temporary file in the same directory and `os.link`s it into place, so the
+   mod never observes a half-written command. `os.link` also doubles as the
+   atomic claim that stops two concurrent senders from both succeeding --
+   see `send`'s own docstring.
 """
 from __future__ import annotations
 
