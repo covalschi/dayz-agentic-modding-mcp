@@ -326,10 +326,24 @@ def classify_timeout(sent_at: float, now: float, timeout: float) -> str:
     """Classify how much time has passed since a command was sent, from
     outside the game.
 
-    This is the generic, Python-side ceiling. The game-side timeout is
-    deliberately set higher (see spec) so that when a command genuinely
-    fails, the mod's own specific reason reaches the caller before this
-    generic classifier would have already called it "expired".
+    This is the generic, Python-side ceiling, and `timeout` here must be
+    set HIGHER than the mod's own timers, not lower -- the direction this
+    docstring itself got backwards once already (corrected here; if you
+    are choosing `timeout` for a caller, read this paragraph, not an older
+    copy of it). The mod's own timers -- a no-progress watchdog and a hard
+    limit, both game-side -- are deliberately set BELOW the caller's wait,
+    with margin for the publish interval and the poll step, so that when a
+    command genuinely fails, the mod's own specific reason ("made no
+    progress for 20s", not a bare timestamp) reaches the caller through the
+    normal state-reading path BEFORE this generic classifier would have
+    already called it "expired" and discarded that reason unread. As
+    shipped, the mod's watchdog fires at 20s and its hard limit at 30s; the
+    caller's wait is recommended at 45s -- comfortable margin above both.
+    Those are the mod's own current numbers, not a constant this module
+    enforces or a default it applies -- a caller passing a `timeout` at or
+    below either one guarantees the generic "expired" wins every time, and
+    the mod's specific reason never reaches anyone: exactly the failure the
+    two-ceilings principle (see spec) exists to prevent.
     """
     elapsed = now - sent_at
     return "expired" if elapsed >= timeout else "waiting"
