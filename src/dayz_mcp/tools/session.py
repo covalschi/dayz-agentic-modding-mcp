@@ -38,6 +38,19 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
     here as `orphaned_server_pid` so project_open can tell the caller. It stays
     in `known_pids` so a later `server_stop(pid=...)` can still be used to deal
     with it -- see `known_pid`.
+
+    The same reuse-on-reopen rule applies to the job store. JobStore.load()
+    deliberately flips any job it finds recorded as "running" to "failed"
+    ("lost: the server restarted..."), which is correct after a genuine
+    process restart -- the worker thread that owned it is truly gone -- but
+    wrong on a same-project reopen, where that worker thread is still running
+    in this very process and will go on writing to whatever store instance it
+    was handed. Building a second store and load()-ing it on a reopen would
+    silently fork the job's history: the fresh store's in-memory copy gets
+    permanently marked "failed" while the real worker's store (still the one
+    `session.jobs()` used to return) later writes "done" to disk underneath
+    it. So on a reopen, `_state["jobs"]` is left exactly as it is; only an
+    actual switch builds a fresh store and loads it.
     """
     prev_profile = _state["profile"]
     prev_pid = int(_state["server_pid"] or 0)
@@ -48,13 +61,13 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
         if prev_pid and is_alive(prev_pid):
             orphaned_server_pid = prev_pid
         _state["server_pid"] = 0
+        store = JobStore(Path(profile.root) / ".dayz-mcp" / "jobs")
+        store.load()
+        _state["jobs"] = store
 
     _state["profile"] = profile
     _state["game"] = game
     _state["tools"] = tools_root
-    store = JobStore(Path(profile.root) / ".dayz-mcp" / "jobs")
-    store.load()
-    _state["jobs"] = store
     return {"orphaned_server_pid": orphaned_server_pid}
 
 

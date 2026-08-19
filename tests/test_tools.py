@@ -743,3 +743,61 @@ def test_server_stop_refuses_a_pid_the_session_never_touched(tmp_path):
         assert procs_is_alive(real_pid)
     finally:
         procs_stop(real_pid)
+
+
+# --- Review round 3: reopening the SAME project must not mark a still-running
+# job as lost ---
+
+
+def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path, monkeypatch):
+    """End-to-end reproduction, not an internals check: a real job is created
+    through mod_build's normal path and deliberately held mid-flight (via
+    synchronization events on the worker thread, not by poking session state),
+    project_open is called again on the exact same root while it is still
+    running, and only then is the job allowed to finish. A store-identity
+    assertion would pass without proving this -- the actual observable bug was
+    the persisted/in-memory job record being flipped to "failed" underneath
+    the still-running worker."""
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_all(names, root, tools_root, log_dir):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return [
+            PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
+        ]
+
+    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+
+    job_id = tools.mod_build().data["job_id"]
+    assert started.wait(timeout=10), "worker never started"
+
+    # Confirm the job is genuinely RUNNING (store.start() already persisted
+    # this) before reopening -- otherwise this test would not reproduce the race.
+    status_before = tools.job_status(job_id)
+    assert status_before.data["status"] == "running"
+
+    # Simulate an agent editing dayz-mcp.local.toml and reopening the same root
+    # WHILE the build is still in flight.
+    reopened = tools.project_open(str(root))
+    assert reopened.ok, reopened.error
+
+    # The reopen must not have marked the still-running job as lost.
+    status_after_reopen = tools.job_status(job_id)
+    assert status_after_reopen.data["status"] == "running"
+    assert status_after_reopen.data["error"] == ""
+
+    release.set()
+    waited = tools.job_wait(job_id, timeout=10)
+    assert waited.data["status"] == "done"
+    assert waited.data["error"] == ""
+
+    # A fresh, independent lookup agrees -- not just job_wait's own return value.
+    final = tools.job_status(job_id)
+    assert final.data["status"] == "done"
