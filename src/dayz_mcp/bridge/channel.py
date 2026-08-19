@@ -93,10 +93,11 @@ HEARTBEAT_UNMEASURABLE = "unmeasurable"
 class HeartbeatSample:
     """The full result of one heartbeat probe: `status`/`tick` (see
     `heartbeat`'s own docstring for exactly what these mean) plus the
-    session id(s) observed -- information `heartbeat`'s plain `(status,
-    tick)` contract has no room for, and which the tool layer needs to
-    report the live session to a caller (several of Task 5's acceptance
-    probes need to know it, and until this existed nothing could tell them).
+    session id(s) observed and the measured `gap` -- information
+    `heartbeat`'s plain `(status, tick)` contract has no room for, and
+    which the tool layer needs both to report the live session to a caller
+    (several of Task 5's acceptance probes need to know it) and to tell
+    apart two situations that otherwise arrive identically.
 
     `session_id` is the most recently observed session: `after.session_id`
     if the second sample was read, else `before.session_id` if only the
@@ -106,11 +107,36 @@ class HeartbeatSample:
     report both halves of a restart (what it was, what it is now), not just
     that one happened; `None` in every other case, including when there is
     no session to report at all.
+
+    `gap` is the ACTUAL measured wall-clock time, in seconds, between the
+    two reads that produced this sample -- see `Channel._sample_twice`'s
+    own docstring for why this must be measured, never inferred by a
+    caller comparing against the `window` it originally asked for. `None`
+    only when no measurement was possible at all (the FIRST sample itself
+    never came back -- `status == "unmeasurable"` with `session_id is
+    None` too); a real float in every other case, including every other
+    `"unmeasurable"` shape.
+
+    This is what lets a caller tell apart two situations that would
+    otherwise both arrive as `"unmeasurable"` with an identical `tick`/
+    `session_id`: a `gap` under `_MOD_PUBLISH_INTERVAL_SECONDS` alongside a
+    real `session_id` means the mod IS there, just not measured for long
+    enough -- ask again with a bigger window, and that alone is likely to
+    fix it. A `gap` at or above the publish interval with `status ==
+    "unmeasurable"` means something else happened: the second sample was
+    attempted for at least a full publish interval and still failed -- the
+    state file went away, or stopped parsing, mid-probe. That is a fact
+    about the MOD, not about the window, and a bigger window will not fix
+    it -- collapsing the two into the same fields would have told a caller
+    to enlarge a window that was never the problem, a smaller version of
+    the false diagnosis the gap-awareness fix (see `_classify_samples`)
+    exists to prevent in the first place.
     """
 
     status: str
     tick: int
     session_id: str | None
+    gap: float | None
     previous_session_id: str | None = None
 
 
@@ -722,20 +748,42 @@ class Channel:
         this: an observed increase, or an observed session change, is real
         evidence regardless of how little time passed to observe it -- only
         the ABSENCE of a visible change is ambiguous under too short a gap.
+
+        `gap` is threaded onto the returned `HeartbeatSample` in every
+        branch where a measurement was even attempted (every branch except
+        `before is None`) -- see `HeartbeatSample`'s own docstring for why
+        this specific field is what lets a caller tell "gap too short, ask
+        again with a bigger window" apart from "second sample lost, a fact
+        about the mod" when both would otherwise collapse into the same
+        `"unmeasurable"` shape. All `HeartbeatSample(...)` calls below use
+        keyword arguments deliberately: `gap` sits ahead of
+        `previous_session_id` in the dataclass's field order, and a
+        positional call here once already carried `before.session_id` into
+        the wrong parameter when `gap` was inserted -- keywords make that
+        class of mistake impossible to make silently again.
         """
         if before is None:
-            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, 0, None)
+            return HeartbeatSample(status=HEARTBEAT_UNMEASURABLE, tick=0, session_id=None, gap=None)
         if after is None:
-            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, before.tick, before.session_id)
+            return HeartbeatSample(
+                status=HEARTBEAT_UNMEASURABLE, tick=before.tick, session_id=before.session_id, gap=gap
+            )
         if after.session_id != before.session_id:
             return HeartbeatSample(
-                HEARTBEAT_RESTARTED, after.tick, after.session_id, before.session_id
+                status=HEARTBEAT_RESTARTED, tick=after.tick, session_id=after.session_id,
+                gap=gap, previous_session_id=before.session_id,
             )
         if after.tick > before.tick:
-            return HeartbeatSample(HEARTBEAT_GROWING, after.tick, after.session_id)
+            return HeartbeatSample(
+                status=HEARTBEAT_GROWING, tick=after.tick, session_id=after.session_id, gap=gap
+            )
         if gap < _MOD_PUBLISH_INTERVAL_SECONDS:
-            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, after.tick, after.session_id)
-        return HeartbeatSample(HEARTBEAT_STALLED, after.tick, after.session_id)
+            return HeartbeatSample(
+                status=HEARTBEAT_UNMEASURABLE, tick=after.tick, session_id=after.session_id, gap=gap
+            )
+        return HeartbeatSample(
+            status=HEARTBEAT_STALLED, tick=after.tick, session_id=after.session_id, gap=gap
+        )
 
     def heartbeat(self, window: float = 3.0) -> tuple[str, int]:
         """Is the world's tick counter growing over `window` seconds -- and

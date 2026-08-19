@@ -978,6 +978,7 @@ def test_heartbeat_detail_exposes_the_session_id_when_growing(tmp_path):
     assert sample.status == HEARTBEAT_GROWING
     assert sample.tick == 11
     assert sample.session_id == "s1"
+    assert sample.gap is not None
     assert sample.previous_session_id is None
 
 
@@ -990,6 +991,8 @@ def test_heartbeat_detail_exposes_the_session_id_when_stalled(tmp_path):
 
     assert sample.status == HEARTBEAT_STALLED
     assert sample.session_id == "s1"
+    assert sample.gap is not None
+    assert sample.gap >= 1.0  # "stalled" only fires once gap has cleared the publish interval
     assert sample.previous_session_id is None
 
 
@@ -1008,6 +1011,7 @@ def test_heartbeat_detail_exposes_both_session_ids_on_restart(tmp_path):
 
     assert sample.status == HEARTBEAT_RESTARTED
     assert sample.session_id == "session-new"
+    assert sample.gap is not None
     assert sample.previous_session_id == "session-old"
 
 
@@ -1017,6 +1021,7 @@ def test_heartbeat_detail_session_id_is_none_when_nothing_was_ever_read(tmp_path
 
     assert sample.status == HEARTBEAT_UNMEASURABLE
     assert sample.session_id is None
+    assert sample.gap is None  # no measurement was even possible -- nothing to report
     assert sample.previous_session_id is None
 
 
@@ -1035,7 +1040,57 @@ def test_heartbeat_detail_session_id_reflects_the_readable_first_sample_on_lost_
 
     assert sample.status == HEARTBEAT_UNMEASURABLE
     assert sample.session_id == "s1"
+    assert sample.gap is not None  # a real measurement was attempted, unlike the never-read case
     assert sample.previous_session_id is None
+
+
+# --- HeartbeatSample.gap: tells "gap too short" apart from "sample lost" ----
+
+
+def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_path):
+    """The exact distinction this field exists for. Both scenarios below
+    report status == "unmeasurable" with an identical shape everywhere
+    except gap -- collapsing them (as the pre-fix HeartbeatSample did) would
+    leave a caller unable to tell "ask again with a bigger window" (scenario
+    A) apart from "something is wrong with the mod, a bigger window will
+    not help" (scenario B, gap comfortably above the publish interval even
+    though the verdict is still "unmeasurable")."""
+    # Scenario A: both samples ARE readable (the file exists the whole
+    # probe) -- "unmeasurable" here purely because the gap was too short to
+    # trust a same-tick result, not because anything failed to read.
+    a_dir = tmp_path / "a"
+    a_dir.mkdir()
+    ch_a = Channel(a_dir)
+    _write_state(a_dir, tick=10, session_id="s1")
+    short_gap_sample = ch_a.heartbeat_detail(window=0.1)
+
+    # Scenario B: the first sample succeeds, but the file is deleted before
+    # the second read -- "unmeasurable" because a read genuinely failed,
+    # even though the window comfortably exceeds the publish interval.
+    b_dir = tmp_path / "b"
+    b_dir.mkdir()
+    ch_b = Channel(b_dir)
+    _write_state(b_dir, tick=10, session_id="s1")
+
+    def delete_soon():
+        time.sleep(0.05)
+        (b_dir / STATE_FILENAME).unlink()
+
+    threading.Thread(target=delete_soon, daemon=True).start()
+    lost_sample_sample = ch_b.heartbeat_detail(window=1.5)
+
+    assert short_gap_sample.status == HEARTBEAT_UNMEASURABLE
+    assert lost_sample_sample.status == HEARTBEAT_UNMEASURABLE
+    # Identical status and (here) identical tick/session_id -- gap is the
+    # ONLY field that tells these two apart.
+    assert short_gap_sample.tick == lost_sample_sample.tick == 10
+    assert short_gap_sample.session_id == lost_sample_sample.session_id == "s1"
+
+    assert short_gap_sample.gap is not None
+    assert short_gap_sample.gap < 1.0  # too short to trust -- ask again with a bigger window
+
+    assert lost_sample_sample.gap is not None
+    assert lost_sample_sample.gap >= 1.0  # waited at least a full publish interval, still lost
 
 
 def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
