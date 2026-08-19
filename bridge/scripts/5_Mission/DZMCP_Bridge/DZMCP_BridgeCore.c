@@ -74,6 +74,25 @@ class DZMCP_BridgeCore
     // Upper bound on the deliberate padding the probe_bloat verb can request.
     static const int PAD_MAX = 16384;
 
+    // How many CONSECUTIVE failures of one file operation it takes before the
+    // bridge stops calling it bad luck and starts calling it broken.
+    //
+    // Three of the four ways a file operation here can fail are self-healing:
+    // another process holding a handle on the state file or the mailbox for a
+    // moment (Windows blocks the delete and can block the open), which the very
+    // next tick simply retries. Routing those straight to the red verdict path
+    // would fail an otherwise perfect boot on one transient collision, with no
+    // threshold anywhere to absorb it -- and the collision is not hypothetical:
+    // the Python side's own mailbox clear opens the file for reading right
+    // before unlinking it, and a caller waiting for a result polls the state
+    // file about twice a second against this 1 Hz writer. Neither live boot
+    // produced one across roughly 130 opens, so the rate is unmeasured; the
+    // classification was wrong regardless of the rate.
+    //
+    // Five consecutive failures of the SAME operation is five seconds of one
+    // file staying unavailable, which no ordinary collision survives.
+    static const int FAULT_STREAK_LIMIT = 5;
+
     // ---- state ------------------------------------------------------------
 
     protected string m_SessionId;
@@ -109,6 +128,13 @@ class DZMCP_BridgeCore
     // Set by probe_bloat for exactly one publish.
     protected string m_PadNext;
 
+    // Consecutive-failure counters, one per retryable file operation. Each is
+    // reset by its own success, so they measure a RUN of failures rather than a
+    // total -- see FAULT_STREAK_LIMIT.
+    protected int m_MailboxOpenFails;
+    protected int m_MailboxDeleteFails;
+    protected int m_StateWriteFails;
+
     // Never assigned, on purpose: the probe_fault verb dereferences it to find
     // out whether a repeating CallLater survives a script fault raised inside
     // its own handler. The sources do not answer that, and the answer decides
@@ -132,6 +158,9 @@ class DZMCP_BridgeCore
         m_CmdProgressAt = 0;
         m_TerminalPublishes = 0;
         m_PadNext = "";
+        m_MailboxOpenFails = 0;
+        m_MailboxDeleteFails = 0;
+        m_StateWriteFails = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -307,9 +336,11 @@ class DZMCP_BridgeCore
         FileHandle handle = OpenFile(DZMCP_CMD_PATH, FileMode.READ);
         if (handle == 0)
         {
-            Malfunction("the mailbox exists but could not be opened for reading");
+            m_MailboxOpenFails++;
+            Retryable(m_MailboxOpenFails, "the mailbox exists but could not be opened for reading");
             return;
         }
+        m_MailboxOpenFails = 0;
 
         string raw;
         ReadFile(handle, raw, READ_LIMIT);
@@ -321,9 +352,11 @@ class DZMCP_BridgeCore
         // try again, which is recoverable; executing it repeatedly is not.
         if (!DeleteFile(DZMCP_CMD_PATH))
         {
-            Malfunction("the mailbox was read but could not be deleted -- the command is NOT claimed" + " and nothing was executed; the next tick will try again");
+            m_MailboxDeleteFails++;
+            Retryable(m_MailboxDeleteFails, "the mailbox was read but could not be deleted -- the command is NOT claimed and nothing was executed; the next tick will try again");
             return;
         }
+        m_MailboxDeleteFails = 0;
 
         m_CommandsClaimed++;
         HandleClaimed(raw);
@@ -599,10 +632,31 @@ class DZMCP_BridgeCore
     // survives, the "a previous tick did not complete" path above is the whole
     // fix. Expect this verb to put a genuine script fault in the log -- that
     // is the measurement, not an accident.
+    //
+    // ANSWERED on a live stand: the tick survived (64 -> 77 over twelve
+    // seconds) and the next tick correctly failed the command. Kept as the
+    // regression test for that, behind an explicit confirmation.
+    //
+    // The interlock is not politeness. The fault leaves "NULL pointer to
+    // instance" in the script log, a string this project's own profile lists
+    // under expect.forbid, so running this verb FAILS THAT BOOT'S VERDICT. The
+    // escape-hatch tool passes an arbitrary verb straight through, so anything
+    // that reaches this name -- a typo, a replayed transcript, a model guessing
+    // -- would otherwise poison a boot with no way to have said no.
     protected void VerbFault(map<string, string> args)
     {
-        if (RefuseUnknownArgs(args, "|", "(none)"))
+        if (RefuseUnknownArgs(args, "|confirm|", "confirm"))
             return;
+
+        string confirm = "";
+        if (args && args.Contains("confirm"))
+            confirm = args.Get("confirm");
+
+        if (confirm != "yes")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "probe_fault refuses to run without confirm=yes: it raises a real script fault on purpose, which puts a forbidden string in the log and fails this boot's verdict");
+            return;
+        }
 
         DZMCP_Log.Info("command " + m_State.command.id + " will raise a deliberate script fault; the next tick reports what survived");
 
@@ -615,9 +669,14 @@ class DZMCP_BridgeCore
 
     protected void Publish()
     {
-        m_Tick++;
+        // The counter advances only when a document actually reaches the disk.
+        // Bumping it up front and then failing the write would spend a tick
+        // number on nothing and break the invariant every consistency check
+        // here leans on -- that a published document always reads
+        // tick == world.publishes + 1.
+        int nextTick = m_Tick + 1;
 
-        m_State.tick = m_Tick;
+        m_State.tick = nextTick;
         m_State.session_id = m_SessionId;
 
         m_State.world.tick_time = GetGame().GetTickTime();
@@ -653,12 +712,15 @@ class DZMCP_BridgeCore
         FileHandle handle = OpenFile(DZMCP_STATE_PATH, FileMode.WRITE);
         if (handle == 0)
         {
-            Malfunction("the state file could not be opened for writing");
+            m_StateWriteFails++;
+            Retryable(m_StateWriteFails, "the state file could not be opened for writing");
             return;
         }
         FPrint(handle, text);
         CloseFile(handle);
+        m_StateWriteFails = 0;
 
+        m_Tick = nextTick;
         m_Publishes++;
         if (IsTerminal(m_State.command.status))
             m_TerminalPublishes++;
@@ -690,12 +752,36 @@ class DZMCP_BridgeCore
         DZMCP_Log.Fault(message);
     }
 
+    // A file operation failed in a way the NEXT TICK can simply retry -- most
+    // likely another process holding a handle for a moment, which on Windows
+    // blocks both an open and a delete. `streak` is how many times this same
+    // operation has failed in a row, its counter reset by its own success.
+    //
+    // Reported once when it starts and once when it becomes a malfunction, and
+    // silently in between. Once per tick would flood a ten-entry ring in ten
+    // seconds and push out every other error just when they matter most; never
+    // at all would hide a condition that stops the bridge from doing its job.
+    protected void Retryable(int streak, string message)
+    {
+        if (streak == 1)
+        {
+            RecordError(message);
+            DZMCP_Log.Info(message + " -- retrying on the next tick");
+            return;
+        }
+
+        if (streak == FAULT_STREAK_LIMIT)
+            Malfunction(message + " -- " + streak + " ticks in a row, no longer treating this as a passing collision");
+    }
+
     // A short, safe excerpt of text that arrived from outside, for quoting
-    // into an error entry. Sanitized (printable ASCII only) because one
-    // non-UTF-8 byte anywhere in the document makes the WHOLE document
-    // unreadable to the Python side, permanently, for as long as it keeps
-    // being written -- a mailbox full of some other encoding must not be able
-    // to take the channel down by being quoted back.
+    // into an error entry. Sanitized (printable ASCII, and no character a JSON
+    // string would have to escape) because one bad byte anywhere in the
+    // document makes the WHOLE document unreadable to the Python side, for as
+    // long as it keeps being written -- and a ring entry keeps being written
+    // until ten more errors rotate it out. A mailbox full of some other
+    // encoding, or a truncated JSON document full of quotes, must not be able
+    // to take the channel down by being quoted back at it.
     protected string Excerpt(string raw)
     {
         return DZMCP_Text.Sanitize(raw, 120);

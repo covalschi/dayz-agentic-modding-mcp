@@ -22,8 +22,8 @@
 //     through it, so the verdict goes red when it deserves to.
 class DZMCP_Text
 {
-    // A copy of `raw` that is safe to publish: printable ASCII only, at most
-    // `maxLen` bytes.
+    // A copy of `raw` that is safe to publish: printable ASCII only, no
+    // characters a JSON string would have to escape, at most `maxLen` bytes.
     //
     // Byte-wise on purpose. Enforce's string.Length()/Get()/Substring() are
     // byte-based (SubstringUtf8/LengthUtf8 exist separately for the character
@@ -32,6 +32,20 @@ class DZMCP_Text
     // guarantee wanted here, because a multi-byte character split by the
     // length cap would otherwise leave a truncated UTF-8 sequence that makes
     // the whole document undecodable.
+    //
+    // The double quote and the backslash are folded to visually similar safe
+    // characters rather than kept. Whether the engine's serializer escapes them
+    // cannot be settled from the sources -- the writer is native, with no body
+    // to read -- and if it does not, ONE of them anywhere in the document makes
+    // the whole document unreadable to the Python side. That is not a passing
+    // stumble: this function's output goes into the errors ring, which holds an
+    // entry until ten more errors rotate it out, so a single bad excerpt would
+    // take the channel down for a long time. The most likely source is the
+    // likeliest kind of bad mailbox there is -- a TRUNCATED JSON document,
+    // which is full of quotes. Now that opening for write is known to truncate,
+    // this is the last route left to a long-lived unreadable channel, and an
+    // excerpt is diagnostic prose: nothing downstream parses it, so folding two
+    // characters costs nothing and closes the route.
     static string Sanitize(string raw, int maxLen)
     {
         int len = raw.Length();
@@ -43,7 +57,11 @@ class DZMCP_Text
         {
             string ch = raw.Get(i);
             int code = ch.ToAscii();
-            if (code >= 32 && code <= 126)
+            if (code == 34)          // " -- would need escaping in JSON
+                buf = buf + "'";
+            else if (code == 92)     // \ -- likewise
+                buf = buf + "/";
+            else if (code >= 32 && code <= 126)
                 buf = buf + ch;
             else
                 buf = buf + " ";
