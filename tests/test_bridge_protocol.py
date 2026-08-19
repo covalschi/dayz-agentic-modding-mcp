@@ -13,6 +13,7 @@ from dayz_mcp.bridge.protocol import (
 def _state_json(**overrides) -> str:
     payload = {
         "tick": 42,
+        "session_id": "boot-1000",
         "command": {
             "id": "ping-1000-1",
             "status": "done",
@@ -42,6 +43,7 @@ def test_parse_valid_state_returns_populated_bridge_state():
     state = parse_state(_state_json())
     assert state == BridgeState(
         tick=42,
+        session_id="boot-1000",
         command=CommandState(
             id="ping-1000-1", status="done", detail="pong", finished_at=1000.5
         ),
@@ -93,6 +95,30 @@ def test_parse_state_with_null_command_has_no_command():
     state = parse_state(_state_json(command=None))
     assert state is not None
     assert state.command is None
+
+
+# --- session_id: required, opaque, exact -----------------------------------
+
+
+def test_parse_state_without_session_id_returns_none():
+    # Required for the same reason tick is required (see BridgeState's
+    # docstring): a state JSON that parses but omits it entirely comes from
+    # something that does not speak this version of the protocol, which is
+    # the same "cannot make sense of it" case as every other malformed field.
+    payload = json.loads(_state_json())
+    del payload["session_id"]
+    assert parse_state(json.dumps(payload)) is None
+
+
+def test_parse_state_preserves_session_id_exactly():
+    # Fidelity matters here for the same reason it matters for command.id:
+    # Channel.heartbeat compares session_id across two samples by equality
+    # to detect a restart, so a version that mangled or truncated it would
+    # silently defeat that comparison (report a restart that didn't happen,
+    # or miss one that did).
+    state = parse_state(_state_json(session_id="boot-restart-42"))
+    assert state is not None
+    assert state.session_id == "boot-restart-42"
 
 
 # --- correlation: a state can be reporting on someone else's command ----

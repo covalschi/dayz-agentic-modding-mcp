@@ -12,12 +12,20 @@ import json
 import threading
 import time
 
-from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel
+from dayz_mcp.bridge.channel import (
+    CMD_FILENAME,
+    HEARTBEAT_GROWING,
+    HEARTBEAT_RESTARTED,
+    HEARTBEAT_STALLED,
+    HEARTBEAT_UNMEASURABLE,
+    STATE_FILENAME,
+    Channel,
+)
 from dayz_mcp.bridge.protocol import Command
 
 
 def _write_state(profiles_dir, **overrides) -> None:
-    payload = {"tick": 1, "command": None, "errors": [], "world": {}}
+    payload = {"tick": 1, "session_id": "session-1", "command": None, "errors": [], "world": {}}
     payload.update(overrides)
     (profiles_dir / STATE_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
 
@@ -61,22 +69,12 @@ def test_send_refuses_when_mailbox_is_unclaimed(tmp_path):
     assert on_disk["id"] == first.id
 
 
-def test_concurrent_sends_exactly_one_succeeds(tmp_path):
-    """Check-then-write is not atomic: two threads can both see an empty
-    mailbox and both proceed to write, and one silently overwrites the
-    other's command with no error raised anywhere. This is not hypothetical
-    once tool calls are dispatched through a thread pool (Task 4) -- several
-    world_* calls can reach the same Channel at once. Exactly one send must
-    win; every other thread must see a refusal, and nothing must be left
-    half-written or double-written on disk.
-
-    Fired from a barrier, not a sleep race, so all N threads call send() at
-    the same instant every run -- deterministic, not a chance to catch the
-    race only sometimes.
-    """
-    ch = Channel(tmp_path)
-    n = 8
-    commands = [Command(id=f"ping-{i}-1", verb="ping", args={"i": i}) for i in range(n)]
+def _fire_concurrent_sends(round_dir, n, tag):
+    """Fire `n` send()s at the same instant (barrier-released, not a sleep
+    race) against a fresh empty mailbox in `round_dir`. Returns the list of
+    Results, one per thread, in thread-index order."""
+    ch = Channel(round_dir)
+    commands = [Command(id=f"{tag}-{i}", verb="ping", args={"i": i}) for i in range(n)]
     barrier = threading.Barrier(n)
     results: list = [None] * n
 
@@ -89,32 +87,75 @@ def test_concurrent_sends_exactly_one_succeeds(tmp_path):
         t.start()
     for t in threads:
         t.join(timeout=5)
+    return commands, results
 
-    assert all(r is not None for r in results), "a thread did not finish within the join timeout"
-    successes = [r for r in results if r.ok]
-    failures = [r for r in results if not r.ok]
-    assert len(successes) == 1, f"expected exactly one send to succeed, got {len(successes)}"
-    assert len(failures) == n - 1
-    for f in failures:
-        assert f.hint, "a refusal must say what to do, not just that it failed"
-        # All 8 sends started against the SAME empty mailbox, so every loser
-        # here lost the atomic os.link claim -- ordinary contention between
-        # senders, not a mailbox some earlier command left unclaimed. That
-        # is a different situation with different wording (see
-        # test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable);
-        # asserting it here pins the concurrent case to its own text so a
-        # future change collapsing the two back together fails this test.
-        assert "concurrent sender" in f.error
-        assert "picked up" not in f.hint
 
-    # The mailbox holds exactly the one command that won -- no corruption
-    # from two writers landing on the same file at once.
-    on_disk = json.loads((tmp_path / CMD_FILENAME).read_text(encoding="utf-8"))
-    assert on_disk["id"] in {c.id for c in commands}
+def test_concurrent_sends_exactly_one_succeeds(tmp_path):
+    """Check-then-write is not atomic: two threads can both see an empty
+    mailbox and both proceed to write, and one silently overwrites the
+    other's command with no error raised anywhere. This is not hypothetical
+    once tool calls are dispatched through a thread pool (Task 4) -- several
+    world_* calls can reach the same Channel at once. Exactly one send must
+    win every round; every loser must return ONE OF the two documented
+    refusals, and nothing must be left half-written or double-written on
+    disk.
 
-    # And the losers' cleanup left no temp file behind either.
-    leftovers = [p.name for p in tmp_path.iterdir() if p.name != CMD_FILENAME]
-    assert leftovers == [], f"temp file(s) left behind: {leftovers}"
+    A loser can legitimately land on EITHER refusal -- that is correct, not
+    a bug. A thread descheduled between barrier.wait() and its own exists()
+    pre-check can find the winner's file already on disk and take the
+    mailbox-occupied path rather than losing the os.link claim itself. An
+    earlier version of this test asserted every loser hits the os.link race
+    path specifically; that assumption does not hold under load and made
+    the test itself flaky -- reviewer-measured at 16% of rounds failing with
+    6 concurrent threads under ordinary background load (2.5% at 2 threads),
+    because a busy machine reschedules threads far more than an idle one,
+    and this suite (which builds mods and boots servers) is not idle. Fixed
+    here to assert only what os.link's atomicity actually guarantees
+    (exactly one winner; every loser is one of the two known refusals;
+    nothing corrupted or left behind), and to prove the os.link race path is
+    genuinely exercised by repeating the round rather than by asserting it
+    happens on every single one.
+    """
+    n = 8
+    rounds = 20
+    race_path_seen = False
+
+    for round_i in range(rounds):
+        round_dir = tmp_path / f"round-{round_i}"
+        round_dir.mkdir()
+        commands, results = _fire_concurrent_sends(round_dir, n, tag=f"ping-{round_i}")
+
+        assert all(r is not None for r in results), f"round {round_i}: a thread did not finish"
+        successes = [r for r in results if r.ok]
+        failures = [r for r in results if not r.ok]
+        assert len(successes) == 1, f"round {round_i}: expected exactly one success, got {len(successes)}"
+        assert len(failures) == n - 1
+
+        for f in failures:
+            assert f.hint, "a refusal must say what to do, not just that it failed"
+            is_lost_race = "concurrent sender" in f.error
+            is_unclaimed = "picked up" in f.hint
+            assert is_lost_race or is_unclaimed, (
+                f"round {round_i}: refusal matched neither known text: "
+                f"error={f.error!r} hint={f.hint!r}"
+            )
+            if is_lost_race:
+                race_path_seen = True
+
+        # The mailbox holds exactly the one command that won -- no
+        # corruption from two writers landing on the same file at once.
+        on_disk = json.loads((round_dir / CMD_FILENAME).read_text(encoding="utf-8"))
+        assert on_disk["id"] in {c.id for c in commands}
+
+        # And every loser's cleanup left no temp file behind either.
+        leftovers = [p.name for p in round_dir.iterdir() if p.name != CMD_FILENAME]
+        assert leftovers == [], f"round {round_i}: temp file(s) left behind: {leftovers}"
+
+    assert race_path_seen, (
+        f"the atomic os.link race path (FileExistsError) was never observed across "
+        f"{rounds} rounds of {n} threads -- this test would no longer be proving the "
+        f"claim it makes"
+    )
 
 
 def test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable(tmp_path):
@@ -122,43 +163,45 @@ def test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable(tmp_path):
     mailbox left unclaimed implies the MOD may be slow or wedged and is
     worth a caller's attention; a lost race implies nothing about the mod at
     all, just an ordinary sibling sender, and calls for a plain retry. A
-    caller (or a human reading a log) must be able to tell which happened --
-    this fails if the two refusals are ever merged back into one message.
+    caller (or a human reading a log) must be able to tell which happened.
+
+    It is specifically the HINT comparison that proves this, not the error
+    comparison: the error text embeds the mailbox's own path, which differs
+    between scenario A and B's directories regardless of whether the
+    underlying refusal was merged back into one -- so error != error would
+    pass even against broken code. The hint carries no such per-scenario
+    substitution, so it is what actually fails if the two messages are ever
+    merged again.
     """
     # Scenario A: the exists() pre-check finds a real, earlier command the
     # mod has not claimed yet.
-    ch_a = Channel(tmp_path / "a")
-    (tmp_path / "a").mkdir()
+    a_dir = tmp_path / "a"
+    a_dir.mkdir()
+    ch_a = Channel(a_dir)
     assert ch_a.send(Command(id="ping-1-1", verb="ping", args={})).ok
     unclaimed = ch_a.send(Command(id="ping-2-1", verb="ping", args={}))
     assert not unclaimed.ok
 
-    # Scenario B: two sends racing for the SAME empty mailbox -- one wins
-    # via os.link, the other loses to FileExistsError. A fresh, separate
-    # directory so this is genuinely the race path, not the pre-check path.
-    b_dir = tmp_path / "b"
-    b_dir.mkdir()
-    ch_b = Channel(b_dir)
-    barrier = threading.Barrier(2)
-    results: list = [None, None]
-    race_commands = [Command(id="race-1", verb="ping", args={}), Command(id="race-2", verb="ping", args={})]
+    # Scenario B: several sends racing for the SAME empty mailbox. A loser
+    # can legitimately land on either refusal (see
+    # test_concurrent_sends_exactly_one_succeeds's docstring for why), so a
+    # small retry loop over fresh directories is what makes finding a
+    # genuine os.link-race loser deterministic rather than a low-probability
+    # flake in a test whose whole point is to inspect that specific one.
+    lost_race = None
+    for attempt in range(10):
+        b_dir = tmp_path / f"b-{attempt}"
+        b_dir.mkdir()
+        _commands, results = _fire_concurrent_sends(b_dir, n=6, tag=f"race-{attempt}")
+        lost_race = next(
+            (r for r in results if r is not None and not r.ok and "concurrent sender" in r.error),
+            None,
+        )
+        if lost_race is not None:
+            break
+    assert lost_race is not None, "never observed a genuine lost-race refusal across 10 attempts"
 
-    def worker(i):
-        barrier.wait()
-        results[i] = ch_b.send(race_commands[i])
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=5)
-
-    assert all(r is not None for r in results)
-    lost_race = next(r for r in results if not r.ok)
-
-    # The two refusals must be genuinely different texts, not just two
-    # Result objects that happen to both be `ok=False`.
-    assert unclaimed.error != lost_race.error
+    # The two refusals must be genuinely different HINTS.
     assert unclaimed.hint != lost_race.hint
     assert "picked up" in unclaimed.hint
     assert "picked up" not in lost_race.hint
@@ -284,38 +327,38 @@ def test_await_result_never_blocks_past_its_timeout(tmp_path):
     assert time.monotonic() - started < 2.0
 
 
-# --- heartbeat: growing vs. stalled tick -----------------------------------
+# --- heartbeat: growing / stalled / restarted / unmeasurable ---------------
 
 
 def test_heartbeat_detects_a_growing_tick(tmp_path):
     ch = Channel(tmp_path)
-    _write_state(tmp_path, tick=10)
+    _write_state(tmp_path, tick=10, session_id="s1")
 
     def bump_later():
         time.sleep(0.1)
-        _write_state(tmp_path, tick=11)
+        _write_state(tmp_path, tick=11, session_id="s1")
 
     threading.Thread(target=bump_later, daemon=True).start()
-    growing, tick = ch.heartbeat(window=0.25)
+    status, tick = ch.heartbeat(window=0.25)
 
-    assert growing is True
+    assert status == HEARTBEAT_GROWING
     assert tick == 11
 
 
 def test_heartbeat_detects_a_stalled_tick(tmp_path):
     ch = Channel(tmp_path)
-    _write_state(tmp_path, tick=42)
+    _write_state(tmp_path, tick=42, session_id="s1")
 
-    growing, tick = ch.heartbeat(window=0.15)
+    status, tick = ch.heartbeat(window=0.15)
 
-    assert growing is False
+    assert status == HEARTBEAT_STALLED
     assert tick == 42
 
 
-def test_heartbeat_with_no_state_file_reports_not_growing(tmp_path):
+def test_heartbeat_with_no_state_file_is_unmeasurable(tmp_path):
     ch = Channel(tmp_path)
-    growing, tick = ch.heartbeat(window=0.05)
-    assert growing is False
+    status, tick = ch.heartbeat(window=0.05)
+    assert status == HEARTBEAT_UNMEASURABLE
     assert tick == 0
 
 
@@ -327,10 +370,143 @@ def test_heartbeat_tolerates_a_single_torn_read(tmp_path):
 
     def create_soon():
         time.sleep(0.02)
-        _write_state(tmp_path, tick=3)
+        _write_state(tmp_path, tick=3, session_id="s1")
 
     threading.Thread(target=create_soon, daemon=True).start()
-    growing, tick = ch.heartbeat(window=0.3)
+    status, tick = ch.heartbeat(window=0.3)
 
     assert tick == 3
-    assert growing is False  # recovered to the same tick both times, not a growth signal
+    assert status == HEARTBEAT_STALLED  # recovered to the same tick both times, not growth
+
+
+def test_heartbeat_detects_a_restart_via_changed_session_id(tmp_path):
+    """The mod's tick counter restarts at 0 every boot while the profile
+    directory (and so the state file) survives a restart -- across a
+    restart the published tick can go DOWN, and a naive comparison would
+    read a healthy, freshly booted bridge as dead. A changed session_id
+    between the two samples must be its own outcome, not folded into
+    "stalled" (which implies the same world didn't move) or "growing"
+    (which implies meaningful progress on the same world)."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=500, session_id="session-old")
+
+    def reboot_soon():
+        time.sleep(0.05)
+        _write_state(tmp_path, tick=3, session_id="session-new")  # tick went DOWN
+
+    threading.Thread(target=reboot_soon, daemon=True).start()
+    status, tick = ch.heartbeat(window=0.2)
+
+    assert status == HEARTBEAT_RESTARTED
+    assert tick == 3  # the new session's own tick -- not compared against the old one
+
+
+def test_heartbeat_reports_unmeasurable_when_the_second_sample_fails(tmp_path):
+    """A missing/unreadable SECOND sample is a measurement failure, not
+    evidence of a stalled tick -- conflating the two tells a caller the game
+    is frozen when the truth may just be "could not check right now" (here:
+    the state file was deleted between samples, e.g. mid-restart or because
+    the stand went down). A single failed read on the second sample is
+    enough to reach this -- read_state returns None for a missing file on
+    every one of the tolerant reader's attempts, not just the first."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=7, session_id="s1")
+
+    def delete_soon():
+        time.sleep(0.05)
+        (tmp_path / STATE_FILENAME).unlink()
+
+    threading.Thread(target=delete_soon, daemon=True).start()
+    status, tick = ch.heartbeat(window=0.3)
+
+    assert status == HEARTBEAT_UNMEASURABLE
+    assert tick == 7  # the last tick actually read (the FIRST sample), not 0
+
+
+# --- clear_mailbox: the only way to unwedge a channel -----------------------
+
+
+def test_clear_mailbox_when_empty_reports_nothing_to_clear(tmp_path):
+    ch = Channel(tmp_path)
+
+    result = ch.clear_mailbox()
+
+    assert not result.ok
+    assert "empty" in result.error
+    assert result.hint
+
+
+def test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive(tmp_path):
+    """The exact scenario clear_mailbox exists for: a command sent while
+    nothing is running to claim it. No state file at all means heartbeat's
+    probe reads "unmeasurable" -- never "growing"/"restarted" -- so this
+    must be clearable WITHOUT force."""
+    ch = Channel(tmp_path)
+    cmd = Command(id="ping-1-1", verb="ping", args={"x": 1})
+    assert ch.send(cmd).ok
+
+    result = ch.clear_mailbox(probe_window=0.05)
+
+    assert result.ok, result.error
+    assert result.data["discarded"]["id"] == cmd.id
+    assert result.data["discarded"]["verb"] == cmd.verb
+    assert result.data["heartbeat"] == HEARTBEAT_UNMEASURABLE
+    assert not (tmp_path / CMD_FILENAME).exists()
+    # The wedge is gone -- a fresh send() succeeds right away.
+    assert ch.send(Command(id="ping-2-1", verb="ping", args={})).ok
+
+
+def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
+    """A state file that exists but is frozen (same tick, same session,
+    across the probe window) is the OTHER shape a genuinely down or
+    not-yet-wired bridge can take -- e.g. a stale file left over from a
+    previous run. Also clearable without force: "stalled" is not "alive"."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=99, session_id="stale-session")
+    assert ch.send(Command(id="ping-1-1", verb="ping", args={})).ok
+
+    result = ch.clear_mailbox(probe_window=0.05)
+
+    assert result.ok, result.error
+    assert result.data["heartbeat"] == HEARTBEAT_STALLED
+
+
+def test_clear_mailbox_refuses_when_bridge_looks_alive(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")
+    assert ch.send(Command(id="ping-1-1", verb="ping", args={})).ok
+
+    def bump_later():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=11, session_id="s1")
+
+    threading.Thread(target=bump_later, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=0.1)
+
+    assert not result.ok
+    assert "alive" in result.error
+    assert "force=True" in result.hint
+    # Refused -- the command must still be sitting there, untouched.
+    assert (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_force_overrides_an_alive_looking_bridge(tmp_path):
+    """force=True proceeds anyway, but the result still records that it
+    overrode a live-looking bridge -- a forced clear is not silent about
+    what it did."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")
+    cmd = Command(id="ping-1-1", verb="ping", args={})
+    assert ch.send(cmd).ok
+
+    def bump_later():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=11, session_id="s1")
+
+    threading.Thread(target=bump_later, daemon=True).start()
+    result = ch.clear_mailbox(force=True, probe_window=0.1)
+
+    assert result.ok, result.error
+    assert result.data["discarded"]["id"] == cmd.id
+    assert result.data["heartbeat"] == HEARTBEAT_GROWING
+    assert not (tmp_path / CMD_FILENAME).exists()

@@ -15,9 +15,18 @@ specs/2026-08-19-dayz-mcp-phase2-bridge.md Sec 3, hub repo):
    mod never observes a half-written command. `os.link` also doubles as the
    atomic claim that stops two concurrent senders from both succeeding --
    see `send`'s own docstring.
+3. The mod's tick counter is scoped to a single boot: it restarts at 0 while
+   the state file (living in the profile directory, which the stand keeps
+   across restarts) still holds whatever the previous run last wrote. Every
+   state therefore also carries `session_id` (see `protocol.BridgeState`),
+   an opaque value that changes every boot -- `heartbeat` uses it to tell
+   "a new world just came up" apart from "the same world stalled", since a
+   plain tick comparison across a restart can go DOWN and reads a freshly
+   booted, healthy bridge as dead.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -41,6 +50,14 @@ _TOLERANT_READ_DELAY = 0.05
 # longer cannot produce more information -- that IS the result.
 _TERMINAL_STATUSES = ("done", "failed")
 
+# heartbeat() outcomes. Four, not two: "the tick did not move" and "I could
+# not take a second sample" are different claims (see heartbeat's own
+# docstring), and "a new world just booted" is different again from either.
+HEARTBEAT_GROWING = "growing"
+HEARTBEAT_STALLED = "stalled"
+HEARTBEAT_RESTARTED = "restarted"
+HEARTBEAT_UNMEASURABLE = "unmeasurable"
+
 
 class Channel:
     """One channel into a single running server's -profiles directory."""
@@ -60,9 +77,10 @@ class Channel:
         tried to write). This means the MOD may be slow or wedged -- there
         is a real previous command still waiting, which is worth a caller's
         attention. Deliberately a different message/hint from
-        `_lost_race_result`: that one is ordinary contention between two
-        senders and implies nothing about the mod at all. Conflating the two
-        was tried and reverted -- see the fix-round-2 note in the report."""
+        `_lost_race_result` below: that one is ordinary contention between
+        two senders and implies nothing about the mod at all, so a caller
+        (or a human reading a log) needs to be able to tell the two apart
+        rather than treating both as "something is stuck"."""
         return fail(
             f"mailbox already holds an unclaimed command at {cmd_path}",
             hint="the mod has not picked up the previous command yet -- wait for it to "
@@ -73,11 +91,14 @@ class Channel:
         """A concurrent `send()` call claimed the mailbox microseconds
         before this one did (the atomic `os.link` claim below lost the
         race). This says NOTHING about the mod -- there was no previous
-        command sitting unclaimed, and nothing is wedged; a sibling call on
-        this same process simply won first. The caller's response should be
-        an ordinary short retry, not "go investigate a stuck mod", which is
-        why this is a distinct message/hint from `_unclaimed_mailbox_result`
-        rather than reusing it."""
+        command sitting unclaimed, and nothing is wedged; some OTHER sender
+        simply won first (another thread in this process, or, per `send`'s
+        own docstring, even an unrelated process pointed at the same
+        mailbox -- `os.link`'s atomicity is not process-scoped, so this is
+        not assuming it was a sibling in the same process). The caller's
+        response should be an ordinary short retry, not "go investigate a
+        stuck mod", which is why this is a distinct message/hint from
+        `_unclaimed_mailbox_result` above rather than reusing it."""
         return fail(
             f"lost a race for the mailbox at {cmd_path} to a concurrent sender",
             hint="another send() call claimed the mailbox microseconds ago -- this is "
@@ -177,6 +198,87 @@ class Channel:
                 pass
         return ok(cmd.id)
 
+    def clear_mailbox(self, force: bool = False, probe_window: float = 3.0) -> Result:
+        """Discard whatever the mailbox currently holds -- the only way to
+        unwedge a channel that nothing else can ever clear.
+
+        `send` is the only writer of the mailbox and never removes it:
+        "claimed" is defined entirely as the mod deleting the file after
+        reading it (Task 5). A command sent while the stand is down, or
+        before the bridge mod is wired into -serverMod, therefore sits
+        there forever -- every later `send` returns the mailbox-occupied
+        refusal, and nothing in the running system can ever clear it on its
+        own. This is that escape hatch, and deliberately not automatic:
+        nothing else in this module calls it, so a wedge is never silently
+        cleared as a side effect of something else -- a caller (the tool
+        layer, ultimately a human) has to decide to call this.
+
+        Refuses to act, and reports what it found, when `heartbeat` says the
+        bridge looks alive (`"growing"` or `"restarted"`) -- something is
+        actively running right now and could claim the mailbox any moment,
+        so clearing then risks silently destroying live in-flight work,
+        which is worse than leaving the wedge in place a while longer. Pass
+        `force=True` to discard anyway once that risk has been accepted
+        (e.g. after `bridge_status`/`world_state` corroborate the command is
+        stale). `"stalled"` or `"unmeasurable"` mean nothing is currently
+        proven to be moving -- a genuinely down stand or an unwired bridge
+        reads as one of these two, never as `"growing"`/`"restarted"` -- so
+        those proceed without needing `force`.
+
+        On success, reports the discarded command (parsed back from its
+        JSON: id, verb, args) so a caller can tell whether the thing just
+        thrown away was the one they cared about, plus the heartbeat status
+        the probe saw -- recorded even when `force=True` bypassed the
+        refusal, so a forced clear still leaves a record of what it
+        overrode.
+        """
+        cmd_path = self._cmd_path()
+        try:
+            raw = cmd_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return fail(
+                f"mailbox at {cmd_path} is already empty",
+                hint="there is nothing to clear -- send() would succeed right now",
+            )
+        except OSError as exc:
+            return fail(
+                f"failed to read the mailbox to clear it: {exc}",
+                hint=f"check that {cmd_path} is accessible",
+            )
+
+        try:
+            discarded = json.loads(raw)
+        except json.JSONDecodeError:
+            # send() only ever writes complete, valid JSON in one atomic
+            # step -- a parse failure here means something other than this
+            # module put content in the mailbox. Report the raw text rather
+            # than silently losing it.
+            discarded = {"raw": raw}
+
+        status, tick = self.heartbeat(window=probe_window)
+        if status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED) and not force:
+            return fail(
+                f"refusing to clear the mailbox at {cmd_path}: the bridge looks alive "
+                f"(heartbeat={status!r}, tick={tick}) and may claim this command any moment",
+                hint="pass force=True if you are certain this command should be discarded "
+                     "anyway; check bridge_status/world_state first if you are not sure",
+            )
+
+        try:
+            cmd_path.unlink()
+        except FileNotFoundError:
+            # Claimed (by the mod) or cleared (by a concurrent caller)
+            # between our read above and this unlink -- the wedge is gone
+            # either way, which is the outcome this method exists to reach.
+            return ok({"discarded": None, "heartbeat": status,
+                       "note": "mailbox was claimed or cleared concurrently"})
+        except OSError as exc:
+            return fail(
+                f"failed to remove the mailbox: {exc}",
+                hint=f"check that {cmd_path} is writable",
+            )
+        return ok({"discarded": discarded, "heartbeat": status})
+
     def read_state(self) -> BridgeState | None:
         """One read of the mod's state file. None covers every unusable
         outcome -- missing file, a torn write mid-overwrite, even a
@@ -224,22 +326,53 @@ class Channel:
                 return last_own
             time.sleep(max(0.0, min(poll, remaining)))
 
-    def heartbeat(self, window: float = 3.0) -> tuple[bool, int]:
-        """Is the world's tick counter growing over `window` seconds?
+    def heartbeat(self, window: float = 3.0) -> tuple[str, int]:
+        """Is the world's tick counter growing over `window` seconds -- and
+        is it still the SAME world?
 
         The tick is the only proof the world is running -- a state file that
         merely exists proves nothing, since the mod rewrites it whether the
-        world is progressing or hung. Sampled tolerantly (see
-        `_read_state_tolerant`) at both ends, so one torn read landing at
-        exactly the wrong moment is not reported as a dead bridge.
+        world is progressing or hung. But tick alone is not enough either:
+        it restarts at 0 every boot while the profile directory (and so the
+        state file) survives a restart, so a plain before/after tick
+        comparison reads a freshly booted, healthy bridge as dead -- 0 is
+        never greater than whatever the previous run last wrote. Every
+        state also carries `session_id` (module fact 3 / `BridgeState`),
+        which changes every boot; a changed session id between the two
+        samples means "a new world came up in between", not "this one
+        froze".
 
-        Returns (growing, latest_tick). latest_tick is 0 when no valid
-        reading was ever obtained -- there is no tick to report.
+        Both samples go through `_read_state_tolerant`, so one torn read
+        landing at exactly the wrong moment is not mistaken for a dead
+        bridge. But tolerance has a limit, and reaching it is itself
+        information the caller needs: if the SECOND sample never comes back
+        readable within its own retry budget, that is a measurement
+        failure, not evidence the tick stood still -- collapsing the two
+        would tell a caller the world is frozen when the truth may simply be
+        "could not check just now" (e.g. the state file was deleted, or the
+        stand is mid-restart, between the two samples).
+
+        Returns (status, tick):
+          "growing"      -- same session, tick increased: alive, progressing.
+          "stalled"      -- same session, tick unchanged: alive, but frozen.
+          "restarted"    -- session id changed between samples: a NEW world
+                             came up, not a stall on the old one. `tick` is
+                             the new session's own tick -- there is nothing
+                             meaningful to compare it against across a
+                             restart, so it is not compared.
+          "unmeasurable" -- fewer than two readable samples were obtained
+                             (the state file was never readable within
+                             `window`, or the second read failed after the
+                             first one succeeded). Distinct from "stalled":
+                             stalled means the same world was observed twice
+                             and did not move; this means no comparison
+                             could be made at all. `tick` is the last tick
+                             actually read, or 0 if nothing was ever read.
         """
         deadline = time.monotonic() + window
         before = self._read_state_tolerant()
         if before is None:
-            return False, 0
+            return HEARTBEAT_UNMEASURABLE, 0
 
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -247,5 +380,10 @@ class Channel:
 
         after = self._read_state_tolerant()
         if after is None:
-            return False, before.tick
-        return after.tick > before.tick, after.tick
+            return HEARTBEAT_UNMEASURABLE, before.tick
+
+        if after.session_id != before.session_id:
+            return HEARTBEAT_RESTARTED, after.tick
+        if after.tick > before.tick:
+            return HEARTBEAT_GROWING, after.tick
+        return HEARTBEAT_STALLED, after.tick

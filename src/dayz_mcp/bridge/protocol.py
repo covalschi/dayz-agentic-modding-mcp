@@ -59,9 +59,24 @@ class CommandState:
 
 @dataclass(frozen=True)
 class BridgeState:
-    """One snapshot of the mod's state file."""
+    """One snapshot of the mod's state file.
+
+    `session_id` is an opaque value the mod sets once at boot and never
+    changes again until the next boot -- required, like `tick`, because the
+    two exist for the same reason: the mod's tick counter restarts at 0
+    every boot, but the profile directory (and so the state file) survives
+    a restart. Comparing tick alone across two samples therefore cannot
+    tell "the world stalled" apart from "a new world just came up, whose
+    tick has not caught up yet" -- across a restart tick can go DOWN, which
+    a naive comparison reads as backwards progress or a frozen bridge,
+    either way wrong. `session_id` changing between two samples is what
+    `Channel.heartbeat` (bridge/channel.py) uses to tell those apart. Do not
+    assume it is ordered, numeric, or comparable in any way other than
+    equality -- it is opaque by design, chosen entirely by the mod side.
+    """
 
     tick: int
+    session_id: str
     command: CommandState | None = None
     errors: list[str] = field(default_factory=list)
     world: dict = field(default_factory=dict)
@@ -107,6 +122,13 @@ def parse_state(text: str) -> BridgeState | None:
 
         return BridgeState(
             tick=int(raw["tick"]),
+            # Required, same as tick -- see BridgeState's docstring. A state
+            # JSON that parses but omits session_id entirely (as opposed to
+            # a torn write, which would have failed json.loads already
+            # above) means whatever wrote it does not speak this version of
+            # the protocol, which is exactly the "cannot make sense of it"
+            # case this function returns None for everywhere else.
+            session_id=str(raw["session_id"]),
             command=command,
             errors=[str(e) for e in errors],
             world=world,
