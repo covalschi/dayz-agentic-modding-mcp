@@ -1,0 +1,30 @@
+# Portable half of the profile. Copy to dayz-mcp.toml in your mod repository.
+# Nothing here may point at a specific machine.
+
+[project]
+name = "my-mod"
+
+[build]
+# One name per mod. Source lives in <root>/MyMod, the pbo becomes MyMod.pbo and
+# the built mod folder is @MyMod. Declared once so the three cannot drift apart.
+mods = ["MyMod"]
+# Optional: run before packing, for projects that generate code first.
+pre_script = ""
+
+[expect]
+# The line your mod prints when it has finished loading. The server does not
+# know it -- you declare it.
+ready_line   = "MyMod loaded"
+max_warnings = 0
+forbid       = ["Bad type", "Can't compile", "NULL pointer to instance"]
+# Regexes marking script errors that belong to you, used by the client compile
+# check. Example: "SCRIPT\\s+\\(E\\).*MyPrefix_"
+error_regex  = []
+# Extra engine noise to ignore, on top of the built-in list.
+noise        = []
+
+# Any key=value pairs your ready line carries. The server does not know these
+# names; it parses whatever it finds and compares with what you declare here.
+[expect.counters]
+items   = 12
+recipes = 3
