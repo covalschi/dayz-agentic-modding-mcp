@@ -939,6 +939,78 @@ def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path
     assert final.data["status"] == "done"
 
 
+# --- Final review, item 3: the same defect returns when a project is left and
+# came back to. The previous fix compared against the immediately previous
+# project only, so A -> B -> A rebuilt and reloaded A's store while A's worker
+# was still alive in this very process. ---
+
+
+def test_switching_away_and_back_does_not_mark_a_running_job_as_lost(tmp_path, monkeypatch):
+    """A -> B -> A while a build of A is genuinely mid-flight. The agent is
+    otherwise told, permanently, that a build which then succeeded had failed:
+    the reloaded store's copy is stamped "lost: the server restarted while this
+    job was running" and every later job_status answers from that copy, while
+    the real worker writes "done" to disk underneath it."""
+    session.reset()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = make_project(tmp_path / "a")
+    b = make_project(tmp_path / "b")
+    tools.project_open(str(a))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
+
+    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+
+    job_id = tools.mod_build().data["job_id"]
+    assert started.wait(timeout=10), "worker never started"
+    assert tools.job_status(job_id).data["status"] == "running"
+
+    assert tools.project_open(str(b)).ok
+    assert tools.project_open(str(a)).ok
+
+    after = tools.job_status(job_id)
+    assert after.data["status"] == "running", f"the round trip lost the job: {after.data}"
+    assert after.data["error"] == ""
+
+    release.set()
+    waited = tools.job_wait(job_id, timeout=10)
+    assert waited.data["status"] == "done"
+    # The lasting half of the bug: the agent asks again later and is still told
+    # the build failed, long after it succeeded.
+    assert tools.job_status(job_id).data["status"] == "done"
+    assert tools.job_status(job_id).data["error"] == ""
+
+
+def test_a_project_opened_for_the_first_time_still_recovers_jobs_lost_to_a_restart(tmp_path):
+    """The other half of the rule: reuse must not cost restart recovery. A
+    project this process has never opened gets a store built and load()ed, so a
+    job left "running" on disk by a dead process is correctly marked lost --
+    its worker really is gone."""
+    session.reset()
+    root = make_project(tmp_path)
+    stale_dir = root / ".dayz-mcp" / "jobs" / "build-1-1"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "job.json").write_text(
+        '{"id": "build-1-1", "kind": "build", "status": "running", "started": 1.0, '
+        '"finished": null, "exit_code": null, "artifacts": [], "summary": "", "error": ""}',
+        encoding="utf-8",
+    )
+
+    tools.project_open(str(root))
+
+    recovered = tools.job_status("build-1-1")
+    assert recovered.data["status"] == "failed"
+    assert "lost" in recovered.data["error"]
+
+
 # --- Acceptance-driven fix: machine.config makes the server config filename
 # configurable, since a real stand can have a "serverDZ.cfg" that hangs forever
 # after world-compile and a working config under a different name ---
