@@ -7,3 +7,8 @@ dist/
 .venv/
 .dayz-mcp/
 dayz-mcp.local.toml
+
+# bridge/ is source; its packed output (pbo, signature, borrowed public key)
+# is a build artifact like any other project's @ModName, reproduced by
+# packer.pack_one from bridge/ -- never committed.
+/@DZMCP_Bridge/
