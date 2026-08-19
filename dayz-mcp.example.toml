@@ -17,8 +17,10 @@ mods = ["MyMod"]
 pre_script = ""
 # Optional: mod_build refuses to pack a source folder containing any of these
 # (FileBank packs the whole folder, so they would otherwise ship inside the
-# pbo). This is the default; only list it to change it.
-exclude = [".git", "*.blend", "*.blend1"]
+# pbo). Listing the key REPLACES the default wholesale, so leave it out unless
+# you mean to change it -- narrowing it by accident is how something ends up
+# inside a published pbo. The default is:
+# exclude = [".git", "*.blend", "*.blend1", ".gitignore", ".gitattributes", "README.md", "*.ps1"]
 # Optional: where a mod's source actually lives, if not the default
 # <root>/<name>. "." means the mod's config.cpp sits at the repository root
 # itself, next to this file -- a common layout this key exists to support.

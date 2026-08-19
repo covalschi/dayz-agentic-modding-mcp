@@ -1,7 +1,10 @@
 from pathlib import Path
 import textwrap
+import tomllib
 from dayz_mcp.packer import DEFAULT_EXCLUDE
 from dayz_mcp.profile import load_profile, resolve_mod_dir
+
+EXAMPLE_PROFILE = Path(__file__).resolve().parents[1] / "dayz-mcp.example.toml"
 
 BASE = """
 [project]
@@ -433,3 +436,39 @@ error_regex = ["("]
     assert "error_regex[0]" in r.error
     assert "valid regular expression" in r.error
     assert "escape the characters" in r.hint
+
+
+def test_example_profile_never_states_a_false_exclude_default():
+    """The README says to start from the example, and the example shipped a
+    three-pattern `exclude` annotated "This is the default" while the real
+    default has seven. Copying it verbatim silently narrowed the list -- the
+    reviewer got four of the six files from an earlier leak straight back.
+
+    Either form is fine: show the real default, or comment the key out and
+    document it. A stated default that is wrong is not, so whichever form the
+    example uses, every `exclude` line in it -- live or commented -- must
+    parse to exactly DEFAULT_EXCLUDE.
+    """
+    text = EXAMPLE_PROFILE.read_text(encoding="utf-8")
+    declarations = [
+        stripped for stripped in (ln.lstrip("#").strip() for ln in text.splitlines())
+        if stripped.startswith("exclude")
+    ]
+    assert declarations, "the example must show what build.exclude defaults to"
+    for decl in declarations:
+        assert tomllib.loads(decl)["exclude"] == list(DEFAULT_EXCLUDE), decl
+
+
+def test_example_profile_is_a_loadable_profile(tmp_path):
+    """It is offered as a starting point, so it must actually start."""
+    (tmp_path / "MyMod").mkdir()
+    (tmp_path / "MyMod" / "config.cpp").write_text("class CfgPatches {};", encoding="utf-8")
+    (tmp_path / "dayz-mcp.toml").write_text(
+        EXAMPLE_PROFILE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    r = load_profile(tmp_path)
+
+    assert r.ok, r.error
+    # No exclude key of its own: the packer default applies, all seven patterns.
+    assert r.data.build.exclude == list(DEFAULT_EXCLUDE)
