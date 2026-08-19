@@ -26,6 +26,15 @@ SERVER_IMAGE = GAME_PROBE
 # test stand the server boots against.
 CLIENT_PROFILE_DIRNAME = "clientprofile"
 
+# How long server_start lets a server settle before calling it started, when
+# the profile declares no ready line and there is therefore nothing to wait
+# for. Long enough that a boot which dies on its own command line is reported
+# as dead rather than as started, short enough to stay a prompt answer. This
+# is emphatically NOT a substitute readiness signal: a server still compiling
+# its world is alive and not ready, and this configuration cannot tell the
+# difference -- which is exactly what the job summary then says.
+NO_READY_LINE_SETTLE_SECONDS = 3.0
+
 
 def _stand() -> Path:
     prof = session.profile()
@@ -192,6 +201,31 @@ def server_start(timeout: float = 420) -> Result:
             pid = spawn(cmd, Path(game))
             session.set_server_pid(pid, SERVER_IMAGE)
             marker = prof.expect.ready_line
+            if not marker:
+                # Nothing to wait for. load_profile already notes that
+                # readiness cannot be detected without expect.ready_line, and
+                # this used to ignore the note: it polled for the empty string,
+                # which never matches, and after the full timeout (420s by
+                # default) failed with "no ready line within 420s" -- a false
+                # failure, seven minutes late, for a configuration nothing
+                # documents as unsupported.
+                #
+                # So: start it, look once whether it is still there, and say
+                # what this configuration can and cannot know. Not waiting for
+                # readiness must not become not looking at all -- a server that
+                # died on its own command line is the one failure still
+                # detectable here.
+                time.sleep(max(0.0, min(NO_READY_LINE_SETTLE_SECONDS, timeout)))
+                if not is_alive(pid, image=SERVER_IMAGE):
+                    store.fail(job.id, "the server process died moments after starting")
+                    return
+                store.finish(
+                    job.id, 0,
+                    summary=f"started, pid {pid}; expect.ready_line is empty, so readiness cannot "
+                            "be detected -- only errors will be judged (log_verdict once the "
+                            "server has had time to write)",
+                )
+                return
             deadline = time.time() + timeout
             while time.time() < deadline:
                 if not is_alive(pid, image=SERVER_IMAGE):

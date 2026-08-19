@@ -33,8 +33,20 @@ items = 12
 """
 
 
-def make_project(tmp_path: Path) -> Path:
-    (tmp_path / "dayz-mcp.toml").write_text(textwrap.dedent(PROFILE), encoding="utf-8")
+PROFILE_WITHOUT_READY_LINE = """
+[project]
+name = "my-mod"
+
+[build]
+mods = ["MyMod"]
+
+[expect]
+forbid = ["Bad type"]
+"""
+
+
+def make_project(tmp_path: Path, profile_text: str = PROFILE) -> Path:
+    (tmp_path / "dayz-mcp.toml").write_text(textwrap.dedent(profile_text), encoding="utf-8")
     (tmp_path / "MyMod").mkdir()
     (tmp_path / "MyMod" / "config.cpp").write_text("", encoding="utf-8")
     return tmp_path
@@ -203,6 +215,69 @@ def test_server_start_returns_since_matching_the_job_it_created(tmp_path, monkey
     waited = tools.job_wait(started.data["job_id"], timeout=5)
     assert waited.data["status"] == "failed"
     assert waited.data["started"] == since
+
+
+# --- Final review, item 4: a project that cannot declare a ready line waited
+# the whole timeout and then reported a failure that never happened ---
+
+
+def test_server_start_finishes_promptly_when_no_ready_line_is_declared(tmp_path, monkeypatch):
+    """profile.py already notes that readiness cannot be detected without
+    expect.ready_line, and server_start ignored the note: it polled for a
+    marker that is the empty string, could never match, and after the full
+    timeout (420s by default) failed with "no ready line within 420s" -- a
+    false failure, seven minutes late, for a case the README nowhere calls
+    unsupported.
+
+    The wait is what is wrong, so the wait is what goes. The server is
+    started, confirmed alive, and the job finishes saying what it can and
+    cannot know."""
+    session.reset()
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    opened = tools.project_open(str(root))
+    assert any("readiness cannot be detected" in n for n in opened.data["notes"])
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+
+    began = time.time()
+    started = tools.server_start(timeout=300)
+    assert started.ok, started.error
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    elapsed = time.time() - began
+
+    assert waited.data["status"] == "done", waited.data
+    assert elapsed < 20, f"waited {elapsed:.0f}s for a job that has nothing to wait for"
+    assert "4321" in waited.data["summary"]
+    assert "readiness cannot be detected" in waited.data["summary"]
+    assert "errors" in waited.data["summary"]
+    assert session.server_pid() == 4321  # still tracked, so server_stop can reach it
+
+
+def test_server_start_without_a_ready_line_still_reports_a_server_that_died(tmp_path, monkeypatch):
+    """Not waiting for readiness must not become not looking at all: if the
+    process is gone by the time it is checked, that is a failed boot, and the
+    only signal this configuration has left."""
+    session.reset()
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+
+    job_id = tools.server_start(timeout=300).data["job_id"]
+    waited = tools.job_wait(job_id, timeout=20)
+
+    assert waited.data["status"] == "failed"
+    assert "died" in waited.data["error"]
 
 
 # --- Extra requirement 2: server_start must not delete old logs ---
