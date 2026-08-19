@@ -53,15 +53,23 @@ class JobStore:
         for jf in sorted(self.root.glob("*/job.json")):
             try:
                 data = json.loads(jf.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                job = Job(**data)
+                if job.status in (QUEUED, RUNNING):
+                    job.status = FAILED
+                    job.error = "lost: the server restarted while this job was running"
+                    job.finished = time.time()
+                    self._persist(job)
+                self._jobs[job.id] = job
+                # Seed _seq to avoid id collisions on next create()
+                if "-" in job.id:
+                    try:
+                        seq = int(job.id.rsplit("-", 1)[-1])
+                        if seq >= self._seq:
+                            self._seq = seq
+                    except ValueError:
+                        pass
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 continue
-            job = Job(**data)
-            if job.status in (QUEUED, RUNNING):
-                job.status = FAILED
-                job.error = "lost: the server restarted while this job was running"
-                job.finished = time.time()
-                self._persist(job)
-            self._jobs[job.id] = job
 
     def artifacts_dir(self, job_id: str) -> Path:
         d = self.root / job_id
@@ -70,8 +78,12 @@ class JobStore:
 
     def create(self, kind: str) -> Job:
         with self._lock:
-            self._seq += 1
-            job_id = f"{kind}-{int(time.time())}-{self._seq}"
+            # Ensure id is unique on disk, not just in memory
+            while True:
+                self._seq += 1
+                job_id = f"{kind}-{int(time.time())}-{self._seq}"
+                if not (self.root / job_id).exists():
+                    break
             job = Job(id=job_id, kind=kind)
             self._jobs[job_id] = job
         self.artifacts_dir(job_id)

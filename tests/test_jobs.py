@@ -71,3 +71,61 @@ def test_running_jobs_are_marked_lost_after_a_restart(tmp_path):
     got = revived.get(j.id)
     assert got.status == "failed"
     assert "restart" in got.error
+
+
+def test_id_collision_resistant_within_same_second(tmp_path):
+    """Simulate a restart within the same second creating the same job kind.
+    The new job must get a unique id that doesn't overwrite the old one."""
+    s = JobStore(tmp_path)
+    j1 = s.create("build")
+    s.finish(j1.id, 0, summary="first job")
+
+    # Simulate a restart: new JobStore, old job record still on disk
+    revived = JobStore(tmp_path)
+    revived.load()
+
+    # Create another job of the same kind within the same second (simulated)
+    # The new id should not collide with j1.id
+    j2 = revived.create("build")
+    assert j2.id != j1.id, "New job should have unique id"
+
+    # Original job record should be intact
+    got_old = revived.get(j1.id)
+    assert got_old.status == "done"
+    assert got_old.summary == "first job"
+
+    # New job should be separate
+    got_new = revived.get(j2.id)
+    assert got_new.status == "queued"
+    assert got_new.summary == ""
+
+
+def test_load_skips_malformed_job_json(tmp_path):
+    """A job.json with valid JSON but wrong fields (missing key) should not
+    crash load() and should not prevent other jobs from being recovered."""
+    import json
+
+    s = JobStore(tmp_path)
+    j_good = s.create("good")
+    s.finish(j_good.id, 0, summary="good job")
+
+    # Write a malformed job.json (missing required 'kind' field)
+    bad_dir = tmp_path / "bad-job"
+    bad_dir.mkdir()
+    (bad_dir / "job.json").write_text(
+        json.dumps({"id": "bad-job", "status": "done"}), encoding="utf-8"
+    )
+
+    # load() should skip the bad job but recover the good one
+    revived = JobStore(tmp_path)
+    revived.load()
+
+    # Good job should be recovered
+    got_good = revived.get(j_good.id)
+    assert got_good is not None
+    assert got_good.status == "done"
+    assert got_good.summary == "good job"
+
+    # Bad job should not be in the registry (silently skipped)
+    got_bad = revived.get("bad-job")
+    assert got_bad is None
