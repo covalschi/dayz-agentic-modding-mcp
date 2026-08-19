@@ -56,6 +56,7 @@ def with_stand_and_game(
     port: int | None = None,
     extra_mods: list[str] | None = None,
     server_only: list[str] | None = None,
+    config: str | None = None,
 ) -> None:
     """Like with_stand, but also fabricates a fake game install so server_start's
     `find_game` succeeds deterministically, regardless of what is actually
@@ -67,6 +68,8 @@ def with_stand_and_game(
     lines = ["[machine]", f'stand_root = "{stand.as_posix()}"', f'game = "{game_dir.as_posix()}"']
     if port is not None:
         lines.append(f"port = {port}")
+    if config is not None:
+        lines.append(f'config = "{config}"')
     if extra_mods or server_only:
         lines.append("")
         lines.append("[mods]")
@@ -375,6 +378,7 @@ def test_server_start_passes_an_absolute_config_path(tmp_path, monkeypatch):
     cfg_arg = next(a for a in captured["cmd"] if a.startswith("-config="))
     cfg_value = cfg_arg.split("=", 1)[1]
     assert Path(cfg_value).is_absolute()
+    assert Path(cfg_value).name == "serverDZ.cfg"  # default filename, machine.config unset
 
 
 def test_server_start_refuses_when_config_resolves_outside_stand_root(tmp_path):
@@ -831,3 +835,72 @@ def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path
     # A fresh, independent lookup agrees -- not just job_wait's own return value.
     final = tools.job_status(job_id)
     assert final.data["status"] == "done"
+
+
+# --- Acceptance-driven fix: machine.config makes the server config filename
+# configurable, since a real stand can have a "serverDZ.cfg" that hangs forever
+# after world-compile and a working config under a different name ---
+
+
+def test_server_start_uses_the_configured_config_filename(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game, config="custom.cfg")
+    (stand / "custom.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    captured = {}
+
+    def fake_spawn(cmd, cwd):
+        captured["cmd"] = cmd
+        return 123
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+
+    job_id = tools.server_start(timeout=5).data["job_id"]
+    tools.job_wait(job_id, timeout=5)
+    cfg_arg = next(a for a in captured["cmd"] if a.startswith("-config="))
+    cfg_value = cfg_arg.split("=", 1)[1]
+    assert Path(cfg_value).is_absolute()
+    assert Path(cfg_value) == (stand / "custom.cfg").resolve()
+
+
+def test_server_start_missing_configured_file_names_the_file_and_the_key(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game, config="custom.cfg")
+    # Deliberately do NOT create stand/custom.cfg.
+    tools.project_open(str(root))
+
+    r = tools.server_start(timeout=5)
+    assert not r.ok
+    assert "custom.cfg" in r.error
+    assert "machine.config" in r.hint
+
+
+def test_server_start_refuses_when_a_custom_config_resolves_outside_stand_root(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    stand = tmp_path / "stand"
+    (stand / "profiles").mkdir(parents=True)
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "DayZDiag_x64.exe").write_bytes(b"")
+    outside = tmp_path / "outside_real.cfg"
+    outside.write_text("", encoding="utf-8")
+    try:
+        os.symlink(str(outside), str(stand / "custom.cfg"))
+    except OSError:
+        pytest.skip("this machine does not permit unprivileged symlink creation")
+
+    (root / "dayz-mcp.local.toml").write_text(
+        f'[machine]\nstand_root = "{stand.as_posix()}"\ngame = "{game.as_posix()}"\nconfig = "custom.cfg"\n',
+        encoding="utf-8",
+    )
+    tools.project_open(str(root))
+    r = tools.server_start(timeout=5)
+    assert not r.ok
+    assert "outside stand_root" in r.error

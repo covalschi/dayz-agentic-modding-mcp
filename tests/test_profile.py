@@ -280,6 +280,31 @@ def test_machine_port_non_numeric_is_rejected(tmp_path):
     assert "integer" in r.error
 
 
+def test_machine_config_defaults_to_serverDZ_cfg(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.machine.config == "serverDZ.cfg"
+
+
+def test_machine_config_parses(tmp_path):
+    local = """
+    [machine]
+    config = "custom.cfg"
+    """
+    p = load_profile(write(tmp_path, BASE, local)).data
+    assert p.machine.config == "custom.cfg"
+
+
+def test_machine_config_non_string_is_rejected(tmp_path):
+    local = """
+    [machine]
+    config = 123
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "machine.config" in r.error
+    assert "string" in r.error
+
+
 def test_local_supplies_server_only_mods(tmp_path):
     local = """
     [mods]

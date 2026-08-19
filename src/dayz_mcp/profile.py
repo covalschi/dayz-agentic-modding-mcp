@@ -58,6 +58,7 @@ class MachineCfg:
     tools: str = ""
     stand_root: str = ""
     port: int = 2302
+    config: str = "serverDZ.cfg"
 
 
 @dataclass
@@ -273,11 +274,19 @@ def load_profile(path: str | Path) -> Result:
                 hint="use a numeric port, e.g. port = 2302",
             )
 
+        config_val = lm.get("config", "serverDZ.cfg")
+        if not isinstance(config_val, str):
+            return fail(
+                f"machine.config must be a string, got {config_val!r}",
+                hint='use a filename, e.g. config = "serverDZ.cfg"',
+            )
+
         machine = MachineCfg(
             game=str(lm.get("game", "")),
             tools=str(lm.get("tools", "")),
             stand_root=str(lm.get("stand_root", "")),
             port=port_val,
+            config=config_val,
         )
 
         # Check [mods] is a table

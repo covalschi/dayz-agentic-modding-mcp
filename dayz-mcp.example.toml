@@ -1,5 +1,10 @@
 # Portable half of the profile. Copy to dayz-mcp.toml in your mod repository.
 # Nothing here may point at a specific machine.
+#
+# Machine-specific settings go in dayz-mcp.local.toml instead (never
+# committed), for example:
+#   [machine]
+#   config = "serverDZ.cfg"  # the server config file inside stand_root
 
 [project]
 name = "my-mod"

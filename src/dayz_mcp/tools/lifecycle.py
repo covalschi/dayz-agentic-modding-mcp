@@ -30,8 +30,8 @@ def _stand() -> Path:
 def _is_within(path: Path, base: Path) -> bool:
     """True if `path` is `base` or lives underneath it.
 
-    Used to refuse a serverDZ.cfg that resolves (possibly through a symlink)
-    outside machine.stand_root -- see the -config note on server_start.
+    Used to refuse a server config file that resolves (possibly through a
+    symlink) outside machine.stand_root -- see the -config note on server_start.
     """
     try:
         path.relative_to(base)
@@ -90,9 +90,17 @@ def server_start(timeout: float = 420) -> Result:
         return fail("game not found", hint="set machine.game in dayz-mcp.local.toml")
 
     stand = _stand()
-    cfg_path = stand / "serverDZ.cfg"
+    # The filename is a profile setting (machine.config), not a literal: this
+    # project's own stand hangs forever after world-compile if booted with the
+    # wrong one (a working config lives under a different name there), so the
+    # default here is a starting point, never an assumption.
+    cfg_path = stand / prof.machine.config
     if not cfg_path.exists():
-        return fail(f"server config not found: {cfg_path}", hint="point machine.stand_root at a prepared stand")
+        return fail(
+            f"server config not found: {cfg_path}",
+            hint=f"point machine.stand_root at a prepared stand, or set machine.config if the "
+                 f"server config there is not named {prof.machine.config!r}",
+        )
 
     # DayZDiag_x64.exe forces $currentdir to its own directory on launch, so a
     # relative -config is silently replaced by the game installation's own config
@@ -104,7 +112,8 @@ def server_start(timeout: float = 420) -> Result:
     if not _is_within(cfg, stand_resolved):
         return fail(
             f"server config resolves outside stand_root: {cfg}",
-            hint="serverDZ.cfg must be a real file inside machine.stand_root, not a link to somewhere else",
+            hint=f"{prof.machine.config} must be a real file inside machine.stand_root, not a "
+                 f"link to somewhere else",
         )
 
     client_mods, server_mods = mod_list()
