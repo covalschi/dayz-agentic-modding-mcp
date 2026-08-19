@@ -3,10 +3,13 @@ import sys
 import textwrap
 import threading
 import time
+from importlib.metadata import version as metadata_version
 from pathlib import Path
 
 import pytest
 
+from dayz_mcp import DIST_NAME
+from dayz_mcp import __version__ as dayz_mcp_version
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
 from dayz_mcp.errors import ok as errors_ok
@@ -803,6 +806,27 @@ async def test_real_tool_call_through_fastmcp_still_returns_the_result_envelope(
     _content, structured = await mcp_server.mcp.call_tool("project_open", {"path": str(root)})
     assert structured["ok"] is True
     assert structured["data"]["name"] == "my-mod"
+
+
+def test_server_reports_its_own_version_not_the_sdks():
+    """`initialize` returned serverInfo.version = "1.29.0" -- the mcp SDK's own
+    version, which the low-level server uses as a default when nothing supplies
+    one. Confirmed over a real stdio session. A client asking what version of
+    THIS product it is talking to was told the SDK's, and would go on being told
+    the SDK's through every release this project makes.
+
+    Asserted through create_initialization_options() because that is the exact
+    structure that becomes serverInfo in the initialize response, and it is also
+    what breaks if a future SDK moves where the version lives.
+    """
+    opts = mcp_server.mcp._mcp_server.create_initialization_options()
+
+    assert opts.server_name == DIST_NAME
+    assert opts.server_version != metadata_version("mcp")
+    assert opts.server_version == dayz_mcp_version
+    # Belt and braces: a fallback that silently became "unknown" would satisfy
+    # the inequality above while telling a client nothing.
+    assert opts.server_version == metadata_version(DIST_NAME)
 
 
 def test_job_wait_clamps_timeout_to_a_sane_upper_bound(tmp_path, monkeypatch):

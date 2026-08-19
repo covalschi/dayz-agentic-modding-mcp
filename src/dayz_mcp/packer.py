@@ -79,6 +79,17 @@ def config_syntax_cmd(cfgconvert: Path, cfg: Path, out: Path) -> list[str]:
     return [str(cfgconvert), "-bin", "-dst", str(out), str(cfg)]
 
 
+def name_matches(name: str, patterns: Sequence[str]) -> bool:
+    """Whether a single file or directory NAME matches one of `patterns`.
+
+    The one definition of "matches" in this module: find_excluded selects by
+    it, and pack_one's staging note classifies find_excluded's own output by it
+    to say which list an omission came from. Two spellings of the same rule
+    would let the note describe an omission by the wrong reason.
+    """
+    return any(fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
 def find_excluded(src: Path, patterns: Sequence[str]) -> list[str]:
     """Paths (relative to `src`) matching one of `patterns` by filename.
 
@@ -91,13 +102,13 @@ def find_excluded(src: Path, patterns: Sequence[str]) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(src):
         keep: list[str] = []
         for d in dirnames:
-            if any(fnmatch.fnmatch(d, pat) for pat in patterns):
+            if name_matches(d, patterns):
                 found.append(str((Path(dirpath) / d).relative_to(src)))
             else:
                 keep.append(d)
         dirnames[:] = keep
         for f in filenames:
-            if any(fnmatch.fnmatch(f, pat) for pat in patterns):
+            if name_matches(f, patterns):
                 found.append(str((Path(dirpath) / f).relative_to(src)))
     return found
 
@@ -194,21 +205,27 @@ def pack_one(
     # Matched by NAME at any depth, via the same find_excluded call on the
     # same list that staging passes to shutil.ignore_patterns: what one path
     # refuses is then exactly what the other omits, by construction, so the
-    # two cannot drift apart again. The cost is a false refusal for a mod
-    # that genuinely carries a nested directory called "keys" -- which the
-    # error names explicitly, and `stage = true` packs anyway (minus that
-    # directory).
+    # two cannot drift apart again. The cost is that a mod genuinely carrying
+    # a directory called "keys" (public keys of the mods it depends on, say)
+    # cannot pack it either -- a deliberate trade, but one the message must
+    # be honest about. Claiming such a folder "belongs to the build server"
+    # would be false, and recommending `stage = true` without saying that
+    # staging drops it would steer the reader into silent data loss. So: name
+    # the entries, say the names are reserved, and state what staging costs.
     intruders = find_excluded(src, own_artifacts) if not stage else []
     if intruders:
         return PackResult(
             name,
-            error=f"refusing to pack {src}: found {', '.join(intruders)}, which belong to the "
-                  "build server and not to the mod -- the signing keys, this server's own "
-                  "profile, its job store, this mod's previous build. FileBank packs the "
-                  "source folder whole, so publishing the result would publish them, the "
-                  "private signing key first of all. Point build.sources at the mod's own "
-                  "folder, or set build.stage = true to pack a filtered copy instead (the "
-                  "layout a mod whose source is the repository root itself needs)",
+            error=f"refusing to pack {src}: found {', '.join(intruders)}. Those names are "
+                  "reserved -- inside a mod source they collide with what the build server "
+                  "manages in a project root: the signing keys, both halves of its own "
+                  "profile, its job store, this mod's built output. FileBank packs the source "
+                  "folder whole, so packing them would publish them, a private signing key "
+                  "first of all, and no build.exclude setting changes that. Either point "
+                  "build.sources at a mod folder that does not contain them, or set "
+                  "build.stage = true, which packs the mod WITHOUT them: every entry named "
+                  "above is omitted from the pbo, including any that genuinely belongs to "
+                  "the mod",
         )
 
     # FileBank packs the source directory whole: a nested .git, a stray
@@ -313,8 +330,22 @@ def pack_one(
         # also guards against was actually found.
         included = sorted(p.name for p in pack_src.iterdir())
         staging_note = f"staged copy included: {', '.join(included)}"
-        if omitted:
-            staging_note += f"; omitted: {', '.join(omitted)}"
+        # Two kinds of omission, told apart rather than run together. What
+        # build.exclude removed is routine -- the project asked for it. What a
+        # reserved name removed is not: a mod may genuinely ship a directory
+        # called "keys", and listed among ".git" and "README.md" its
+        # disappearance reads as housekeeping. Classified by the same
+        # name_matches rule find_excluded selected them with, so an omission
+        # can never be reported under the wrong reason.
+        reserved_out = [p for p in omitted if name_matches(Path(p).name, own_artifacts)]
+        routine_out = [p for p in omitted if p not in set(reserved_out)]
+        if routine_out:
+            staging_note += f"; omitted by build.exclude: {', '.join(routine_out)}"
+        if reserved_out:
+            staging_note += (
+                "; omitted as reserved names, so NOT in the pbo even if the mod ships them: "
+                + ", ".join(reserved_out)
+            )
 
     try:
         code, tail = run_blocking(filebank_cmd(filebank, name, pack_src, out_dir), root, log_path, timeout=1800)

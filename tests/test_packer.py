@@ -1037,6 +1037,79 @@ def test_pack_one_refuses_to_pack_the_servers_own_artifacts_without_staging(tmp_
     assert result.pbo == ""
 
 
+def test_the_refusal_states_what_staging_would_cost_instead_of_claiming_ownership(tmp_path):
+    """A mod can legitimately ship a `keys` folder -- public keys for the mods
+    it depends on, say. It still cannot be packed: the name is reserved, and
+    matching by name is what keeps the refusal and the staging omission the
+    same set. But the refusal used to assert the folder "belongs to the build
+    server", which is simply untrue for such a mod, and then pointed at
+    build.stage = true without saying that staging DROPS that folder. Told
+    something false, then steered into silent data loss.
+
+    The behaviour is a deliberate trade and stays. The text must be honest:
+    name the entries, say they cannot be packed, and say plainly that
+    stage = true packs the mod without them."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src_dir = root / "MyMod"
+    src_dir.mkdir()
+    (src_dir / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    mod_keys = src_dir / "keys"
+    mod_keys.mkdir()
+    (mod_keys / "partner.bikey").write_text("a dependency's public key", encoding="utf-8")
+
+    # tools deliberately absent: the refusal happens before packing is attempted.
+    result = pack_one("MyMod", root, tmp_path / "no-such-tools", root / "build.log")
+
+    assert result.error != ""
+    assert "keys" in result.error, "the refusal must name what it found"
+    # The old claim, which was false for a mod that ships its own keys folder.
+    assert "belong to the build server and not to the mod" not in result.error
+    # The consequence of the route it recommends must be stated, not implied.
+    assert "stage" in result.error
+    assert "omitted" in result.error
+    assert "pbo" in result.error
+
+
+def test_the_staged_copy_note_marks_reserved_omissions_apart_from_routine_ones(tmp_path, monkeypatch):
+    """Under stage = true a mod's own `keys` folder is dropped from the copy.
+    Listed among .git and README.md it reads as routine housekeeping, so the
+    note separates the two: what build.exclude removed, and what was removed
+    because the name is reserved and therefore is not in the pbo even though
+    the mod ships it."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    mod_keys = root / "keys"
+    mod_keys.mkdir()
+    (mod_keys / "partner.bikey").write_text("a dependency's public key", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, root / "build.log", src=root, stage=True)
+
+    assert result.error == ""
+    note = result.note
+    assert "build.exclude" in note and ".git" in note
+    reserved_half = note.split("reserved", 1)
+    assert len(reserved_half) == 2, f"reserved omissions are not called out: {note}"
+    assert "keys" in reserved_half[1]
+    assert "pbo" in reserved_half[1]
+
+
 def test_newest_source_mtime_ignores_matching_names(tmp_path):
     """The `ignore` parameter skips both files and whole directories by
     name, the same pruning discipline find_excluded uses -- needed because

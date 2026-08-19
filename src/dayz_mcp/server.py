@@ -6,9 +6,24 @@ import functools
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
-from . import tools
+from . import DIST_NAME, __version__, tools
 
-mcp = FastMCP("dayz-agentic-modding-mcp")
+mcp = FastMCP(DIST_NAME)
+
+# What `initialize` reports as serverInfo.version. Without this line the low-level
+# server falls back to pkg_version("mcp") -- the SDK's OWN version
+# (lowlevel/server.py: `self.version if self.version else pkg_version("mcp")`),
+# so a client asking what version of this product it is talking to was told
+# "1.29.0", confirmed over a real stdio session. That answer is not merely
+# wrong once: it would keep reporting the SDK's version through every release
+# this project ever makes, and move when the SDK moves.
+#
+# Assigned after construction because FastMCP 1.29.0 takes no `version`
+# argument and never passes one on (server.py: MCPServer(name=..., instructions=
+# ..., website_url=..., icons=..., lifespan=...)). `_mcp_server` is the only
+# route to it -- there is no public alias -- and `mcp` is pinned to an exact
+# version here, with a test that fails if a future SDK moves this.
+mcp._mcp_server.version = __version__
 
 
 def _wrap(fn):
