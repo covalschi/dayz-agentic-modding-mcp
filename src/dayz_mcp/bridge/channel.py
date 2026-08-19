@@ -55,14 +55,34 @@ class Channel:
         return self.profiles_dir / STATE_FILENAME
 
     def _unclaimed_mailbox_result(self, cmd_path: Path) -> Result:
-        """The one, single-sourced refusal for an occupied mailbox -- used
-        both by the cheap pre-check below and by the atomic claim losing a
-        race, so a caller sees the identical message either way and cannot
-        tell which path produced it (it should not need to)."""
+        """The mailbox already holds a command the mod has not yet claimed
+        (the pre-check below found it sitting there before this send even
+        tried to write). This means the MOD may be slow or wedged -- there
+        is a real previous command still waiting, which is worth a caller's
+        attention. Deliberately a different message/hint from
+        `_lost_race_result`: that one is ordinary contention between two
+        senders and implies nothing about the mod at all. Conflating the two
+        was tried and reverted -- see the fix-round-2 note in the report."""
         return fail(
             f"mailbox already holds an unclaimed command at {cmd_path}",
             hint="the mod has not picked up the previous command yet -- wait for it to "
                  "be claimed (the mailbox file to disappear) before sending another",
+        )
+
+    def _lost_race_result(self, cmd_path: Path) -> Result:
+        """A concurrent `send()` call claimed the mailbox microseconds
+        before this one did (the atomic `os.link` claim below lost the
+        race). This says NOTHING about the mod -- there was no previous
+        command sitting unclaimed, and nothing is wedged; a sibling call on
+        this same process simply won first. The caller's response should be
+        an ordinary short retry, not "go investigate a stuck mod", which is
+        why this is a distinct message/hint from `_unclaimed_mailbox_result`
+        rather than reusing it."""
+        return fail(
+            f"lost a race for the mailbox at {cmd_path} to a concurrent sender",
+            hint="another send() call claimed the mailbox microseconds ago -- this is "
+                 "ordinary contention between senders, not a stuck mailbox; retry shortly, "
+                 "once the winning command has been claimed by the mod (or has finished)",
         )
 
     def send(self, cmd: Command) -> Result:
@@ -118,14 +138,14 @@ class Channel:
             os.link(tmp_name, cmd_path)
         except FileExistsError:
             # Lost the race: someone else's os.link claimed cmd_path between
-            # our exists() check and this one. Same outward result as the
-            # fast-path refusal above -- the caller cannot and should not
-            # tell the two apart.
+            # our exists() check and this one. A DIFFERENT refusal from the
+            # fast-path case above -- see _lost_race_result's docstring for
+            # why the two must not be conflated.
             try:
                 os.remove(tmp_name)
             except OSError:
                 pass
-            return self._unclaimed_mailbox_result(cmd_path)
+            return self._lost_race_result(cmd_path)
         except OSError as exc:
             try:
                 os.remove(tmp_name)
@@ -133,12 +153,28 @@ class Channel:
                 pass
             return fail(
                 f"failed to write mailbox: {exc}",
-                hint=f"check that {self.profiles_dir} exists and is writable",
+                hint=f"check that {self.profiles_dir} exists and is writable, and that its "
+                     "filesystem supports hard links -- NTFS does, FAT/exFAT and some "
+                     "network shares do not (os.link fails there for every command, not "
+                     "just this one)",
             )
         else:
-            # cmd_path now holds its own hard link to the same content;
-            # the temp name is no longer needed and must not linger.
-            os.remove(tmp_name)
+            # cmd_path now holds its own hard link to the same content --
+            # delivery already succeeded. Removing the temp name from here
+            # on is cleanup, not delivery: a second handle held on tmp_name
+            # by something else (a virus scanner, the search indexer, a
+            # backup agent -- all routine on Windows, including inside a
+            # directory a running server is actively writing to) makes
+            # os.remove raise PermissionError. That must never turn a
+            # successful send into a raised exception -- the caller would
+            # see a traceback, assume nothing happened, and retry into a
+            # spurious "mailbox occupied" refusal for a command that in fact
+            # already went through. A stray temp file left behind here is
+            # harmless; failing this cleanup is deliberately not an error.
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
         return ok(cmd.id)
 
     def read_state(self) -> BridgeState | None:

@@ -67,9 +67,8 @@ def test_concurrent_sends_exactly_one_succeeds(tmp_path):
     other's command with no error raised anywhere. This is not hypothetical
     once tool calls are dispatched through a thread pool (Task 4) -- several
     world_* calls can reach the same Channel at once. Exactly one send must
-    win; every other thread must see the same refusal (same hint) a caller
-    who lost to an already-unclaimed mailbox would see, and nothing must be
-    left half-written or double-written on disk.
+    win; every other thread must see a refusal, and nothing must be left
+    half-written or double-written on disk.
 
     Fired from a barrier, not a sleep race, so all N threads call send() at
     the same instant every run -- deterministic, not a chance to catch the
@@ -98,7 +97,15 @@ def test_concurrent_sends_exactly_one_succeeds(tmp_path):
     assert len(failures) == n - 1
     for f in failures:
         assert f.hint, "a refusal must say what to do, not just that it failed"
-        assert "picked up" in f.hint
+        # All 8 sends started against the SAME empty mailbox, so every loser
+        # here lost the atomic os.link claim -- ordinary contention between
+        # senders, not a mailbox some earlier command left unclaimed. That
+        # is a different situation with different wording (see
+        # test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable);
+        # asserting it here pins the concurrent case to its own text so a
+        # future change collapsing the two back together fails this test.
+        assert "concurrent sender" in f.error
+        assert "picked up" not in f.hint
 
     # The mailbox holds exactly the one command that won -- no corruption
     # from two writers landing on the same file at once.
@@ -108,6 +115,83 @@ def test_concurrent_sends_exactly_one_succeeds(tmp_path):
     # And the losers' cleanup left no temp file behind either.
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != CMD_FILENAME]
     assert leftovers == [], f"temp file(s) left behind: {leftovers}"
+
+
+def test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable(tmp_path):
+    """Two different situations must never collapse into the same text: a
+    mailbox left unclaimed implies the MOD may be slow or wedged and is
+    worth a caller's attention; a lost race implies nothing about the mod at
+    all, just an ordinary sibling sender, and calls for a plain retry. A
+    caller (or a human reading a log) must be able to tell which happened --
+    this fails if the two refusals are ever merged back into one message.
+    """
+    # Scenario A: the exists() pre-check finds a real, earlier command the
+    # mod has not claimed yet.
+    ch_a = Channel(tmp_path / "a")
+    (tmp_path / "a").mkdir()
+    assert ch_a.send(Command(id="ping-1-1", verb="ping", args={})).ok
+    unclaimed = ch_a.send(Command(id="ping-2-1", verb="ping", args={}))
+    assert not unclaimed.ok
+
+    # Scenario B: two sends racing for the SAME empty mailbox -- one wins
+    # via os.link, the other loses to FileExistsError. A fresh, separate
+    # directory so this is genuinely the race path, not the pre-check path.
+    b_dir = tmp_path / "b"
+    b_dir.mkdir()
+    ch_b = Channel(b_dir)
+    barrier = threading.Barrier(2)
+    results: list = [None, None]
+    race_commands = [Command(id="race-1", verb="ping", args={}), Command(id="race-2", verb="ping", args={})]
+
+    def worker(i):
+        barrier.wait()
+        results[i] = ch_b.send(race_commands[i])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert all(r is not None for r in results)
+    lost_race = next(r for r in results if not r.ok)
+
+    # The two refusals must be genuinely different texts, not just two
+    # Result objects that happen to both be `ok=False`.
+    assert unclaimed.error != lost_race.error
+    assert unclaimed.hint != lost_race.hint
+    assert "picked up" in unclaimed.hint
+    assert "picked up" not in lost_race.hint
+    assert "concurrent sender" in lost_race.error
+    assert "concurrent sender" not in unclaimed.error
+
+
+def test_send_success_survives_a_failed_temp_file_cleanup(tmp_path, monkeypatch):
+    """The reviewer reproduced this with no mocking: an antivirus scanner,
+    the search indexer, or a backup agent holding a second handle on the
+    temp file (routine on Windows, even in a directory a running server is
+    actively writing to) makes the post-link os.remove raise PermissionError.
+    That must not turn a successful send into a raised exception -- the
+    command already reached the mailbox via os.link by that point, so a
+    caller seeing a traceback would wrongly conclude nothing happened and
+    retry into a spurious "mailbox occupied" refusal for a command that, in
+    fact, already went through.
+    """
+    from dayz_mcp.bridge import channel as channel_module
+
+    def flaky_remove(path):
+        raise PermissionError(32, "used by another process")
+
+    monkeypatch.setattr(channel_module.os, "remove", flaky_remove)
+
+    ch = Channel(tmp_path)
+    cmd = Command(id="ping-1-1", verb="ping", args={})
+
+    result = ch.send(cmd)  # must return, not raise
+
+    assert result.ok
+    assert (tmp_path / CMD_FILENAME).exists()
+    assert json.loads((tmp_path / CMD_FILENAME).read_text(encoding="utf-8"))["id"] == cmd.id
 
 
 # --- read_state: tolerant of torn/missing files ---------------------------
