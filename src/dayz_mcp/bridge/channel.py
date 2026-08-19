@@ -23,6 +23,19 @@ specs/2026-08-19-dayz-mcp-phase2-bridge.md Sec 3, hub repo):
    "a new world just came up" apart from "the same world stalled", since a
    plain tick comparison across a restart can go DOWN and reads a freshly
    booted, healthy bridge as dead.
+4. The engine gives Enforce Script no boot identity of its own, so a
+   command needs the SAME session stamped on it (see `protocol.Command`) --
+   without it the mod cannot tell a command meant for it apart from a stale
+   one left over from before a restart. `build_command` is where a `Command`
+   gets one, from the state the mod most recently published; `send` refuses
+   a command whose session is blank as a second line of defence.
+5. A dead stand is a wedge waiting to happen: a command written into a
+   profile directory nothing is running against sits forever, since only
+   the mod (by claiming it) can ever clear it. This module has no notion of
+   "is a server alive" of its own and must not import `session` (a
+   singleton tied to one running MCP server, layered above this reusable
+   primitive) to get one -- so `send` takes `is_alive` as a required
+   argument the caller already knows the answer to, rather than guessing.
 """
 from __future__ import annotations
 
@@ -33,7 +46,7 @@ import time
 from pathlib import Path
 
 from ..errors import Result, fail, ok
-from .protocol import BridgeState, Command, CommandState, parse_state
+from .protocol import BridgeState, Command, CommandState, new_command_id, parse_state
 
 # Wire filenames inside a server's -profiles directory. See spec Sec 5.2.
 CMD_FILENAME = "dayz_mcp_cmd.json"
@@ -106,11 +119,83 @@ class Channel:
                  "once the winning command has been claimed by the mod (or has finished)",
         )
 
-    def send(self, cmd: Command) -> Result:
+    def current_session_id(self) -> str | None:
+        """The `session_id` from the most recent tolerant read of the state
+        file, or `None` if no state has ever been read -- or every attempt
+        to read it right now failed (see `_read_state_tolerant`).
+
+        This is what a `Command` needs to be accepted by `send` (see
+        `build_command`, the recommended way to obtain one already stamped
+        with it rather than calling this directly and threading the value
+        through by hand)."""
+        state = self._read_state_tolerant()
+        return state.session_id if state is not None else None
+
+    def build_command(self, verb: str, args: dict) -> Result:
+        """Build a `Command` carrying the CURRENT session, refusing if none
+        is known yet.
+
+        The engine gives Enforce Script no boot identity of its own, so a
+        command with no session (or the wrong one) is indistinguishable to
+        the mod from a stale command left over from before a restart --
+        carrying the CURRENT session is the ONLY defence against a stale
+        command detonating in a freshly booted world (see `Command`'s own
+        docstring in protocol.py). `current_session_id` reads it from the
+        most recent state the mod itself published; when nothing has been
+        published yet (the bridge was never up, or nothing has called
+        `heartbeat`/`read_state`/this method against it yet), there is
+        nothing to stamp the command with, so this refuses outright rather
+        than sending one with a blank or guessed session -- `send` itself
+        also refuses a blank session as a second line of defence (see its
+        own docstring), but the point of failure a caller actually wants to
+        see is here, before a command id is even minted.
+        """
+        session_id = self.current_session_id()
+        if not session_id:
+            return fail(
+                "the bridge has not published a session yet",
+                hint="call bridge_status (or heartbeat) first to confirm the bridge is up "
+                     "and has written at least one state snapshot, then build the command "
+                     "again",
+            )
+        return ok(Command(id=new_command_id(verb), session_id=session_id, verb=verb, args=args))
+
+    def send(self, cmd: Command, *, is_alive: bool) -> Result:
         """Write `cmd` into the mailbox, atomically, and refuse if it is
         already occupied by a command the mod has not yet claimed (claiming
         means the mod deletes the file after reading it -- the mod side is
         Task 5).
+
+        `is_alive` is REQUIRED, not defaulted, and this method does not
+        determine it itself: a command sent into a dead stand's profile
+        directory IS a wedge -- it sits there with nothing alive to ever
+        claim it, and every later `send` is refused as "wait for it to be
+        claimed" forever, a wait that can never end. `bridge_status`
+        already knows how to answer "is a server alive" (`session.server_pid()`
+        plus `procs.is_alive`), but this module must not import `session` --
+        it is a low-level, reusable primitive; `session` is the opposite, a
+        singleton tied to one running MCP server's process-tracking state,
+        and importing it here would pull that layering inside-out and risk
+        a circular import besides. So the knowledge is threaded in as a
+        plain, already-computed bool the caller supplies -- not an injected
+        callable stored on the instance, because a fresh `Channel(profiles_dir)`
+        is built by every tool call in this codebase anyway (see below), so
+        there is no lifetime for a stored callable to usefully outlive a
+        single `send`; and not a constructor parameter, because that would
+        force every existing construction site (including the many tests
+        that never call `send` at all) to thread liveness through just to
+        build a `Channel`. A required keyword argument on `send` itself
+        confines the cost to exactly the call sites that need it. When
+        `is_alive` is false, the command is NOT written -- stated plainly in
+        the refusal, because a caller who thinks it MIGHT have been written
+        will not retry, and a wedge nothing can ever clear is worse than a
+        refusal that is clear about what did not happen.
+
+        `cmd.session_id` must also be non-empty: a command with no session
+        is indistinguishable to the mod from a stale one (see `Command`'s
+        docstring), so this refuses rather than let the Python side
+        accidentally produce one -- `build_command` is the recommended way
+        to avoid ever reaching this refusal in practice.
 
         A plain "does the file exist, then write it" check-then-act is NOT
         enough here: two `send()` calls on separate threads (this server
@@ -134,6 +219,24 @@ class Channel:
         unrelated processes on the same machine pointed at the same stand --
         `os.replace`'s destination-overwrite semantics gave none of that.
         """
+        if not is_alive:
+            return fail(
+                "refusing to send: no live server is tracked for this bridge -- the "
+                "command was NOT written",
+                hint="start (or reconnect to) a live server first; writing into a dead "
+                     "stand's profile directory would create a mailbox nothing can ever "
+                     "claim, which every later send() would then refuse as 'unclaimed' "
+                     "forever",
+            )
+        if not cmd.session_id:
+            return fail(
+                "refusing to send a command with no session_id -- the mod cannot tell it "
+                "apart from a stale command left over from a previous boot",
+                hint="build the command with Channel.build_command(verb, args), which "
+                     "stamps the current session in automatically (and refuses on its own "
+                     "if no session has been published yet)",
+            )
+
         cmd_path = self._cmd_path()
         # Fast path only: skip the temp-file write in the common case where
         # the mailbox is visibly still occupied. This check is racy by
@@ -213,33 +316,83 @@ class Channel:
         cleared as a side effect of something else -- a caller (the tool
         layer, ultimately a human) has to decide to call this.
 
-        Refuses to act, and reports what it found, when `heartbeat` says the
-        bridge looks alive (`"growing"` or `"restarted"`) -- something is
-        actively running right now and could claim the mailbox any moment,
-        so clearing then risks silently destroying live in-flight work,
-        which is worse than leaving the wedge in place a while longer. Pass
-        `force=True` to discard anyway once that risk has been accepted
-        (e.g. after `bridge_status`/`world_state` corroborate the command is
-        stale). `"stalled"` or `"unmeasurable"` mean nothing is currently
-        proven to be moving -- a genuinely down stand or an unwired bridge
-        reads as one of these two, never as `"growing"`/`"restarted"` -- so
-        those proceed without needing `force`.
+        Refuses to act, and reports what it found, unless `force=True`, in
+        TWO situations that both mean "something may claim this any
+        moment": `_classify_samples` reporting `"growing"`/`"restarted"`
+        (the bridge is visibly alive), and a subtler one this method checks
+        directly rather than trusting `heartbeat`'s own reduction of the
+        same two samples -- a readable FIRST sample followed by a failed
+        SECOND one. `heartbeat` reports both that case and "never got any
+        sample at all" as the same `"unmeasurable"`, which is exactly right
+        for `heartbeat`'s own job (a caller just wants to know "is it
+        growing", and both are equally "no"), but wrong for THIS method's
+        job: a readable first sample is proof something was alive inside
+        the probe window, which a genuinely down stand or an unwired bridge
+        never produces even once. Reproduced without mocks: while the tick
+        was genuinely advancing, a second sample blocked by another process
+        holding an exclusive handle on the state file (the same real
+        Windows condition this module has already had to account for
+        elsewhere) made the reduced status read `"unmeasurable"` -- and
+        without checking the raw samples here, `force` was never required
+        to destroy a command a live bridge was about to claim. The
+        genuinely-down-stand path is untouched: it never produces even a
+        first sample, so it is unaffected by this check and still proceeds
+        without `force`.
 
         On success, reports the discarded command (parsed back from its
         JSON: id, verb, args) so a caller can tell whether the thing just
-        thrown away was the one they cared about, plus the heartbeat status
-        the probe saw -- recorded even when `force=True` bypassed the
-        refusal, so a forced clear still leaves a record of what it
-        overrode.
+        thrown away was the one they cared about -- read IMMEDIATELY before
+        the `unlink` below, not at the top of this method. Reading early and
+        reporting that is a real, reproduced bug, not a theoretical one: the
+        probe can run for seconds, during which the mod can claim the
+        original command AND a fresh `send` can land a new one in the same
+        window, at which point an early read reports discarding the OLD
+        command while the file actually removed holds the NEW one -- a
+        caller trusting the report would believe it recovered what it
+        wanted when the real, current command was destroyed instead. Also
+        includes the heartbeat status the probe saw, recorded even when
+        `force=True` bypassed a refusal, so a forced clear still leaves a
+        record of what it overrode.
         """
         cmd_path = self._cmd_path()
-        try:
-            raw = cmd_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        if not cmd_path.exists():
             return fail(
                 f"mailbox at {cmd_path} is already empty",
                 hint="there is nothing to clear -- send() would succeed right now",
             )
+
+        before, after = self._sample_twice(probe_window)
+        status, tick = self._classify_samples(before, after)
+        # See this method's own docstring: a readable first sample proves
+        # something was alive inside the window even though the second read
+        # then failed, which `status == "unmeasurable"` alone cannot say.
+        proof_of_life_then_lost_contact = before is not None and after is None
+        if not force and (
+            status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED) or proof_of_life_then_lost_contact
+        ):
+            if proof_of_life_then_lost_contact:
+                reason = (
+                    f"a readable state was seen (tick={tick}) inside the probe window, but "
+                    f"a second sample could not be read within {probe_window}s -- this "
+                    f"proves something was alive moments ago, not a downed stand"
+                )
+            else:
+                reason = f"the bridge looks alive (heartbeat={status!r}, tick={tick})"
+            return fail(
+                f"refusing to clear the mailbox at {cmd_path}: {reason} and may claim "
+                f"this command any moment",
+                hint="pass force=True if you are certain this command should be discarded "
+                     "anyway; check bridge_status/world_state first if you are not sure",
+            )
+
+        # Re-read HERE, immediately before the unlink -- see this method's
+        # docstring for the reproduced bug this ordering fixes. Up to
+        # probe_window seconds have passed since the exists() check above.
+        try:
+            raw = cmd_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ok({"discarded": None, "heartbeat": status,
+                       "note": "mailbox was claimed or cleared concurrently"})
         except OSError as exc:
             return fail(
                 f"failed to read the mailbox to clear it: {exc}",
@@ -255,21 +408,14 @@ class Channel:
             # than silently losing it.
             discarded = {"raw": raw}
 
-        status, tick = self.heartbeat(window=probe_window)
-        if status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED) and not force:
-            return fail(
-                f"refusing to clear the mailbox at {cmd_path}: the bridge looks alive "
-                f"(heartbeat={status!r}, tick={tick}) and may claim this command any moment",
-                hint="pass force=True if you are certain this command should be discarded "
-                     "anyway; check bridge_status/world_state first if you are not sure",
-            )
-
         try:
             cmd_path.unlink()
         except FileNotFoundError:
             # Claimed (by the mod) or cleared (by a concurrent caller)
-            # between our read above and this unlink -- the wedge is gone
-            # either way, which is the outcome this method exists to reach.
+            # between the read just above and this unlink -- the wedge is
+            # gone either way, which is the outcome this method exists to
+            # reach. (This particular race's window is one read/unlink pair
+            # apart, not the multi-second probe -- see the docstring.)
             return ok({"discarded": None, "heartbeat": status,
                        "note": "mailbox was claimed or cleared concurrently"})
         except OSError as exc:
@@ -326,6 +472,57 @@ class Channel:
                 return last_own
             time.sleep(max(0.0, min(poll, remaining)))
 
+    def _sample_twice(self, window: float) -> tuple[BridgeState | None, BridgeState | None]:
+        """Take two tolerant samples `window` seconds apart -- the shared
+        timing/retry logic behind `heartbeat`. Returns `(before, after)`,
+        either of which may be `None`. Exposed as its own method (not
+        inlined into `heartbeat`) because `clear_mailbox` needs the RAW
+        samples, not just heartbeat's 4-outcome reduction of them -- see
+        `_classify_samples` and `clear_mailbox`'s own docstring for why."""
+        deadline = time.monotonic() + window
+        before = self._read_state_tolerant()
+        if before is None:
+            return None, None
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+
+        after = self._read_state_tolerant()
+        return before, after
+
+    def _classify_samples(
+        self, before: BridgeState | None, after: BridgeState | None
+    ) -> tuple[str, int]:
+        """Reduce two samples (as returned by `_sample_twice`) to
+        `heartbeat`'s 4-outcome contract. Pure function of its two
+        arguments, shared by `heartbeat` and `clear_mailbox` so the
+        classification rule lives in exactly one place.
+
+        Session comparison is checked BEFORE tick comparison, deliberately:
+        a session id change means a new world came up, and that must read
+        as "restarted" even if the new world's tick happens to already
+        exceed the old one's (a smaller old tick does not make the
+        comparison "growing" -- it says nothing about progress on the OLD
+        world, which is what "growing" would claim). Only ONE ordering was
+        ever pinned by a test before this fix-round -- a restart where the
+        tick goes down, which both orderings happen to agree on; a restart
+        where the tick goes up is the case that actually distinguishes them.
+        "stalled" covers same-session tick that did not increase, including
+        the (should-never-happen-but-not-this-module's-job-to-assume-away)
+        case of a same-session tick moving backwards -- not just "unchanged"
+        as an earlier version of this docstring said.
+        """
+        if before is None:
+            return HEARTBEAT_UNMEASURABLE, 0
+        if after is None:
+            return HEARTBEAT_UNMEASURABLE, before.tick
+        if after.session_id != before.session_id:
+            return HEARTBEAT_RESTARTED, after.tick
+        if after.tick > before.tick:
+            return HEARTBEAT_GROWING, after.tick
+        return HEARTBEAT_STALLED, after.tick
+
     def heartbeat(self, window: float = 3.0) -> tuple[str, int]:
         """Is the world's tick counter growing over `window` seconds -- and
         is it still the SAME world?
@@ -354,12 +551,18 @@ class Channel:
 
         Returns (status, tick):
           "growing"      -- same session, tick increased: alive, progressing.
-          "stalled"      -- same session, tick unchanged: alive, but frozen.
+          "stalled"      -- same session, tick did not increase (unchanged,
+                             or -- in principle -- went backwards without a
+                             session change; only an INCREASE counts as
+                             progress, so anything else here is "stalled",
+                             not a third thing).
           "restarted"    -- session id changed between samples: a NEW world
                              came up, not a stall on the old one. `tick` is
                              the new session's own tick -- there is nothing
                              meaningful to compare it against across a
-                             restart, so it is not compared.
+                             restart, so it is not compared. Checked BEFORE
+                             tick, so this outcome does not depend on which
+                             direction the tick happened to move.
           "unmeasurable" -- fewer than two readable samples were obtained
                              (the state file was never readable within
                              `window`, or the second read failed after the
@@ -368,22 +571,13 @@ class Channel:
                              and did not move; this means no comparison
                              could be made at all. `tick` is the last tick
                              actually read, or 0 if nothing was ever read.
+                             NOTE for callers deciding what "unmeasurable" is
+                             safe to do next: it does NOT distinguish "never
+                             got any sample" (nothing proven alive) from "got
+                             a first sample, then lost contact" (proof of
+                             life moments ago) -- `clear_mailbox` needs that
+                             distinction and gets it from `_sample_twice`
+                             directly rather than from this method.
         """
-        deadline = time.monotonic() + window
-        before = self._read_state_tolerant()
-        if before is None:
-            return HEARTBEAT_UNMEASURABLE, 0
-
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining)
-
-        after = self._read_state_tolerant()
-        if after is None:
-            return HEARTBEAT_UNMEASURABLE, before.tick
-
-        if after.session_id != before.session_id:
-            return HEARTBEAT_RESTARTED, after.tick
-        if after.tick > before.tick:
-            return HEARTBEAT_GROWING, after.tick
-        return HEARTBEAT_STALLED, after.tick
+        before, after = self._sample_twice(window)
+        return self._classify_samples(before, after)

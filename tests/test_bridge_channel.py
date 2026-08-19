@@ -34,20 +34,27 @@ def _command_payload(cmd_id, status, detail="", finished_at=None) -> dict:
     return {"id": cmd_id, "status": status, "detail": detail, "finished_at": finished_at}
 
 
+def _cmd(cmd_id, verb="ping", args=None, session_id="s1") -> Command:
+    """A ready-to-send Command with a plausible session already stamped --
+    most tests here care about the mailbox mechanics, not about where the
+    session came from (build_command's own tests cover that)."""
+    return Command(id=cmd_id, session_id=session_id, verb=verb, args=args or {})
+
+
 # --- send: atomic write --------------------------------------------------
 
 
 def test_send_writes_mailbox_and_leaves_no_temp_file(tmp_path):
     ch = Channel(tmp_path)
-    cmd = Command(id="ping-1-1", verb="ping", args={"n": 1})
+    cmd = _cmd("ping-1-1", args={"n": 1})
 
-    result = ch.send(cmd)
+    result = ch.send(cmd, is_alive=True)
 
     assert result.ok
     mailbox = tmp_path / CMD_FILENAME
     assert mailbox.exists()
     assert json.loads(mailbox.read_text(encoding="utf-8")) == {
-        "id": "ping-1-1", "verb": "ping", "args": {"n": 1}
+        "id": "ping-1-1", "session_id": "s1", "verb": "ping", "args": {"n": 1}
     }
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != CMD_FILENAME]
     assert leftovers == [], f"temp file(s) left behind: {leftovers}"
@@ -55,11 +62,11 @@ def test_send_writes_mailbox_and_leaves_no_temp_file(tmp_path):
 
 def test_send_refuses_when_mailbox_is_unclaimed(tmp_path):
     ch = Channel(tmp_path)
-    first = Command(id="ping-1-1", verb="ping", args={})
-    second = Command(id="ping-2-2", verb="ping", args={"x": 1})
-    assert ch.send(first).ok
+    first = _cmd("ping-1-1")
+    second = _cmd("ping-2-2", args={"x": 1})
+    assert ch.send(first, is_alive=True).ok
 
-    result = ch.send(second)
+    result = ch.send(second, is_alive=True)
 
     assert not result.ok
     assert result.hint, "a refusal must say what to do, not just that it failed"
@@ -69,18 +76,50 @@ def test_send_refuses_when_mailbox_is_unclaimed(tmp_path):
     assert on_disk["id"] == first.id
 
 
+def test_send_refuses_when_not_alive_and_does_not_write(tmp_path):
+    """A command written into a dead stand's profile directory IS the
+    wedge: nothing alive would ever claim it, and every later send() would
+    then refuse it as unclaimed forever. is_alive=False must refuse before
+    writing anything at all, and say plainly that nothing was written -- a
+    caller who thinks it MIGHT have been written will not retry."""
+    ch = Channel(tmp_path)
+
+    result = ch.send(_cmd("ping-1-1"), is_alive=False)
+
+    assert not result.ok
+    assert "NOT written" in result.error
+    assert result.hint
+    assert not (tmp_path / CMD_FILENAME).exists()
+
+
+def test_send_refuses_when_command_has_no_session_id(tmp_path):
+    """A command with no session is indistinguishable to the mod from a
+    stale one left over from a previous boot -- send() must not let the
+    Python side accidentally write one, even bypassing build_command and
+    constructing a Command directly with a blank session."""
+    ch = Channel(tmp_path)
+    cmd = Command(id="ping-1-1", session_id="", verb="ping", args={})
+
+    result = ch.send(cmd, is_alive=True)
+
+    assert not result.ok
+    assert "session_id" in result.error
+    assert result.hint
+    assert not (tmp_path / CMD_FILENAME).exists()
+
+
 def _fire_concurrent_sends(round_dir, n, tag):
     """Fire `n` send()s at the same instant (barrier-released, not a sleep
     race) against a fresh empty mailbox in `round_dir`. Returns the list of
     Results, one per thread, in thread-index order."""
     ch = Channel(round_dir)
-    commands = [Command(id=f"{tag}-{i}", verb="ping", args={"i": i}) for i in range(n)]
+    commands = [_cmd(f"{tag}-{i}", args={"i": i}) for i in range(n)]
     barrier = threading.Barrier(n)
     results: list = [None] * n
 
     def worker(i):
         barrier.wait()
-        results[i] = ch.send(commands[i])
+        results[i] = ch.send(commands[i], is_alive=True)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
     for t in threads:
@@ -178,8 +217,8 @@ def test_unclaimed_mailbox_and_lost_race_refusals_are_distinguishable(tmp_path):
     a_dir = tmp_path / "a"
     a_dir.mkdir()
     ch_a = Channel(a_dir)
-    assert ch_a.send(Command(id="ping-1-1", verb="ping", args={})).ok
-    unclaimed = ch_a.send(Command(id="ping-2-1", verb="ping", args={}))
+    assert ch_a.send(_cmd("ping-1-1"), is_alive=True).ok
+    unclaimed = ch_a.send(_cmd("ping-2-1"), is_alive=True)
     assert not unclaimed.ok
 
     # Scenario B: several sends racing for the SAME empty mailbox. A loser
@@ -228,13 +267,70 @@ def test_send_success_survives_a_failed_temp_file_cleanup(tmp_path, monkeypatch)
     monkeypatch.setattr(channel_module.os, "remove", flaky_remove)
 
     ch = Channel(tmp_path)
-    cmd = Command(id="ping-1-1", verb="ping", args={})
+    cmd = _cmd("ping-1-1")
 
-    result = ch.send(cmd)  # must return, not raise
+    result = ch.send(cmd, is_alive=True)  # must return, not raise
 
     assert result.ok
     assert (tmp_path / CMD_FILENAME).exists()
     assert json.loads((tmp_path / CMD_FILENAME).read_text(encoding="utf-8"))["id"] == cmd.id
+
+
+# --- current_session_id / build_command: stamping the live session --------
+
+
+def test_current_session_id_is_none_when_nothing_has_been_read(tmp_path):
+    ch = Channel(tmp_path)
+    assert ch.current_session_id() is None
+
+
+def test_current_session_id_returns_the_last_published_session(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=5, session_id="session-xyz")
+    assert ch.current_session_id() == "session-xyz"
+
+
+def test_build_command_refuses_when_no_session_is_known_yet(tmp_path):
+    """The exact refusal shape the coordinator asked for: a caller with
+    nothing to stamp a command's session with gets told plainly, before a
+    command id is even minted, rather than being handed a Command that
+    would only fail later inside send()."""
+    ch = Channel(tmp_path)
+
+    result = ch.build_command("spawn", {"class": "Apple"})
+
+    assert not result.ok
+    assert "session" in result.error
+    assert result.hint
+
+
+def test_build_command_stamps_the_current_session(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=5, session_id="session-xyz")
+
+    result = ch.build_command("spawn", {"class": "Apple"})
+
+    assert result.ok, result.error
+    cmd = result.data
+    assert cmd.session_id == "session-xyz"
+    assert cmd.verb == "spawn"
+    assert cmd.args == {"class": "Apple"}
+    assert cmd.id.startswith("spawn-")
+
+
+def test_build_command_then_send_round_trips_the_session_onto_disk(tmp_path):
+    """End-to-end: the session build_command stamped in is exactly what
+    lands in the mailbox, unmodified by send()."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=5, session_id="session-xyz")
+
+    built = ch.build_command("spawn", {"class": "Apple"})
+    assert built.ok, built.error
+    sent = ch.send(built.data, is_alive=True)
+    assert sent.ok, sent.error
+
+    on_disk = json.loads((tmp_path / CMD_FILENAME).read_text(encoding="utf-8"))
+    assert on_disk["session_id"] == "session-xyz"
 
 
 # --- read_state: tolerant of torn/missing files ---------------------------
@@ -401,6 +497,47 @@ def test_heartbeat_detects_a_restart_via_changed_session_id(tmp_path):
     assert tick == 3  # the new session's own tick -- not compared against the old one
 
 
+def test_heartbeat_reports_restart_even_when_the_new_tick_is_higher(tmp_path):
+    """Session comparison must be checked BEFORE tick comparison: a restart
+    where the new session's tick already exceeds the old session's must
+    still read as "restarted", not "growing" -- growing would claim
+    progress on the SAME world, which is not what happened. The other
+    restart test above only exercises a tick going DOWN, where both
+    orderings of the two checks happen to agree; swapping them would still
+    pass that test but fail this one, which is the point of having it."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=5, session_id="session-old")
+
+    def reboot_soon():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=500, session_id="session-new")  # tick went UP
+
+    threading.Thread(target=reboot_soon, daemon=True).start()
+    status, tick = ch.heartbeat(window=0.15)
+
+    assert status == HEARTBEAT_RESTARTED
+    assert tick == 500
+
+
+def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(tmp_path):
+    """Only an INCREASE counts as growth: a same-session tick that moves
+    backwards (should never happen for a well-behaved mod, but is not this
+    module's job to assume away) reads as "stalled", not "growing" and not
+    a misdetected restart either."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=50, session_id="s1")
+
+    def regress_soon():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=10, session_id="s1")
+
+    threading.Thread(target=regress_soon, daemon=True).start()
+    status, tick = ch.heartbeat(window=0.15)
+
+    assert status == HEARTBEAT_STALLED
+    assert tick == 10
+
+
 def test_heartbeat_reports_unmeasurable_when_the_second_sample_fails(tmp_path):
     """A missing/unreadable SECOND sample is a measurement failure, not
     evidence of a stalled tick -- conflating the two tells a caller the game
@@ -438,12 +575,13 @@ def test_clear_mailbox_when_empty_reports_nothing_to_clear(tmp_path):
 
 def test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive(tmp_path):
     """The exact scenario clear_mailbox exists for: a command sent while
-    nothing is running to claim it. No state file at all means heartbeat's
-    probe reads "unmeasurable" -- never "growing"/"restarted" -- so this
-    must be clearable WITHOUT force."""
+    nothing is running to claim it. No state file at all means the probe
+    never even gets a first sample -- "unmeasurable" with nothing proven
+    alive, never "growing"/"restarted" -- so this must be clearable
+    WITHOUT force."""
     ch = Channel(tmp_path)
-    cmd = Command(id="ping-1-1", verb="ping", args={"x": 1})
-    assert ch.send(cmd).ok
+    cmd = _cmd("ping-1-1", args={"x": 1})
+    assert ch.send(cmd, is_alive=True).ok
 
     result = ch.clear_mailbox(probe_window=0.05)
 
@@ -453,7 +591,7 @@ def test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive(tmp_pa
     assert result.data["heartbeat"] == HEARTBEAT_UNMEASURABLE
     assert not (tmp_path / CMD_FILENAME).exists()
     # The wedge is gone -- a fresh send() succeeds right away.
-    assert ch.send(Command(id="ping-2-1", verb="ping", args={})).ok
+    assert ch.send(_cmd("ping-2-1"), is_alive=True).ok
 
 
 def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
@@ -463,7 +601,7 @@ def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
     previous run. Also clearable without force: "stalled" is not "alive"."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=99, session_id="stale-session")
-    assert ch.send(Command(id="ping-1-1", verb="ping", args={})).ok
+    assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
 
     result = ch.clear_mailbox(probe_window=0.05)
 
@@ -474,7 +612,7 @@ def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
 def test_clear_mailbox_refuses_when_bridge_looks_alive(tmp_path):
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=10, session_id="s1")
-    assert ch.send(Command(id="ping-1-1", verb="ping", args={})).ok
+    assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
 
     def bump_later():
         time.sleep(0.03)
@@ -490,14 +628,36 @@ def test_clear_mailbox_refuses_when_bridge_looks_alive(tmp_path):
     assert (tmp_path / CMD_FILENAME).exists()
 
 
+def test_clear_mailbox_refuses_when_bridge_looks_restarted(tmp_path):
+    """The "growing" refusal is tested above; "restarted" is a SEPARATE
+    branch of the same guard and needs its own test -- narrowing the guard
+    to "growing" alone would leave the rest of the suite unchanged, which
+    is exactly the gap a reviewer found by trying it."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")
+    assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
+
+    def reboot_soon():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=1, session_id="s2")
+
+    threading.Thread(target=reboot_soon, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=0.1)
+
+    assert not result.ok
+    assert "alive" in result.error
+    assert "force=True" in result.hint
+    assert (tmp_path / CMD_FILENAME).exists()
+
+
 def test_clear_mailbox_force_overrides_an_alive_looking_bridge(tmp_path):
     """force=True proceeds anyway, but the result still records that it
     overrode a live-looking bridge -- a forced clear is not silent about
     what it did."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=10, session_id="s1")
-    cmd = Command(id="ping-1-1", verb="ping", args={})
-    assert ch.send(cmd).ok
+    cmd = _cmd("ping-1-1")
+    assert ch.send(cmd, is_alive=True).ok
 
     def bump_later():
         time.sleep(0.03)
@@ -509,4 +669,76 @@ def test_clear_mailbox_force_overrides_an_alive_looking_bridge(tmp_path):
     assert result.ok, result.error
     assert result.data["discarded"]["id"] == cmd.id
     assert result.data["heartbeat"] == HEARTBEAT_GROWING
+    assert not (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_requires_force_when_a_readable_first_sample_loses_contact(tmp_path):
+    """Reviewer-reproduced without mocks: a live, ticking bridge whose
+    SECOND probe sample fails (a real Windows exclusive-handle contender --
+    simulated here by deleting the file mid-probe, the same symptom) must
+    NOT be treated the same as a stand that was never up at all. A readable
+    first sample is proof something was alive inside the window; losing
+    contact after that must still require force, unlike a genuinely down
+    stand, which never produces even a first sample (see
+    test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive,
+    unaffected by this guard)."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=101, session_id="s1")
+    cmd = _cmd("ping-1-1")
+    assert ch.send(cmd, is_alive=True).ok
+
+    def lose_contact_soon():
+        time.sleep(0.03)
+        (tmp_path / STATE_FILENAME).unlink()
+
+    threading.Thread(target=lose_contact_soon, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=0.15)
+
+    assert not result.ok
+    assert "alive moments ago" in result.error
+    assert "force=True" in result.hint
+    assert (tmp_path / CMD_FILENAME).exists()  # refused -- command untouched
+
+
+def test_clear_mailbox_force_overrides_lost_contact_after_a_readable_first_sample(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=101, session_id="s1")
+    cmd = _cmd("ping-1-1")
+    assert ch.send(cmd, is_alive=True).ok
+
+    def lose_contact_soon():
+        time.sleep(0.03)
+        (tmp_path / STATE_FILENAME).unlink()
+
+    threading.Thread(target=lose_contact_soon, daemon=True).start()
+    result = ch.clear_mailbox(force=True, probe_window=0.15)
+
+    assert result.ok, result.error
+    assert result.data["discarded"]["id"] == cmd.id
+    assert not (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_reports_what_it_actually_deleted_not_a_stale_read(tmp_path):
+    """Reproduced: the mod claims the original command mid-probe, and a
+    fresh send() lands a new one in the same window -- clear_mailbox must
+    report discarding the NEW command (the one actually removed below),
+    never the original, whose content was only ever true at a read that
+    would otherwise have happened before the probe even started."""
+    ch = Channel(tmp_path)
+    original = _cmd("ping-1-1", args={"n": 1})
+    assert ch.send(original, is_alive=True).ok
+
+    def claim_then_resend():
+        time.sleep(0.03)
+        (tmp_path / CMD_FILENAME).unlink()  # the mod "claims" the original
+        replacement = _cmd("ping-2-1", args={"n": 2})
+        assert ch.send(replacement, is_alive=True).ok
+
+    threading.Thread(target=claim_then_resend, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=0.15)
+
+    assert result.ok, result.error
+    # Must name the REPLACEMENT command -- the one actually removed -- never
+    # the original, which was already gone by the time the unlink happened.
+    assert result.data["discarded"]["id"] == "ping-2-1"
     assert not (tmp_path / CMD_FILENAME).exists()

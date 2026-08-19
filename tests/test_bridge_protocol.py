@@ -31,9 +31,11 @@ def _state_json(**overrides) -> str:
 
 
 def test_command_to_json_round_trips_fields():
-    cmd = Command(id="ping-1000-1", verb="ping", args={"x": 1})
+    cmd = Command(id="ping-1000-1", session_id="boot-1000", verb="ping", args={"x": 1})
     decoded = json.loads(cmd.to_json())
-    assert decoded == {"id": "ping-1000-1", "verb": "ping", "args": {"x": 1}}
+    assert decoded == {
+        "id": "ping-1000-1", "session_id": "boot-1000", "verb": "ping", "args": {"x": 1}
+    }
 
 
 # --- parse_state: the happy path ---------------------------------------
@@ -97,7 +99,7 @@ def test_parse_state_with_null_command_has_no_command():
     assert state.command is None
 
 
-# --- session_id: required, opaque, exact -----------------------------------
+# --- session_id: required KEY, required VALUE, opaque, exact ---------------
 
 
 def test_parse_state_without_session_id_returns_none():
@@ -119,6 +121,62 @@ def test_parse_state_preserves_session_id_exactly():
     state = parse_state(_state_json(session_id="boot-restart-42"))
     assert state is not None
     assert state.session_id == "boot-restart-42"
+
+
+def test_parse_state_with_null_session_id_returns_none():
+    # A required KEY is not a required VALUE: null is present, but it is
+    # not a session id -- str(None) == "None" would otherwise silently
+    # "work" and compare equal to itself across every future boot too.
+    assert parse_state(_state_json(session_id=None)) is None
+
+
+def test_parse_state_with_empty_string_session_id_returns_none():
+    # The single most plausible Enforce-side mistake: an unset `string`
+    # field serialises as "", not as an absent key -- the missing-KEY guard
+    # above does not catch this, only a value check does. An empty string
+    # that stays constant across every boot would silently defeat restart
+    # detection (heartbeat would never see it change), which is the entire
+    # point of this field.
+    assert parse_state(_state_json(session_id="")) is None
+
+
+def test_parse_state_with_numeric_session_id_returns_none():
+    # 0 is falsy but not "missing" to a careless `if raw["session_id"]:`
+    # check, and str(0) == "0" would "work" as a constant, wrong session id.
+    assert parse_state(_state_json(session_id=0)) is None
+
+
+def test_parse_state_with_boolean_session_id_returns_none():
+    assert parse_state(_state_json(session_id=False)) is None
+
+
+def test_parse_state_with_non_empty_string_session_id_still_parses():
+    # The validation added above must not become so strict it rejects the
+    # ordinary case -- confirms it is narrowly "must be a real, non-empty
+    # string", not something stricter that would break legitimate ids.
+    state = parse_state(_state_json(session_id="a-real-session-id"))
+    assert state is not None
+    assert state.session_id == "a-real-session-id"
+
+
+# --- tick: required, and must be a genuine JSON integer ---------------------
+
+
+def test_parse_state_with_string_tick_returns_none():
+    # int("42") would otherwise silently accept a numeric string.
+    assert parse_state(_state_json(tick="42")) is None
+
+
+def test_parse_state_with_boolean_tick_returns_none():
+    # bool is a subtype of int in Python -- int(True) == 1 would otherwise
+    # silently accept true/false as a tick.
+    assert parse_state(_state_json(tick=True)) is None
+
+
+def test_parse_state_with_float_tick_returns_none():
+    # int(7.9) truncates to 7 instead of rejecting a value that was never a
+    # whole tick count to begin with.
+    assert parse_state(_state_json(tick=7.9)) is None
 
 
 # --- correlation: a state can be reporting on someone else's command ----

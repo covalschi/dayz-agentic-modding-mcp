@@ -29,15 +29,30 @@ STATUSES = ("idle", "running", "done", "failed")
 @dataclass(frozen=True)
 class Command:
     """A command bound for the mod. `id` is what lets a later state report be
-    matched back to this exact command rather than some other one."""
+    matched back to this exact command rather than some other one.
+
+    `session_id` is load-bearing, not decorative: the engine gives Enforce
+    Script no boot identity of its own, so a command with no session (or the
+    wrong one) is indistinguishable to the mod from a stale command left
+    over from before a restart -- carrying the CURRENT session is the only
+    defence against a stale command detonating in a freshly booted world.
+    `Channel.build_command` (bridge/channel.py) is the intended way to
+    obtain one already stamped with the session the mod most recently
+    published; `Channel.send` refuses outright rather than write a command
+    whose `session_id` is empty, so this module does not have to guess at
+    what "wrong" looks like on the wire -- only "present and non-empty" is
+    enforced here, structurally, by giving the field no default.
+    """
 
     id: str
+    session_id: str
     verb: str
     args: dict
 
     def to_json(self) -> str:
         return json.dumps(
-            {"id": self.id, "verb": self.verb, "args": self.args}, ensure_ascii=False
+            {"id": self.id, "session_id": self.session_id, "verb": self.verb, "args": self.args},
+            ensure_ascii=False,
         )
 
 
@@ -120,15 +135,54 @@ def parse_state(text: str) -> BridgeState | None:
         if not isinstance(world, dict):
             return None
 
+        # tick: required, and must genuinely be a JSON integer -- not a
+        # numeric string (int("42") would silently accept one), not a float
+        # (int(7.9) would silently truncate instead of rejecting it), and
+        # not a bool (bool is a subtype of int in Python, so True/False
+        # would otherwise slip past an isinstance(int) check unnoticed).
+        tick_raw = raw["tick"]
+        if not isinstance(tick_raw, int) or isinstance(tick_raw, bool):
+            return None
+
+        # session_id: required, same as tick -- see BridgeState's docstring.
+        # A state JSON that parses but omits it entirely means whatever
+        # wrote it does not speak this version of the protocol, the same
+        # "cannot make sense of it" case every other malformed field
+        # collapses to.
+        #
+        # OPEN MEASUREMENT, not yet verified: the reasoning above ("a state
+        # that parses but is missing a required key is a torn write" would
+        # be double-counting) assumes a torn write is caught as invalid JSON
+        # by json.loads before reaching here. That held for a TRUNCATING
+        # writer in every truncation offset two independent reviewers tried
+        # (tens of thousands of attempts, zero forged-but-valid documents).
+        # It does NOT hold for a non-truncating in-place overwrite, where a
+        # length change ahead of a key can splice two partial key names
+        # into one that happens to be valid JSON with a wrong-but-plausible
+        # value -- also reproduced independently. Whether the mod's actual
+        # writer (Task 5) truncates or overwrites in place is still open;
+        # if it overwrites in place, a torn write could in principle land on
+        # a syntactically valid document with a corrupted-but-present
+        # session_id (or tick) that this function cannot tell apart from a
+        # deliberate one. Requiring the key catches an ABSENT one either
+        # way; it does not by itself catch every torn-write shape.
+        #
+        # Requiring the KEY is also not enough on its own regardless of the
+        # above: an unvalidated VALUE would accept null, "", 0 and false as
+        # "valid" session ids (str(None) == "None", str(False) == "False",
+        # etc.), and any value that stays constant across boots defeats the
+        # entire point of this field -- restart detection would silently
+        # no-op instead of firing. The most plausible Enforce-side mistake
+        # produces exactly this: an unset `string` field serialises as "",
+        # not as an absent key. So the VALUE is validated too: it must be a
+        # genuine, non-empty JSON string.
+        session_id_raw = raw["session_id"]
+        if not isinstance(session_id_raw, str) or not session_id_raw:
+            return None
+
         return BridgeState(
-            tick=int(raw["tick"]),
-            # Required, same as tick -- see BridgeState's docstring. A state
-            # JSON that parses but omits session_id entirely (as opposed to
-            # a torn write, which would have failed json.loads already
-            # above) means whatever wrote it does not speak this version of
-            # the protocol, which is exactly the "cannot make sense of it"
-            # case this function returns None for everywhere else.
-            session_id=str(raw["session_id"]),
+            tick=tick_raw,
+            session_id=session_id_raw,
             command=command,
             errors=[str(e) for e in errors],
             world=world,
