@@ -34,9 +34,27 @@ class PackResult:
 # FileBank packs a mod's source folder *whole*: anything matching one of
 # these inside it rides along into the published pbo. ".git" catches a
 # nested repository (history, hooks, possibly local config); the .blend
-# patterns catch 3D source files nobody meant to ship. This is also the
-# default for Profile.build.exclude -- see profile.py.
-DEFAULT_EXCLUDE: tuple[str, ...] = (".git", "*.blend", "*.blend1")
+# patterns catch 3D source files nobody meant to ship; ".gitignore",
+# ".gitattributes", "README.md" and "*.ps1" catch what a repository root
+# normally carries alongside a mod and a mod never needs at runtime -- most
+# relevant to a mod whose source *is* the repository root (see build.stage).
+# This is a plain default: a project can override it wholesale via
+# build.exclude, e.g. a mod that genuinely ships one of these. This is also
+# the default for Profile.build.exclude -- see profile.py.
+DEFAULT_EXCLUDE: tuple[str, ...] = (
+    ".git", "*.blend", "*.blend1", ".gitignore", ".gitattributes", "README.md", "*.ps1",
+)
+
+# The server's OWN artifacts, always kept out of a staged copy regardless of
+# build.exclude -- a project must never have to know these exist, so this is
+# not configurable the way DEFAULT_EXCLUDE is. "dayz-mcp.toml" and
+# "dayz-mcp.local.toml" are the two halves of this server's own profile; the
+# local half is the worse of the two, since its entire reason to exist is
+# that it carries machine-specific absolute paths (game, tools, the test
+# stand) and never leaves the machine -- packing it into a published
+# artifact defeats that completely. ".dayz-mcp" is the job-store directory
+# this server writes its own run history into.
+ALWAYS_OMIT_FROM_STAGING: tuple[str, ...] = ("dayz-mcp.toml", "dayz-mcp.local.toml", ".dayz-mcp")
 
 
 def filebank_cmd(filebank: Path, name: str, src: Path, out_dir: Path) -> list[str]:
@@ -107,11 +125,31 @@ def find_keys(keys_dir: Path) -> tuple[Path | None, Path | None]:
     return priv, pub
 
 
-def newest_source_mtime(src: Path) -> float:
+def newest_source_mtime(src: Path, ignore: Sequence[str] = ()) -> float:
+    """Newest mtime among files under `src`, skipping anything matching
+    `ignore` by name (not descending into a matching directory, same
+    discipline as find_excluded).
+
+    `ignore` matters for a mod whose source is (or contains) the profile
+    root: the mod's own build output and this server's job-store directory
+    then live INSIDE `src`, and are themselves written to *during the very
+    packing run this function's result gates* -- the output pbo's own
+    write, and the job log this run appends to, both land inside `src` in
+    that layout. Without skipping them, this would compare a freshly-built
+    pbo against files that only got newer because building it touched them,
+    and report every single such build as stale. See pack_one's callers.
+    """
     newest = 0.0
-    for p in Path(src).rglob("*"):
-        if p.is_file():
-            newest = max(newest, p.stat().st_mtime)
+    for dirpath, dirnames, filenames in os.walk(src):
+        if ignore:
+            dirnames[:] = [d for d in dirnames if not any(fnmatch.fnmatch(d, pat) for pat in ignore)]
+        for f in filenames:
+            if ignore and any(fnmatch.fnmatch(f, pat) for pat in ignore):
+                continue
+            try:
+                newest = max(newest, (Path(dirpath) / f).stat().st_mtime)
+            except OSError:
+                continue
     return newest
 
 
@@ -129,6 +167,13 @@ def pack_one(
     src = Path(src) if src is not None else root / name
     mod_dir = Path(mod_dir) if mod_dir else root / f"@{name}"
     out_dir = mod_dir / "addons"
+
+    # The server's own artifacts and this mod's own build output -- never
+    # part of "the source", whether that means "safe to pack" (staging,
+    # below) or "counts toward staleness" (the mtime comparison further
+    # down). Both only matter when `src` is (or contains) the profile root,
+    # but computing this once up front keeps both uses in sync.
+    own_artifacts = [*ALWAYS_OMIT_FROM_STAGING, "keys", mod_dir.name]
 
     # FileBank packs the source directory whole: a nested .git, a stray
     # .blend, anything matching `exclude` (default DEFAULT_EXCLUDE) would
@@ -210,26 +255,30 @@ def pack_one(
         # unconditionally and silently disable the whole guard. That is the
         # one reason staging was forbidden before it had this explicit
         # opt-in with this rule attached.
-        staging_ignore = list(dict.fromkeys([
-            *patterns,
-            # The signing key directory only ends up *inside* `src` when a
-            # mod's source is (or contains) the profile root -- exactly the
-            # layout staging exists for -- but if it does, it must never be
-            # copied into something that gets packed into a published pbo,
-            # regardless of what the user's own `exclude` says.
-            "keys",
-            # Likewise the mod's own output folder: on a root-layout mod it
-            # is a subdirectory of `src`, and copying it would pack any
-            # previously-built pbo into the new one, growing without bound
-            # on every rebuild.
-            mod_dir.name,
-        ]))
+        staging_ignore = list(dict.fromkeys([*patterns, *own_artifacts]))
         omitted = find_excluded(src, staging_ignore)
         staging_dir = Path(tempfile.mkdtemp(prefix="dayz-mcp-stage-"))
         pack_src = staging_dir / name
-        shutil.copytree(src, pack_src, ignore=shutil.ignore_patterns(*staging_ignore))
+        # copy_function=shutil.copy, NOT the copytree default (copy2): copy2
+        # preserves the ORIGINAL file's mtime on the copy. FileBank does its
+        # own internal staleness check and silently skips rewriting a pbo
+        # whose source files all look older than the destination -- which a
+        # copy2'd staged copy always would, on any rebuild after the first
+        # (the true source files keep their original edit times, predating
+        # whatever pbo is already sitting at the destination). Reproduced
+        # directly against FileBank: identical command, only the copy
+        # function changed, between "reports success but the pbo's bytes on
+        # disk do not change at all" and an actual rewrite.
+        shutil.copytree(src, pack_src, ignore=shutil.ignore_patterns(*staging_ignore), copy_function=shutil.copy)
+        # What went IN, not just what stayed out: an omission list alone still
+        # leaves an agent (or a person reading the job summary) with no way
+        # to notice something unexpected got packed short of dissecting the
+        # pbo itself -- which is exactly how the six-file leak this list now
+        # also guards against was actually found.
+        included = sorted(p.name for p in pack_src.iterdir())
+        staging_note = f"staged copy included: {', '.join(included)}"
         if omitted:
-            staging_note = f"staged copy omitted: {', '.join(omitted)}"
+            staging_note += f"; omitted: {', '.join(omitted)}"
 
     try:
         code, tail = run_blocking(filebank_cmd(filebank, name, pack_src, out_dir), root, log_path, timeout=1800)
@@ -256,7 +305,17 @@ def pack_one(
         # the guard entirely under `stage = true`. This is the one thing
         # that makes staging different from the tree-copy this project
         # explicitly forbids elsewhere.
-        if pbo.stat().st_mtime < newest_source_mtime(src):
+        #
+        # `ignore=own_artifacts` matters for the same reason it matters to
+        # staging: when `src` is (or contains) the profile root, the pbo
+        # this very call is about to judge -- and the job log this very
+        # packing run is writing to -- both live INSIDE `src`. Without
+        # skipping them, this comparison would find "the newest file in
+        # src" to be a file the current build itself just touched, and
+        # report every single root-layout build as stale, unconditionally.
+        # Reproduced against a real project before this line existed: a
+        # perfectly good build failed "stale pbo" on the very first attempt.
+        if pbo.stat().st_mtime < newest_source_mtime(src, ignore=own_artifacts):
             return PackResult(
                 name,
                 pbo=str(pbo),

@@ -727,8 +727,83 @@ def test_pack_one_staged_copy_omits_excluded_entries(tmp_path, monkeypatch):
     assert seen["has_git"] is False
     assert seen["has_notes"] is True
     assert seen["has_config"] is True
-    assert "staged copy omitted" in result.note
+    assert "staged copy included" in result.note
+    assert "notes.txt" in result.note
+    assert "config.cpp" in result.note
+    assert "omitted" in result.note
     assert ".git" in result.note
+
+
+def test_pack_one_staging_never_copies_the_servers_own_profile_or_job_store(tmp_path, monkeypatch):
+    """The server's own profile halves and job-store directory must never
+    end up inside a staged copy, regardless of build.exclude -- a project
+    must never have to know they exist. dayz-mcp.local.toml is the worst
+    case: it carries machine-specific absolute paths (game, tools, stand)
+    and its entire reason to exist is that it never leaves the machine."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (root / "dayz-mcp.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    (root / "dayz-mcp.local.toml").write_text('[machine]\ngame = "C:/Games/DayZ"\n', encoding="utf-8")
+    job_store = root / ".dayz-mcp" / "jobs"
+    job_store.mkdir(parents=True)
+    (job_store / "job.json").write_text("{}", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    seen = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])
+        seen["has_toml"] = (staged_src / "dayz-mcp.toml").exists()
+        seen["has_local_toml"] = (staged_src / "dayz-mcp.local.toml").exists()
+        seen["has_job_store"] = (staged_src / ".dayz-mcp").exists()
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+
+    assert result.error == ""
+    assert seen["has_toml"] is False
+    assert seen["has_local_toml"] is False
+    assert seen["has_job_store"] is False
+    assert "dayz-mcp.toml" in result.note
+    assert "dayz-mcp.local.toml" in result.note
+    assert ".dayz-mcp" in result.note
+
+
+def test_default_exclude_covers_repository_root_clutter():
+    """DEFAULT_EXCLUDE widened to cover what a repository root normally
+    carries and a mod never needs -- most relevant to a root-layout mod
+    packed via staging, where the whole root becomes the source."""
+    assert set(DEFAULT_EXCLUDE) >= {
+        ".git", "*.blend", "*.blend1", ".gitignore", ".gitattributes", "README.md", "*.ps1",
+    }
+
+
+def test_find_excluded_matches_the_widened_default_patterns(tmp_path):
+    """Exercises find_excluded (not just the tuple) against the four newly
+    added patterns, the same discipline test_find_excluded_matches_blend_globs
+    already applies to the original three."""
+    (tmp_path / "config.cpp").write_text("", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("", encoding="utf-8")
+    (tmp_path / ".gitattributes").write_text("", encoding="utf-8")
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    (tmp_path / "build.ps1").write_text("", encoding="utf-8")
+    (tmp_path / "keep.txt").write_text("", encoding="utf-8")
+
+    found = find_excluded(tmp_path, DEFAULT_EXCLUDE)
+
+    assert sorted(found) == [".gitattributes", ".gitignore", "README.md", "build.ps1"]
 
 
 def test_pack_one_staging_never_copies_the_keys_directory(tmp_path, monkeypatch):
@@ -805,6 +880,76 @@ def test_pack_one_staging_never_copies_its_own_output_folder(tmp_path, monkeypat
 
     assert result.error == ""
     assert seen["has_output_folder"] is False
+
+
+def test_newest_source_mtime_ignores_matching_names(tmp_path):
+    """The `ignore` parameter skips both files and whole directories by
+    name, the same pruning discipline find_excluded uses -- needed because
+    a mod's own build output and this server's job-store directory can end
+    up inside `src` (see pack_one's own_artifacts) and must not count
+    toward what "the source" means for staleness purposes: both get
+    written to during the very packing run being measured."""
+    old = time.time() - 5000
+    cfg = tmp_path / "config.cpp"
+    cfg.write_text("x", encoding="utf-8")
+    os.utime(cfg, (old, old))
+
+    job_dir = tmp_path / ".dayz-mcp"
+    job_dir.mkdir()
+    job_file = job_dir / "job.json"
+    job_file.write_text("{}", encoding="utf-8")  # fresh mtime ("now")
+
+    # Without ignoring it, the freshly-written job file dominates.
+    assert newest_source_mtime(tmp_path) == job_file.stat().st_mtime
+    # Ignoring the directory by name skips it entirely -- back to config.cpp.
+    assert newest_source_mtime(tmp_path, ignore=[".dayz-mcp"]) == cfg.stat().st_mtime
+
+
+def test_pack_one_staging_gives_the_copy_a_fresh_mtime(tmp_path, monkeypatch):
+    """Reproduced directly against the real FileBank binary (not just
+    inferred): it does its own internal staleness check and silently skips
+    rewriting a pbo when the source it is handed looks no newer than the
+    existing destination -- reporting success while leaving the old bytes
+    on disk untouched. shutil.copytree's default copy function (copy2)
+    preserves the ORIGINAL file's mtime on the copy, which on any rebuild
+    after the first is always older than whatever pbo is already at the
+    destination (the true source files keep their real edit times), so a
+    copy2'd staged copy would silently defeat every rebuild past the
+    first. The staged copy's files must carry a fresh mtime instead."""
+    root = tmp_path / "root"
+    root.mkdir()
+    old = time.time() - 5000
+    cfg = root / "config.cpp"
+    cfg.write_text("class CfgMods {};", encoding="utf-8")
+    os.utime(cfg, (old, old))
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    log_path = root / "build.log"
+    seen = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])
+        seen["staged_config_mtime"] = (staged_src / "config.cpp").stat().st_mtime
+        out_dir = root / "@MyMod" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / "MyMod.pbo"
+        pbo.write_text("fake pbo data", encoding="utf-8")
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    before = time.time()
+    result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
+    after = time.time()
+
+    assert result.error == ""
+    assert "staged_config_mtime" in seen
+    assert seen["staged_config_mtime"] != cfg.stat().st_mtime
+    assert before - 5 <= seen["staged_config_mtime"] <= after + 5
 
 
 def test_pack_one_stale_guard_uses_original_source_not_staged_copy(tmp_path, monkeypatch):
