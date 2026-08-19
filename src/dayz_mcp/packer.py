@@ -23,6 +23,7 @@ class PackResult:
     size: int = 0
     signed: bool = False
     error: str = ""
+    note: str = ""
 
 
 def filebank_cmd(filebank: Path, name: str, src: Path, out_dir: Path) -> list[str]:
@@ -34,11 +35,27 @@ def sign_cmd(signer: Path, private_key: Path, pbo: Path) -> list[str]:
 
 
 def find_keys(keys_dir: Path) -> tuple[Path | None, Path | None]:
+    """Find a private/public key pair, matching by stem.
+
+    Returns (private, public) where public's stem matches private's stem.
+    If multiple private keys exist, returns the sorted-first.
+    If no matching public key exists, returns (private, None).
+    """
     if not Path(keys_dir).is_dir():
         return None, None
-    priv = sorted(Path(keys_dir).glob("*.biprivatekey"))
-    pub = sorted(Path(keys_dir).glob("*.bikey"))
-    return (priv[0] if priv else None), (pub[0] if pub else None)
+    priv_keys = sorted(Path(keys_dir).glob("*.biprivatekey"))
+    if not priv_keys:
+        return None, None
+
+    # Take the first (sorted) private key
+    priv = priv_keys[0]
+
+    # Find matching public key with the same stem
+    stem = priv.stem  # e.g., "MyKey" from "MyKey.biprivatekey"
+    pub_path = Path(keys_dir) / f"{stem}.bikey"
+    pub = pub_path if pub_path.exists() else None
+
+    return priv, pub
 
 
 def newest_source_mtime(src: Path) -> float:
@@ -76,12 +93,20 @@ def pack_one(name: str, root: Path, tools: Path, log_path: Path, mod_dir: Path |
                   "(a running server usually holds the old file open)",
         )
 
-    priv, pub = find_keys(root / "keys")
+    # Determine signing state and collect notes
+    keys_dir = root / "keys"
+    all_priv_keys = sorted(keys_dir.glob("*.biprivatekey")) if keys_dir.is_dir() else []
+    priv, pub = find_keys(keys_dir)
     signed = False
+    note = ""
+
+    # Copy public key to mod output if it exists
     if pub:
         keys_out = mod_dir / "keys"
         keys_out.mkdir(parents=True, exist_ok=True)
         (keys_out / pub.name).write_bytes(pub.read_bytes())
+
+    # Attempt signing if private key is present
     if priv:
         signer = Path(tools) / SIGNER_REL
         if signer.exists():
@@ -89,8 +114,20 @@ def pack_one(name: str, root: Path, tools: Path, log_path: Path, mod_dir: Path |
                 old.unlink()
             run_blocking(sign_cmd(signer, priv, pbo), root, log_path.with_suffix(".sign.log"), timeout=300)
             signed = any(out_dir.glob(f"{name}.pbo.*.bisign"))
+            if len(all_priv_keys) > 1:
+                note = f"multiple private keys present, using {priv.stem}"
+        else:
+            # Private key exists but signer executable is missing
+            note = f"private key present but signer executable not found at {signer}"
+            if len(all_priv_keys) > 1:
+                note = f"multiple private keys present (using {priv.stem}), but signer not found at {signer}"
+        # Check for missing public key only if we haven't already set a note about the signer
+        if not pub and not note:
+            note = f"private key found ({priv.stem}) but public key with matching stem not found"
+            if len(all_priv_keys) > 1:
+                note = f"multiple private keys present (using {priv.stem}), public key not found"
 
-    return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed)
+    return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed, note=note)
 
 
 def pack_all(names: list[str], root: Path, tools: Path, log_dir: Path) -> list[PackResult]:
