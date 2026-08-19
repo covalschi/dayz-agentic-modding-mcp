@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from ..bridge.channel import CMD_FILENAME, STATE_FILENAME
 from ..compilecheck import client_cmd, judge
 from ..errors import Result, fail, ok
 from ..paths import GAME_PROBE
@@ -134,6 +135,52 @@ def newest_client_profile() -> Path | None:
     return client_profile_dir(max(checks, key=lambda j: j.started).id)
 
 
+def clear_bridge_transport(profiles: Path) -> list[str]:
+    """Remove the bridge's two transport files before a boot. Returns what
+    could not be removed (empty on success).
+
+    WHY THESE TWO ARE CLEARED WHILE script_*.log IS DELIBERATELY NOT -- the
+    asymmetry is intentional and reads like an oversight otherwise:
+
+    A log is a RECORD of a run that already happened. Deleting one destroys
+    evidence, a live server holds it open on Windows (so the unlink raises),
+    and nothing needs it gone: `since` already tells this run's log from an
+    earlier one. server_start leaves them exactly where they are.
+
+    These two are not records, they are INSTRUCTIONS AND STATE for the run
+    about to start, and the -profiles directory is reused across restarts:
+
+      * a command left in the mailbox while the stand was down is not stale
+        data, it is a pending action -- it executes at the first tick of a
+        world the agent believes untouched;
+      * the wedge it causes otherwise survives every restart, so the one
+        escape hatch has to be used again and again;
+      * a leftover state file keeps the published tick large and positive, so
+        bridge_status's `no_state_file` answer -- the only one whose hint says
+        to build the bridge and wire it into -serverMod -- becomes unreachable
+        for the entire life of the stand directory;
+      * the mod's counter restarts at 0 each boot while the file keeps the old
+        number, so the published tick goes DOWN across a restart.
+
+    `session_id` defends against the first and last of those from the other
+    side. This is the other layer: the file should not be there at all.
+
+    Nothing holds either file open at the moment this runs -- server_start
+    refuses outright while its own server is alive -- but a scanner or an
+    editor can, so failures are collected and returned rather than raised.
+    Clearing is hygiene, never a precondition: refusing to boot over a json
+    that would not delete is a worse trade than booting with it.
+    """
+    problems: list[str] = []
+    for name in (CMD_FILENAME, STATE_FILENAME):
+        leftover = profiles / name
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError as exc:
+            problems.append(f"{leftover}: {exc}")
+    return problems
+
+
 def server_start(timeout: float = 420) -> Result:
     guard = require_project()
     if guard:
@@ -190,6 +237,13 @@ def server_start(timeout: float = 420) -> Result:
     since = job.started
     profiles = server_profiles_dir()
     profiles.mkdir(parents=True, exist_ok=True)
+    # Before the command line is even built, so nothing can start against a
+    # transport left over from an earlier world. See clear_bridge_transport
+    # for why these two are cleared and the logs beside them are not.
+    transport_left = clear_bridge_transport(profiles)
+    transport_note = ""
+    if transport_left:
+        transport_note = f" | WARNING: could not clear bridge transport: {'; '.join(transport_left)}"
     cmd = [
         str(Path(game) / SERVER_IMAGE), "-server", f"-config={cfg}",
         f"-port={prof.machine.port}", f"-mod={client_mods}", f"-profiles={profiles}",
@@ -236,7 +290,7 @@ def server_start(timeout: float = 420) -> Result:
                     job.id, 0,
                     summary=f"started, pid {pid}; expect.ready_line is empty, so readiness cannot "
                             "be detected -- only errors will be judged (log_verdict once the "
-                            "server has had time to write)",
+                            f"server has had time to write){transport_note}",
                 )
                 return
             deadline = time.time() + timeout
@@ -249,7 +303,7 @@ def server_start(timeout: float = 420) -> Result:
                         continue
                     if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
                         store.add_artifact(job.id, log)
-                        store.finish(job.id, 0, summary=f"ready, pid {pid}")
+                        store.finish(job.id, 0, summary=f"ready, pid {pid}{transport_note}")
                         return
                 time.sleep(2)
             store.fail(job.id, f"no ready line within {timeout}s")
@@ -257,7 +311,12 @@ def server_start(timeout: float = 420) -> Result:
             store.fail(job.id, f"{type(exc).__name__}: {exc}")
 
     threading.Thread(target=run, daemon=True).start()
-    return ok({"job_id": job.id, "since": since})
+    started = {"job_id": job.id, "since": since}
+    # Only when something is actually wrong: a field that is always present
+    # and almost always empty stops being read.
+    if transport_left:
+        started["bridge_transport_left"] = transport_left
+    return ok(started)
 
 
 def server_stop(pid: int = 0) -> Result:

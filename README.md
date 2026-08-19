@@ -118,10 +118,12 @@ wrote any state — which is true, and easy to mistake for a broken bridge.
 
 `bridge_status` also reports the command mailbox, because only the mod ever
 empties it: a command sent while the stand was down, or before the bridge was
-attached, is not discarded and does not expire — the profile directory is
-reused across restarts, so the command is still sitting there at the next boot,
-waiting for a bridge that reads commands. That state comes back as
-`stale_command`, and
+attached, is not discarded and does not expire on its own — it keeps blocking
+every later send, and a stand booted outside these tools would pick it up.
+`server_start` clears both transport files before every boot, so a server
+started through this tool never runs a command from a previous session; that is
+hygiene, not a substitute for knowing the command is there. The state comes back
+as `stale_command`, and
 `bridge_clear()` is the way out of it. Clearing is a separate tool on purpose:
 throwing away a queued command is a decision, not something a status check
 should do behind your back. It refuses while the bridge looks alive unless you

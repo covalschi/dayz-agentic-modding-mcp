@@ -1276,6 +1276,12 @@ def test_the_stale_command_answer_is_true_before_the_mod_reads_commands(tmp_path
     assert "will be executed by the first tick" not in r.error
     assert "expire" in r.error or "survive" in r.error
     assert "bridge_clear" in r.hint
+    # Nor may it claim the command survives a boot: server_start clears the
+    # transport before spawning, so the only stand that would pick this up is
+    # one started outside these tools -- which is what the answer has to say.
+    assert "next boot" not in r.error
+    assert "OUTSIDE" in r.error or "outside" in r.error
+    assert "server_start" in r.hint
 
 
 # --- Round 4: the same wedge shape, a third time, and the tests that missed it

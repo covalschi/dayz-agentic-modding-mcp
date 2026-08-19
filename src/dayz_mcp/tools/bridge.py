@@ -494,11 +494,11 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                 base,
                 f"no server is running, and a command has been sitting unclaimed in "
                 f"{mailbox['path']} for {mailbox['age_seconds']}s -- nothing can claim it "
-                "while the stand is down, and it does not expire: the file survives into the "
-                "next boot, where the bridge will claim it as soon as the mod reads commands",
-                hint="discard it with bridge_clear() before starting the server, unless that "
-                     "command really is meant to run on the next boot; then server_start and "
-                     f"bridge_status again (the file itself is {mailbox['path']})",
+                "while the stand is down, and it does not expire on its own. It still blocks "
+                "every send, and a stand booted OUTSIDE these tools would pick it up",
+                hint="discard it with bridge_clear(); server_start also clears the transport "
+                     "before every boot, so a server started through this tool will not run "
+                     f"it (the file itself is {mailbox['path']})",
             )
         return _not_alive(
             "no_server",

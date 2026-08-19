@@ -1279,3 +1279,122 @@ def test_mod_build_does_not_leave_a_signature_over_a_pbo_it_no_longer_describes(
     assert "unsigned" in waited.data["summary"]
     assert not stale.exists(), "the old signature outlived the pbo it described"
     assert not list(out_dir.glob("*.bisign"))
+
+
+# --- P1: the bridge transport must not survive a boot -------------------------
+#
+# server_start only ever did profiles.mkdir(), so both dayz_mcp_cmd.json and
+# dayz_mcp_state.json outlived a restart. Four confirmed defects came out of
+# that one omission: a command written while the stand was down detonating at
+# the first tick of a world the agent believes untouched; a wedge that survives
+# every restart; a leftover state file keeping the tick large and positive,
+# which makes bridge_status's no_state_file branch -- the only one whose hint
+# says to build and wire the bridge -- unreachable for the life of the stand
+# directory; and a published tick that goes DOWN across a restart, since the
+# mod's counter restarts at 0 while the file keeps the old number.
+
+
+def _spawn_capturing_profiles(captured):
+    """A spawn stand-in that records what the transport looked like AT THE
+    MOMENT the server was started -- the only instant that matters here."""
+
+    def fake_spawn(cmd, cwd):
+        profiles = Path(next(a for a in cmd if a.startswith("-profiles=")).split("=", 1)[1])
+        captured["cmd_json"] = (profiles / "dayz_mcp_cmd.json").exists()
+        captured["state_json"] = (profiles / "dayz_mcp_state.json").exists()
+        captured["logs"] = sorted(p.name for p in profiles.glob("script_*.log"))
+        return 4242
+
+    return fake_spawn
+
+
+def test_server_start_clears_the_bridge_transport_before_spawning(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    profiles = stand / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "dayz_mcp_cmd.json").write_text(
+        '{"id": "spawn-1", "verb": "spawn", "args": {}}', encoding="utf-8"
+    )
+    (profiles / "dayz_mcp_state.json").write_text(
+        '{"tick": 91234, "session_id": "an-old-boot"}', encoding="utf-8"
+    )
+    # The asymmetry: logs are a record of the past and are deliberately kept.
+    (profiles / "script_old.log").write_text("leftover from a previous boot\n", encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", _spawn_capturing_profiles(captured))
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+
+    started = tools.server_start(timeout=5)
+    assert started.ok, started.error
+    tools.job_wait(started.data["job_id"], timeout=10)
+
+    assert captured["cmd_json"] is False, "a stale command was still in the mailbox at spawn time"
+    assert captured["state_json"] is False, "a stale state file was still there at spawn time"
+    assert captured["logs"] == ["script_old.log"], "the logs were cleared too"
+
+
+def test_a_transport_file_that_cannot_be_removed_does_not_fail_the_boot(tmp_path, monkeypatch):
+    """Clearing is hygiene, not a precondition. A file that cannot be removed
+    must be reported and the boot must go ahead -- refusing to start a server
+    over a leftover json would be a worse trade than booting with it."""
+    session.reset()
+    # No ready line: this test is about the transport, so the boot should
+    # settle and finish instead of polling for a marker nothing will print.
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    profiles = stand / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    mailbox = profiles / "dayz_mcp_cmd.json"
+    mailbox.write_text('{"id": "spawn-1", "verb": "spawn", "args": {}}', encoding="utf-8")
+
+    real_unlink = Path.unlink
+
+    def unlink_that_fails_for_the_mailbox(self, *args, **kwargs):
+        if self.name == "dayz_mcp_cmd.json":
+            raise PermissionError(f"{self} is held open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_that_fails_for_the_mailbox)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4242)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+
+    started = tools.server_start(timeout=5)
+    assert started.ok, started.error
+    # Reported where the caller looks first...
+    assert started.data["bridge_transport_left"], started.data
+    assert "dayz_mcp_cmd.json" in started.data["bridge_transport_left"][0]
+
+    waited = tools.job_wait(started.data["job_id"], timeout=10)
+    assert waited.data["status"] == "done", waited.data
+    # ...and on the job, which is what an agent reads afterwards.
+    assert "dayz_mcp_cmd.json" in waited.data["summary"]
+    assert mailbox.exists()  # and it really did survive, as reported
+
+
+def test_a_clean_boot_says_nothing_about_the_transport(tmp_path, monkeypatch):
+    """No leftovers, no noise: the field only appears when something is wrong."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4242)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+
+    started = tools.server_start(timeout=5)
+    assert started.ok, started.error
+    assert "bridge_transport_left" not in started.data
