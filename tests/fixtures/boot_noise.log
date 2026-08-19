@@ -1,0 +1,5 @@
+11:20:00.001 SCRIPT    : Loading mission
+11:20:00.500 WARNING   : Can't load MyMod/Anims/cfg/skeletons.anim.xml
+11:20:00.501 WARNING   : Can't load OtherMod/Anims/cfg/skeletons.anim.xml
+11:20:01.000 WARNING]	File "$mission:storage_1/x/modstorageplayers.bin" was not closed.
+11:20:03.000 SCRIPT    : [MyMod] loaded: items=12 recipes=3 tiers=2

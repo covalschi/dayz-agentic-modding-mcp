@@ -1,0 +1,5 @@
+11:10:02.001 SCRIPT    : Loading mission
+11:10:03.114 SCRIPT    : ERROR: recipes.json failed validation: duplicate id 'a'
+11:10:04.900 SCRIPT    : [MyMod] loaded: items=12 recipes=0 tiers=2
+11:10:05.001 SCRIPT    : Can't compile "MyModThing" script module!
+11:10:05.100 SCRIPT    : Bad type 'MyFoo'
