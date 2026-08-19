@@ -705,6 +705,49 @@ def test_client_compile_check_worker_exception_fails_the_job_instead_of_hanging(
     assert "simulated spawn crash" in waited.data["error"]
 
 
+# --- Final review, item 7: server_start refuses a second server; mod_build
+# refused nothing, and two builds share an output directory ---
+
+
+def test_mod_build_refuses_a_second_build_while_one_is_running(tmp_path, monkeypatch):
+    """Two builds of the same project write the same pbo and unlink the same
+    .bisign, so the second either loses the race or corrupts the artifact.
+    Tools run on worker threads, so an agent firing mod_build twice is not an
+    exotic case -- it is one impatient retry."""
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
+
+    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+
+    first = tools.mod_build()
+    assert first.ok, first.error
+    assert started.wait(timeout=10), "worker never started"
+
+    second = tools.mod_build()
+    assert not second.ok
+    assert first.data["job_id"] in second.error or first.data["job_id"] in second.hint
+    assert "job_wait" in second.hint
+
+    release.set()
+    assert tools.job_wait(first.data["job_id"], timeout=10).data["status"] == "done"
+
+    # Refusal only while one is in flight: the next build goes through.
+    release.set()
+    third = tools.mod_build()
+    assert third.ok, third.error
+    assert tools.job_wait(third.data["job_id"], timeout=10).data["status"] == "done"
+
+
 # --- Review round 1, Finding 2 (Important): a non-empty PackResult.note must
 # reach the job summary ---
 

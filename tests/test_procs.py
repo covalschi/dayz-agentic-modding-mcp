@@ -179,16 +179,20 @@ def test_run_blocking_kills_grandchild_on_timeout(tmp_path):
     assert code == 124
     assert "timeout" in tail.lower()
 
-    # Extract the grandchild PID from the output
+    # Extract the grandchild PID from the output. This match must be an
+    # assertion, not a condition: guarded by `if match:`, the whole point of
+    # the test evaporates the moment the wrapper fails to print its pid --
+    # nothing is verified and the test still passes green, which is the one
+    # outcome a test guarding against orphaned game processes must not have.
     log_text = log.read_text(encoding="utf-8")
     match = re.search(r"GRANDCHILD_PID=(\d+)", log_text)
+    assert match, f"the wrapper never reported a grandchild pid, so nothing was proved; log was: {log_text!r}"
 
-    if match:
-        grandchild_pid = int(match.group(1))
-        # The grandchild should be dead (killed by the timeout's process tree termination)
-        try:
-            assert not is_alive(grandchild_pid), f"Grandchild process {grandchild_pid} still alive after timeout"
-        finally:
-            # Cleanup: ensure grandchild is truly dead in case assertion failed
-            if is_alive(grandchild_pid):
-                stop(grandchild_pid)
+    grandchild_pid = int(match.group(1))
+    # The grandchild should be dead (killed by the timeout's process tree termination)
+    try:
+        assert not is_alive(grandchild_pid), f"Grandchild process {grandchild_pid} still alive after timeout"
+    finally:
+        # Cleanup: ensure grandchild is truly dead in case assertion failed
+        if is_alive(grandchild_pid):
+            stop(grandchild_pid)

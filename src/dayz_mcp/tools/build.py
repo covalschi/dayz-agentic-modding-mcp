@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from ..errors import Result, fail, ok
+from ..jobs import QUEUED, RUNNING
 from ..packer import pack_all
 from ..procs import powershell_cmd, run_blocking
 from ..profile import resolve_mod_dir
@@ -28,6 +29,25 @@ def mod_build() -> Result:
         )
 
     store = session.jobs()
+
+    # server_start refuses a second server for the same session; a second build
+    # of the same project deserves the same answer. Both would run FileBank
+    # into one output directory, writing the same pbo and unlinking the same
+    # .bisign -- contention at best, a half-written artifact at worst. Tools
+    # run on worker threads (see server.py), so two builds in flight takes one
+    # impatient retry, not an exotic sequence.
+    #
+    # Per project, because the store is per project: another project's build is
+    # not this project's problem. A job left "running" by a dead process cannot
+    # block anything either -- JobStore.load() marks those failed on the way in.
+    in_flight = [j for j in store.all() if j.kind == "build" and j.status in (QUEUED, RUNNING)]
+    if in_flight:
+        busy = in_flight[-1].id
+        return fail(
+            f"a build is already running for this project (job {busy})",
+            hint=f"wait for it with job_wait('{busy}'), or look at it with job_status('{busy}')",
+        )
+
     job = store.create("build")
     log_dir = store.artifacts_dir(job.id)
 
