@@ -96,14 +96,44 @@ def load_profile(path: str | Path) -> Result:
             hint=f"machine paths belong in {LOCAL_NAME}, which is not committed",
         )
 
+    if "mods" in raw:
+        return fail(
+            f"[mods] found in {MAIN_NAME}",
+            hint=f"required and extra mods are machine-specific and belong in {LOCAL_NAME}",
+        )
+
     notes: list[str] = []
-    name = str(raw.get("project", {}).get("name", "")).strip()
+
+    # Check [project] is a table
+    proj = raw.get("project")
+    if proj is not None and not isinstance(proj, dict):
+        return fail(
+            f"[project] must be a table, got {type(proj).__name__}",
+            hint="write it as a [section] header, not a bare value",
+        )
+    name = str((proj or {}).get("name", "")).strip()
     if not name:
         return fail("project.name is empty", hint="give the project a name")
 
-    b = raw.get("build", {})
+    # Check [build] is a table
+    b = raw.get("build")
+    if b is not None and not isinstance(b, dict):
+        return fail(
+            f"[build] must be a table, got {type(b).__name__}",
+            hint="write it as a [section] header, not a bare value",
+        )
+    b = b or {}
+
+    # Check build.mods is a list
+    mods_val = b.get("mods", [])
+    if not isinstance(mods_val, list):
+        return fail(
+            f"build.mods must be a list, got {type(mods_val).__name__}",
+            hint='write it as mods = ["MyMod"], not a bare value',
+        )
+
     build = BuildCfg(
-        mods=[str(m) for m in b.get("mods", [])],
+        mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
     )
     if not build.mods:
@@ -124,9 +154,25 @@ def load_profile(path: str | Path) -> Result:
             hint="the path is relative to the profile directory, or drop the key",
         )
 
-    e = raw.get("expect", {})
+    # Check [expect] is a table
+    e = raw.get("expect")
+    if e is not None and not isinstance(e, dict):
+        return fail(
+            f"[expect] must be a table, got {type(e).__name__}",
+            hint="write it as a [section] header, not a bare value",
+        )
+    e = e or {}
+
+    # Check [expect.counters] is a table
+    counters_val = e.get("counters")
+    if counters_val is not None and not isinstance(counters_val, dict):
+        return fail(
+            f"[expect.counters] must be a table, got {type(counters_val).__name__}",
+            hint="write it as a [expect.counters] section with key = value pairs",
+        )
+
     counters: dict[str, int] = {}
-    for key, value in (e.get("counters", {}) or {}).items():
+    for key, value in (counters_val or {}).items():
         if not isinstance(value, int) or isinstance(value, bool):
             return fail(
                 f"expect.counters.{key} must be an integer, got {value!r}",
@@ -156,13 +202,46 @@ def load_profile(path: str | Path) -> Result:
         lraw, lerr = _read_toml(local)
         if lraw is None:
             return fail(lerr, hint=f"fix or delete {LOCAL_NAME}")
-        lm = lraw.get("machine", {})
+
+        # Reject portable sections in local file
+        if "project" in lraw:
+            return fail(
+                f"[project] found in {LOCAL_NAME}",
+                hint=f"[project] is portable and belongs in {MAIN_NAME}",
+            )
+        if "build" in lraw:
+            return fail(
+                f"[build] found in {LOCAL_NAME}",
+                hint=f"[build] is portable and belongs in {MAIN_NAME}",
+            )
+        if "expect" in lraw:
+            return fail(
+                f"[expect] found in {LOCAL_NAME}",
+                hint=f"[expect] is portable and belongs in {MAIN_NAME}",
+            )
+
+        # Check [machine] is a table
+        lm = lraw.get("machine")
+        if lm is not None and not isinstance(lm, dict):
+            return fail(
+                f"[machine] must be a table, got {type(lm).__name__}",
+                hint="write it as a [section] header, not a bare value",
+            )
+        lm = lm or {}
         machine = MachineCfg(
             game=str(lm.get("game", "")),
             tools=str(lm.get("tools", "")),
             stand_root=str(lm.get("stand_root", "")),
         )
-        lmods = lraw.get("mods", {})
+
+        # Check [mods] is a table
+        lmods = lraw.get("mods")
+        if lmods is not None and not isinstance(lmods, dict):
+            return fail(
+                f"[mods] must be a table, got {type(lmods).__name__}",
+                hint="write it as a [section] header, not a bare value",
+            )
+        lmods = lmods or {}
         mods = ModsCfg(
             required=[str(x) for x in lmods.get("required", [])],
             extra=[str(x) for x in lmods.get("extra", [])],

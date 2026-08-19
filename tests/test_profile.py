@@ -106,3 +106,137 @@ def test_no_mods_declared_is_rejected(tmp_path):
     r = load_profile(write(tmp_path, bad))
     assert not r.ok
     assert "build.mods" in r.error
+
+
+def test_wrong_shaped_project_section_is_rejected(tmp_path):
+    bad = BASE.replace('[project]\nname = "my-mod"', 'project = "oops"')
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "[project] must be a table" in r.error
+    assert "dayz-mcp.toml" in r.hint or "[section]" in r.hint
+
+
+def test_wrong_shaped_build_section_is_rejected(tmp_path):
+    bad = """
+build = "oops"
+
+[project]
+name = "my-mod"
+
+[expect]
+ready_line = "MyMod loaded"
+max_warnings = 0
+forbid = ["Bad type"]
+
+[expect.counters]
+items = 12
+"""
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "[build] must be a table" in r.error
+    assert "[section]" in r.hint
+
+
+def test_build_mods_as_scalar_is_rejected(tmp_path):
+    bad = BASE.replace('mods = ["MyMod"]', 'mods = "MyMod"')
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "build.mods must be a list" in r.error
+    assert "dayz-mcp.toml" in r.hint or '["MyMod"]' in r.hint
+
+
+def test_wrong_shaped_expect_section_is_rejected(tmp_path):
+    bad = """
+expect = "oops"
+
+[project]
+name = "my-mod"
+
+[build]
+mods = ["MyMod"]
+"""
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "[expect] must be a table" in r.error
+    assert "[section]" in r.hint
+
+
+def test_wrong_shaped_expect_counters_is_rejected(tmp_path):
+    bad = """
+[project]
+name = "my-mod"
+
+[build]
+mods = ["MyMod"]
+
+[expect]
+ready_line = "MyMod loaded"
+max_warnings = 0
+forbid = ["Bad type"]
+counters = "oops"
+"""
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "expect.counters" in r.error
+    assert "table" in r.error
+
+
+def test_mods_in_portable_file_is_rejected(tmp_path):
+    bad = BASE + '\n[mods]\nrequired = ["@CF"]\n'
+    r = load_profile(write(tmp_path, bad))
+    assert not r.ok
+    assert "[mods] found in" in r.error
+    assert "dayz-mcp.local.toml" in r.hint
+
+
+def test_project_in_local_file_is_rejected(tmp_path):
+    local = """
+    [project]
+    name = "wrong"
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "[project] found in" in r.error
+    assert "dayz-mcp.toml" in r.hint
+
+
+def test_build_in_local_file_is_rejected(tmp_path):
+    local = """
+    [build]
+    mods = ["Other"]
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "[build] found in" in r.error
+    assert "dayz-mcp.toml" in r.hint
+
+
+def test_expect_in_local_file_is_rejected(tmp_path):
+    local = """
+    [expect]
+    ready_line = "wrong"
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "[expect] found in" in r.error
+    assert "dayz-mcp.toml" in r.hint
+
+
+def test_wrong_shaped_machine_in_local_is_rejected(tmp_path):
+    local = """
+    machine = "oops"
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "[machine] must be a table" in r.error
+    assert "[section]" in r.hint
+
+
+def test_wrong_shaped_mods_in_local_is_rejected(tmp_path):
+    local = """
+    mods = "oops"
+    """
+    r = load_profile(write(tmp_path, BASE, local))
+    assert not r.ok
+    assert "[mods] must be a table" in r.error
+    assert "[section]" in r.hint
