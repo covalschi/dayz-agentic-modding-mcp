@@ -735,11 +735,17 @@ def test_pack_one_staged_copy_omits_excluded_entries(tmp_path, monkeypatch):
 
 
 def test_pack_one_staging_never_copies_the_servers_own_profile_or_job_store(tmp_path, monkeypatch):
-    """The server's own profile halves and job-store directory must never
-    end up inside a staged copy, regardless of build.exclude -- a project
+    """The server's own profile halves and job-store directory must never be
+    packed, regardless of build.exclude and regardless of `stage` -- a project
     must never have to know they exist. dayz-mcp.local.toml is the worst
     case: it carries machine-specific absolute paths (game, tools, stand)
-    and its entire reason to exist is that it never leaves the machine."""
+    and its entire reason to exist is that it never leaves the machine.
+
+    Both enforcement paths are exercised here: staging filters them out of the
+    copy, and the default (non-staging) path, which has nothing to filter,
+    refuses to pack at all. The two are asserted together because this test
+    once claimed the unconditional rule while only ever running the staged
+    half -- which is how the other half stayed uncovered."""
     root = tmp_path / "root"
     root.mkdir()
     (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
@@ -780,6 +786,17 @@ def test_pack_one_staging_never_copies_the_servers_own_profile_or_job_store(tmp_
     assert "dayz-mcp.local.toml" in result.note
     assert ".dayz-mcp" in result.note
 
+    # Same invariant, default path: exclude=[] proves the refusal is the
+    # own-artifact rule firing and not the ordinary exclude check.
+    seen.clear()
+    refused = pack_one("MyMod", root, tools, log_path, src=root, stage=False, exclude=[])
+    assert refused.error != ""
+    assert "dayz-mcp.toml" in refused.error
+    assert "dayz-mcp.local.toml" in refused.error
+    assert ".dayz-mcp" in refused.error
+    assert refused.pbo == ""
+    assert seen == {}, "FileBank was invoked despite the refusal"
+
 
 def test_default_exclude_covers_repository_root_clutter():
     """DEFAULT_EXCLUDE widened to cover what a repository root normally
@@ -807,11 +824,15 @@ def test_find_excluded_matches_the_widened_default_patterns(tmp_path):
 
 
 def test_pack_one_staging_never_copies_the_keys_directory(tmp_path, monkeypatch):
-    """The signing key directory must never end up inside a staged copy, even
+    """The signing key directory must never be packed, on either path, even
     though it is not in DEFAULT_EXCLUDE -- a root-layout mod's source is the
     same directory as the profile root, which is exactly where the private
     signing key lives (root/keys). Letting it ride along would embed the
-    private key inside the published pbo."""
+    private key inside the published pbo, and whoever holds that key can sign
+    arbitrary mods as this author.
+
+    As above, both halves of the rule are asserted here: staging filters the
+    directory out, the default path refuses outright."""
     root = tmp_path / "root"
     root.mkdir()
     (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
@@ -844,11 +865,19 @@ def test_pack_one_staging_never_copies_the_keys_directory(tmp_path, monkeypatch)
     assert seen["has_keys"] is False
     assert "keys" in result.note
 
+    seen.clear()
+    refused = pack_one("MyMod", root, tools, log_path, src=root, stage=False, exclude=[])
+    assert refused.error != ""
+    assert "keys" in refused.error
+    assert refused.pbo == ""
+    assert seen == {}, "FileBank was invoked despite the refusal"
+
 
 def test_pack_one_staging_never_copies_its_own_output_folder(tmp_path, monkeypatch):
     """On a root-layout mod, the built @Name folder is a subdirectory of the
-    source being staged. Copying it would pack a previous build's pbo into
-    the new one, growing without bound on every rebuild."""
+    source. Packing it would put a previous build's pbo inside the new one,
+    growing without bound on every rebuild -- so staging filters it out and
+    the default path refuses, the same two halves as the tests above."""
     root = tmp_path / "root"
     root.mkdir()
     (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
@@ -880,6 +909,64 @@ def test_pack_one_staging_never_copies_its_own_output_folder(tmp_path, monkeypat
 
     assert result.error == ""
     assert seen["has_output_folder"] is False
+
+    seen.clear()
+    refused = pack_one("MyMod", root, tools, log_path, src=root, stage=False, exclude=[])
+    assert refused.error != ""
+    assert "@MyMod" in refused.error
+    assert refused.pbo == ""
+    assert seen == {}, "FileBank was invoked despite the refusal"
+
+
+def test_pack_one_refuses_to_pack_the_servers_own_artifacts_without_staging(tmp_path, monkeypatch):
+    """The reviewer's reproduction, verbatim: a root-layout mod, the stock
+    exclude list, stage=False -- and NO .git, because a release archive or a
+    CI checkout has none. The .git refusal is what appeared to cover this
+    case; with .git gone it does not fire, and before this guard existed
+    FileBank was handed the private signing key, both halves of this
+    server's profile, its job store and the previous build's own pbo, with
+    no error at all.
+
+    The refusal must name what it found and point at the way forward, since
+    for a genuine root-layout mod `stage = true` is the only way to pack at
+    all."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    (root / "dayz-mcp.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    (root / "dayz-mcp.local.toml").write_text('[machine]\ngame = "C:/Games/DayZ"\n', encoding="utf-8")
+    keys_dir = root / "keys"
+    keys_dir.mkdir()
+    (keys_dir / "MyKey.biprivatekey").write_text("do not ship me", encoding="utf-8")
+    job_store = root / ".dayz-mcp" / "jobs" / "build-1-1"
+    job_store.mkdir(parents=True)
+    (job_store / "job.json").write_text("{}", encoding="utf-8")
+    prior = root / "@MyMod" / "addons"
+    prior.mkdir(parents=True)
+    (prior / "MyMod.pbo").write_bytes(b"a previous build")
+
+    tools = tmp_path / "tools"
+    filebank_dir = tools / "Bin" / "PboUtils"
+    filebank_dir.mkdir(parents=True, exist_ok=True)
+    (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
+
+    packed = {}
+
+    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
+        staged_src = Path(cmd[-1])
+        packed["files"] = sorted(str(p.relative_to(staged_src)) for p in staged_src.rglob("*") if p.is_file())
+        return 0, "FileBank success"
+
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+
+    result = pack_one("MyMod", root, tools, root / "build.log", src=root, stage=False)
+
+    assert result.error != "", f"packed instead of refusing; FileBank got {packed.get('files')}"
+    assert packed == {}, f"FileBank was handed {packed.get('files')}"
+    for expected in ("keys", "dayz-mcp.toml", "dayz-mcp.local.toml", ".dayz-mcp", "@MyMod"):
+        assert expected in result.error, f"{expected} missing from the refusal: {result.error}"
+    assert "stage" in result.error
+    assert result.pbo == ""
 
 
 def test_newest_source_mtime_ignores_matching_names(tmp_path):

@@ -45,9 +45,10 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
     ".git", "*.blend", "*.blend1", ".gitignore", ".gitattributes", "README.md", "*.ps1",
 )
 
-# The server's OWN artifacts, always kept out of a staged copy regardless of
-# build.exclude -- a project must never have to know these exist, so this is
-# not configurable the way DEFAULT_EXCLUDE is. "dayz-mcp.toml" and
+# The server's OWN artifacts, never packed -- kept out of a staged copy, and
+# refused outright when there is no copy to filter (see pack_one). Neither is
+# conditional on build.exclude: a project must never have to know these exist,
+# so this is not configurable the way DEFAULT_EXCLUDE is. "dayz-mcp.toml" and
 # "dayz-mcp.local.toml" are the two halves of this server's own profile; the
 # local half is the worse of the two, since its entire reason to exist is
 # that it carries machine-specific absolute paths (game, tools, the test
@@ -169,11 +170,46 @@ def pack_one(
     out_dir = mod_dir / "addons"
 
     # The server's own artifacts and this mod's own build output -- never
-    # part of "the source", whether that means "safe to pack" (staging,
-    # below) or "counts toward staleness" (the mtime comparison further
-    # down). Both only matter when `src` is (or contains) the profile root,
-    # but computing this once up front keeps both uses in sync.
+    # part of "the source", whether that means "safe to pack" (the guard
+    # immediately below and staging further down) or "counts toward
+    # staleness" (the mtime comparison at the end). All three only matter
+    # when `src` is (or contains) the profile root, but computing this once
+    # up front keeps them in sync.
     own_artifacts = [*ALWAYS_OMIT_FROM_STAGING, "keys", mod_dir.name]
+
+    # Unconditional, and deliberately ahead of the `exclude` check below:
+    # packing the private signing key is not a configuration mistake a
+    # project can make, it is this server handing over its author's identity
+    # -- whoever holds that key can sign arbitrary mods as them, and every
+    # server whitelisting the matching .bikey will accept them. Staging
+    # filters these out; without staging there is nothing to filter, so the
+    # only way to honour the same rule is to refuse.
+    #
+    # This ran only inside `if stage:` before, which left the DEFAULT path
+    # with no protection at all. What appeared to cover the common case was
+    # the unrelated `.git` refusal below -- and that disappears the moment
+    # .git is absent (a release archive, a CI checkout) or `exclude` is
+    # narrowed, which the shipped example profile actively invited.
+    #
+    # Matched by NAME at any depth, via the same find_excluded call on the
+    # same list that staging passes to shutil.ignore_patterns: what one path
+    # refuses is then exactly what the other omits, by construction, so the
+    # two cannot drift apart again. The cost is a false refusal for a mod
+    # that genuinely carries a nested directory called "keys" -- which the
+    # error names explicitly, and `stage = true` packs anyway (minus that
+    # directory).
+    intruders = find_excluded(src, own_artifacts) if not stage else []
+    if intruders:
+        return PackResult(
+            name,
+            error=f"refusing to pack {src}: found {', '.join(intruders)}, which belong to the "
+                  "build server and not to the mod -- the signing keys, this server's own "
+                  "profile, its job store, this mod's previous build. FileBank packs the "
+                  "source folder whole, so publishing the result would publish them, the "
+                  "private signing key first of all. Point build.sources at the mod's own "
+                  "folder, or set build.stage = true to pack a filtered copy instead (the "
+                  "layout a mod whose source is the repository root itself needs)",
+        )
 
     # FileBank packs the source directory whole: a nested .git, a stray
     # .blend, anything matching `exclude` (default DEFAULT_EXCLUDE) would
