@@ -118,27 +118,37 @@ def server_start(timeout: float = 420) -> Result:
 
     def run() -> None:
         store.start(job.id)
-        # Old script_*.log files are left alone: unlinking a file a live server
-        # still holds open raises PermissionError on Windows, and that exception
-        # inside this thread would leave the job stuck in "running" forever. The
-        # `since` cutoff below is what tells this run's log apart from theirs.
-        pid = spawn(cmd, Path(game))
-        session.set_server_pid(pid)
-        marker = prof.expect.ready_line
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if not is_alive(pid):
-                store.fail(job.id, "the server process died before it was ready")
-                return
-            for log in profiles.glob("script_*.log"):
-                if log.stat().st_mtime < since:
-                    continue
-                if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
-                    store.add_artifact(job.id, log)
-                    store.finish(job.id, 0, summary=f"ready, pid {pid}")
+        # An uncaught exception here must still resolve the job, not just print a
+        # traceback to the stdio server's stderr where the agent cannot see it: a
+        # game directory whose DayZDiag_x64.exe exists but is not a runnable image
+        # (a partial download, a placeholder) passes find_game's existence probe
+        # and then makes spawn() raise OSError. Without this, the job stays
+        # "running" forever, and the next process start relabels it "lost to a
+        # restart" instead of what actually happened.
+        try:
+            # Old script_*.log files are left alone: unlinking a file a live server
+            # still holds open raises PermissionError on Windows, and that exception
+            # inside this thread would leave the job stuck in "running" forever. The
+            # `since` cutoff below is what tells this run's log apart from theirs.
+            pid = spawn(cmd, Path(game))
+            session.set_server_pid(pid)
+            marker = prof.expect.ready_line
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if not is_alive(pid):
+                    store.fail(job.id, "the server process died before it was ready")
                     return
-            time.sleep(2)
-        store.fail(job.id, f"no ready line within {timeout}s")
+                for log in profiles.glob("script_*.log"):
+                    if log.stat().st_mtime < since:
+                        continue
+                    if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
+                        store.add_artifact(job.id, log)
+                        store.finish(job.id, 0, summary=f"ready, pid {pid}")
+                        return
+                time.sleep(2)
+            store.fail(job.id, f"no ready line within {timeout}s")
+        except Exception as exc:  # noqa: BLE001 - must reach the job, not just stderr
+            store.fail(job.id, f"{type(exc).__name__}: {exc}")
 
     threading.Thread(target=run, daemon=True).start()
     return ok({"job_id": job.id, "since": since})
@@ -212,24 +222,27 @@ def client_compile_check(extra_mods: str = "", wait_seconds: float = 120) -> Res
 
     def run() -> None:
         store.start(job.id)
-        # -serverMod mods are dedicated-server only; the diagnostic client never
-        # loads them, so only the client half of the split is used here.
-        client_mods, _server_mods = mod_list(extra_mods)
-        pid = spawn(client_cmd(Path(game), client_mods, profiles), Path(game))
-        time.sleep(wait_seconds)
-        rpt = _newest(profiles, "*.RPT")
-        slog = _newest(profiles, "script_*.log")
-        stop(pid)
-        rpt_lines = rpt.read_text(encoding="utf-8", errors="replace").splitlines() if rpt else []
-        log_lines = slog.read_text(encoding="utf-8", errors="replace").splitlines() if slog else []
-        for art in (rpt, slog):
-            if art:
-                store.add_artifact(job.id, art)
-        got = judge(rpt_lines, log_lines, prof.expect)
-        if got["status"] == "ok":
-            store.finish(job.id, 0, summary="client compiles")
-        else:
-            store.fail(job.id, f"{got['status']}: {got['reason']} {' | '.join(got['errors'][:5])}")
+        try:
+            # -serverMod mods are dedicated-server only; the diagnostic client never
+            # loads them, so only the client half of the split is used here.
+            client_mods, _server_mods = mod_list(extra_mods)
+            pid = spawn(client_cmd(Path(game), client_mods, profiles), Path(game))
+            time.sleep(wait_seconds)
+            rpt = _newest(profiles, "*.RPT")
+            slog = _newest(profiles, "script_*.log")
+            stop(pid)
+            rpt_lines = rpt.read_text(encoding="utf-8", errors="replace").splitlines() if rpt else []
+            log_lines = slog.read_text(encoding="utf-8", errors="replace").splitlines() if slog else []
+            for art in (rpt, slog):
+                if art:
+                    store.add_artifact(job.id, art)
+            got = judge(rpt_lines, log_lines, prof.expect)
+            if got["status"] == "ok":
+                store.finish(job.id, 0, summary="client compiles")
+            else:
+                store.fail(job.id, f"{got['status']}: {got['reason']} {' | '.join(got['errors'][:5])}")
+        except Exception as exc:  # noqa: BLE001 - must reach the job, not just stderr
+            store.fail(job.id, f"{type(exc).__name__}: {exc}")
 
     threading.Thread(target=run, daemon=True).start()
     return ok({"job_id": job.id})

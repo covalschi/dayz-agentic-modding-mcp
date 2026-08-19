@@ -1,13 +1,20 @@
 import os
+import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
+from dayz_mcp.errors import ok as errors_ok
 from dayz_mcp.packer import PackResult
-from dayz_mcp.tools import lifecycle, session
+from dayz_mcp.procs import is_alive as procs_is_alive
+from dayz_mcp.procs import spawn as procs_spawn
+from dayz_mcp.procs import stop as procs_stop
+from dayz_mcp.tools import jobs_api, lifecycle, session
 
 PROFILE = """
 [project]
@@ -452,3 +459,181 @@ def test_client_compile_check_excludes_server_only_mods(tmp_path, monkeypatch):
     tools.job_wait(job_id, timeout=5)
     mod_arg = next(a for a in captured["cmd"] if a.startswith("-mod="))
     assert "@ServerOnlyMod" not in mod_arg
+
+
+# --- Review round 1, Finding 1 (Critical): worker bodies must not hang the job on
+# an uncaught exception ---
+
+
+def test_server_start_worker_exception_fails_the_job_instead_of_hanging(tmp_path):
+    """Reproduces the exact unmocked failure the reviewer found: a game directory
+    whose DayZDiag_x64.exe exists (so find_game's existence probe passes) but is
+    not a valid image (with_stand_and_game deliberately writes it as zero bytes).
+    subprocess.Popen then raises OSError ("not a valid Win32 application") inside
+    the worker thread. Without a catch there, the job would stay "running"
+    forever and the next process start would mislabel it as merely lost."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    job_id = tools.server_start(timeout=5).data["job_id"]
+    waited = tools.job_wait(job_id, timeout=15)
+    assert waited.data["status"] == "failed"
+    assert waited.data["error"]
+    assert "OSError" in waited.data["error"]
+
+
+def test_mod_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+
+    def boom(names, root, tools_root, log_dir):
+        raise RuntimeError("simulated packer crash")
+
+    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", boom)
+    job_id = tools.mod_build().data["job_id"]
+    waited = tools.job_wait(job_id, timeout=10)
+    assert waited.data["status"] == "failed"
+    assert "simulated packer crash" in waited.data["error"]
+
+
+def test_client_compile_check_worker_exception_fails_the_job_instead_of_hanging(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "DayZDiag_x64.exe").write_bytes(b"")
+    (root / "dayz-mcp.local.toml").write_text(
+        f'[machine]\ngame = "{game.as_posix()}"\n', encoding="utf-8"
+    )
+    tools.project_open(str(root))
+
+    def boom(cmd, cwd):
+        raise RuntimeError("simulated spawn crash")
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", boom)
+    job_id = tools.client_compile_check(wait_seconds=0).data["job_id"]
+    waited = tools.job_wait(job_id, timeout=10)
+    assert waited.data["status"] == "failed"
+    assert "simulated spawn crash" in waited.data["error"]
+
+
+# --- Review round 1, Finding 2 (Important): a non-empty PackResult.note must
+# reach the job summary ---
+
+
+def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+    note = "private key present but signer executable not found at C:/tools/Bin/DsUtils/DSSignFile.exe"
+    monkeypatch.setattr(
+        "dayz_mcp.tools.build.pack_all",
+        lambda names, root, tools_root, log_dir: [
+            PackResult(
+                name="MyMod",
+                pbo=str(root / "@MyMod/addons/MyMod.pbo"),
+                size=10,
+                signed=False,
+                note=note,
+            )
+        ],
+    )
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+    job_id = tools.mod_build().data["job_id"]
+    waited = tools.job_wait(job_id, timeout=10)
+    assert waited.data["status"] == "done"
+    assert "MyMod" in waited.data["summary"]
+    assert note in waited.data["summary"]
+
+
+# --- Review round 1, Finding 3 (Important): tools must not run inline on the
+# server's event loop ---
+
+
+@pytest.mark.anyio
+async def test_wrapped_tool_runs_the_sync_body_off_the_event_loop():
+    main_thread = threading.get_ident()
+    seen = {}
+
+    def probe(x: int):
+        seen["thread"] = threading.get_ident()
+        return errors_ok({"x": x})
+
+    wrapped = mcp_server._wrap(probe)
+    result = await wrapped(x=5)
+    assert result == {"ok": True, "data": {"x": 5}, "error": "", "hint": ""}
+    assert seen["thread"] != main_thread
+
+
+@pytest.mark.anyio
+async def test_real_tool_call_through_fastmcp_still_returns_the_result_envelope(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    _content, structured = await mcp_server.mcp.call_tool("project_open", {"path": str(root)})
+    assert structured["ok"] is True
+    assert structured["data"]["name"] == "my-mod"
+
+
+def test_job_wait_clamps_timeout_to_a_sane_upper_bound(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+    store = session.jobs()
+    job = store.create("build")
+    store.finish(job.id, 0, summary="done")
+
+    captured = {}
+    real_wait = store.wait
+
+    def spy_wait(job_id, timeout):
+        captured["timeout"] = timeout
+        return real_wait(job_id, timeout)
+
+    monkeypatch.setattr(store, "wait", spy_wait)
+    tools.job_wait(job.id, timeout=100000)
+    assert captured["timeout"] == jobs_api.MAX_WAIT_SECONDS
+
+
+# --- Review round 1, Finding 4 (promoted): switching projects must not inherit
+# or kill a previous project's server pid ---
+
+
+def test_opening_a_new_project_does_not_inherit_or_kill_a_previous_projects_server(tmp_path):
+    session.reset()
+    root_a = tmp_path / "a"
+    root_a.mkdir()
+    make_project(root_a)
+    tools.project_open(str(root_a))
+
+    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    session.set_server_pid(real_pid)
+    try:
+        assert procs_is_alive(real_pid)
+
+        root_b = tmp_path / "b"
+        root_b.mkdir()
+        make_project(root_b)
+        opened_b = tools.project_open(str(root_b))
+        assert opened_b.ok, opened_b.error
+        assert opened_b.data.get("orphaned_server_pid") == real_pid
+
+        # B's session must not think a server is running...
+        assert session.server_pid() == 0
+        status_b = tools.project_status()
+        assert status_b.data["server_running"] is False
+
+        # ...and must not have touched A's process.
+        assert procs_is_alive(real_pid)
+
+        # server_stop from B's session must be a no-op for A's process.
+        stopped = tools.server_stop()
+        assert stopped.data["stopped"] is False
+        assert procs_is_alive(real_pid)
+    finally:
+        procs_stop(real_pid)

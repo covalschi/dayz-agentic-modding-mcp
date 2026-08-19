@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server for agentic DayZ mod development: build, run, verdict"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
-dependencies = ["mcp==1.29.0"]
+dependencies = ["mcp==1.29.0", "anyio>=4.5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -21,3 +21,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Raised by mcp==1.29.0's own internal Settings model the moment FastMCP()
+    # is constructed (pydantic_settings/sources/utils.py, unrelated to any of
+    # our code); harmless, and narrowly targeted by class rather than blanket
+    # -suppressed so a real warning from our own code still surfaces.
+    "ignore::pydantic_settings.exceptions.IncompleteFieldDefinitionWarning",
+]

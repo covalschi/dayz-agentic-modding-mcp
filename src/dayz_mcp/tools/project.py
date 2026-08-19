@@ -22,21 +22,25 @@ def project_open(path: str) -> Result:
     prof = loaded.data
     game = find_game(prof.machine.game)
     tools_root = find_tools(prof.machine.tools)
-    session.set_project(prof, game, tools_root)
+    switch = session.set_project(prof, game, tools_root)
 
     missing = [n for n, v in (("game", game), ("tools", tools_root)) if not v]
-    return ok(
-        {
-            "name": prof.name,
-            "root": str(prof.root),
-            "game": game,
-            "tools": tools_root,
-            "stand_root": prof.machine.stand_root,
-            "own_mod_dirs": prof.own_mod_dirs,
-            "notes": prof.notes,
-            "missing": missing,
-        }
-    )
+    data = {
+        "name": prof.name,
+        "root": str(prof.root),
+        "game": game,
+        "tools": tools_root,
+        "stand_root": prof.machine.stand_root,
+        "own_mod_dirs": prof.own_mod_dirs,
+        "notes": prof.notes,
+        "missing": missing,
+    }
+    # A server left running by whatever project was open before this call is no
+    # longer tracked by this session (see session.set_project) -- surfaced here
+    # rather than silently dropped, so the caller knows something else is up.
+    if switch["orphaned_server_pid"]:
+        data["orphaned_server_pid"] = switch["orphaned_server_pid"]
+    return ok(data)
 
 
 def project_status() -> Result:
