@@ -362,14 +362,18 @@ class Channel:
 
         `send` is the only writer of the mailbox and never removes it:
         "claimed" is defined entirely as the mod deleting the file after
-        reading it (Task 5). A command sent while the stand is down, or
-        before the bridge mod is wired into -serverMod, therefore sits
-        there forever -- every later `send` returns the mailbox-occupied
-        refusal, and nothing in the running system can ever clear it on its
-        own. This is that escape hatch, and deliberately not automatic:
-        nothing else in this module calls it, so a wedge is never silently
-        cleared as a side effect of something else -- a caller (the tool
-        layer, ultimately a human) has to decide to call this.
+        reading it (Task 5). A command sent while nothing is running to
+        claim it therefore sits there forever -- every later `send` returns
+        the mailbox-occupied refusal, and nothing at the filesystem level
+        can ever clear it on its own (the tool layer may add its own
+        additional gating on top of this -- e.g. a `force` case for a
+        bridge that was never wired into `-serverMod` at all -- but that is
+        a decision made above this method, not a claim this docstring
+        should make on its behalf). This is that escape hatch, and
+        deliberately not automatic: nothing else in this module calls it,
+        so a wedge is never silently cleared as a side effect of something
+        else -- a caller (the tool layer, ultimately a human) has to decide
+        to call this.
 
         Refuses to act, and reports what it found, unless `force=True`, in
         THREE situations that all mean "this verdict cannot be trusted
@@ -393,22 +397,31 @@ class Channel:
            made the reduced status read `"unmeasurable"` -- and without
            checking the raw samples here, `force` was never required to
            destroy a command a live bridge was about to claim.
-        3. A `"stalled"` verdict reached with `probe_window` shorter than
-           the mod's publish interval (`_MOD_PUBLISH_INTERVAL_SECONDS`).
-           Below that, "the tick did not move" and "the tick has not had a
-           chance to move yet" look IDENTICAL -- same tick, both samples
-           readable -- so "stalled" from a too-short window is not evidence
-           of anything, and treating it as safe-to-clear risks destroying
-           an in-flight command on a live bridge whose window was simply
-           too short to prove it. `bridge_status` already refuses to call
-           two back-to-back samples "frozen" for the same reason; this is
-           the same interlock on the path that can actually destroy
-           something.
+        3. Both samples readable, but `_classify_samples` itself already
+           answered `"unmeasurable"` rather than `"stalled"` because the
+           MEASURED gap between the two reads (see `_sample_twice`'s
+           docstring -- NOT the requested `probe_window`, which can be much
+           larger than the actual gap when the first sample is slow to
+           appear) was under the mod's publish interval. Fixing the
+           classifier to return this honest answer is NOT sufficient here
+           on its own: with both samples readable, case 2 above does not
+           fire (`after` is not `None`), and a plain `"unmeasurable"` alone
+           looks exactly like case 2's opposite (a genuinely down stand,
+           which also reports `"unmeasurable"` but is safe to clear) --
+           this method has to tell the two `"unmeasurable"` shapes apart
+           itself, by whether BOTH samples actually came back, not just
+           trust the label. Reproduced without mocks: a bridge that came up
+           1.8s into a 2.0s probe (mirroring the case `_sample_twice`'s own
+           docstring describes -- the ordinary shape of the FIRST
+           `bridge_status` poll after any boot) let a forced-looking clear
+           through with `override_reason: None`, destroying an in-flight
+           command on a live bridge with no record of what happened.
 
         The genuinely-down-stand path (case 1's opposite: no first sample
         at all) is untouched by cases 2 and 3 -- it never produces even a
         first sample, so it is unaffected and still proceeds without
-        `force`, no matter how short `probe_window` is.
+        `force`, no matter how short `probe_window` is or how short the
+        resulting `gap` would have been.
 
         On success, reports the discarded command (parsed back from its
         JSON: id, verb, args) so a caller can tell whether the thing just
@@ -441,18 +454,22 @@ class Channel:
                 hint="there is nothing to clear -- send() would succeed right now",
             )
 
-        before, after = self._sample_twice(probe_window)
-        sample = self._classify_samples(before, after)
+        before, after, gap = self._sample_twice(probe_window)
+        sample = self._classify_samples(before, after, gap)
         status, tick = sample.status, sample.tick
 
         # Case 2 (see docstring): a readable first sample proves something
         # was alive inside the window even though the second read then
         # failed, which `status == "unmeasurable"` alone cannot say.
         proof_of_life_then_lost_contact = before is not None and after is None
-        # Case 3 (see docstring): a "stalled" verdict from a window too
-        # short to span even one publish interval proves nothing either way.
-        window_too_short_to_trust_stalled = (
-            status == HEARTBEAT_STALLED and probe_window < _MOD_PUBLISH_INTERVAL_SECONDS
+        # Case 3 (see docstring): BOTH samples readable but _classify_samples
+        # already downgraded a same-tick result to "unmeasurable" because the
+        # MEASURED gap was too short to trust -- the only way to reach
+        # "unmeasurable" with both before and after non-None. Must be told
+        # apart from case 2's genuinely-safe opposite (before is None, no
+        # sample at all) by checking the raw samples, not the label alone.
+        gap_too_short_to_trust_stalled = (
+            status == HEARTBEAT_UNMEASURABLE and before is not None and after is not None
         )
 
         if status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED):
@@ -463,12 +480,13 @@ class Channel:
                 f"a second sample could not be read within {probe_window}s -- this "
                 f"proves something was alive moments ago, not a downed stand"
             )
-        elif window_too_short_to_trust_stalled:
+        elif gap_too_short_to_trust_stalled:
             override_reason = (
-                f"the probe window ({probe_window}s) is shorter than the mod's publish "
-                f"interval ({_MOD_PUBLISH_INTERVAL_SECONDS}s), so a same tick proves "
-                f"nothing -- a live bridge that simply has not ticked again yet looks "
-                f"identical to a frozen one at this window"
+                f"both samples were readable, but the MEASURED gap between them "
+                f"({gap:.2f}s) is shorter than the mod's publish interval "
+                f"({_MOD_PUBLISH_INTERVAL_SECONDS}s) -- a same tick proves nothing at "
+                f"this gap; a live bridge that simply has not ticked again yet looks "
+                f"identical to a frozen one"
             )
         else:
             override_reason = None  # genuinely safe to clear without force
@@ -600,13 +618,38 @@ class Channel:
                 return last_own
             time.sleep(max(0.0, min(poll, remaining)))
 
-    def _sample_twice(self, window: float) -> tuple[BridgeState | None, BridgeState | None]:
-        """Take two tolerant samples `window` seconds apart -- the shared
-        timing/retry logic behind `heartbeat`. Returns `(before, after)`,
-        either of which may be `None`. Exposed as its own method (not
-        inlined into `heartbeat`) because `clear_mailbox` needs the RAW
-        samples, not just heartbeat's 4-outcome reduction of them -- see
-        `_classify_samples` and `clear_mailbox`'s own docstring for why.
+    def _sample_twice(
+        self, window: float
+    ) -> tuple[BridgeState | None, BridgeState | None, float]:
+        """Take two tolerant samples, up to `window` seconds apart -- the
+        shared timing/retry logic behind `heartbeat`. Returns `(before,
+        after, gap)`: `before`/`after` may be `None`; `gap` is the ACTUAL
+        measured wall-clock time between the two reads, in seconds (`0.0`
+        when `before` is `None`, since no second read is even attempted
+        then).
+
+        `gap` exists because it can be much smaller than `window`, and a
+        caller finding that out for itself (by comparing against the window
+        it originally asked for) gets it wrong -- see the CRITICAL bug this
+        docstring paragraph replaced: the FIRST sample retries to `window`'s
+        deadline (below), but the SECOND sample is then taken AT THAT SAME
+        deadline -- so the true gap between the two reads is
+        `window - time_until_the_first_sample_succeeded`, not `window`.
+        Whenever a slow-to-appear first sample eats most of the window, the
+        remaining gap can fall under the mod's 1 Hz publish interval, and
+        two reads that close together show the SAME tick whether the world
+        is frozen OR simply has not had a chance to tick again yet -- an
+        earlier version of `_classify_samples` could not tell those apart
+        because it was never told the gap, only the ticks. Reproduced with
+        real files and a real clock: a bridge appearing 1.8s into a 2.0s
+        window (and 1.5/2.0, 2.5/3.0, 9.5/10.0) all read "frozen" -- the
+        exact wrong diagnosis this module exists to prevent, and not a
+        corner case: "the state file appears partway through the probe" is
+        exactly the shape of the FIRST `bridge_status` poll after every
+        boot, since the mod publishes once at init and then ticks at 1 Hz.
+        Callers needing "did the tick genuinely fail to move" must compare
+        against THIS `gap`, never against the `window` they asked for --
+        `_classify_samples` does exactly that.
 
         The FIRST sample retries all the way to `window`'s own deadline,
         not just `_read_state_tolerant`'s own short (~0.1-0.15s) budget.
@@ -622,9 +665,14 @@ class Channel:
         unreadable right now -- because the mod has not started writing it
         yet, or is mid-crash-and-recover -- is the ORDINARY condition, and
         `clear_mailbox` is exactly the tool its author reaches for then.
-        The SECOND sample keeps its original short budget: `heartbeat`'s own
+        The SECOND sample keeps its original short budget beyond `window`'s
+        deadline (`_read_state_tolerant`'s own retries): `heartbeat`'s own
         docstring already treats a failed second sample as its own outcome
-        ("unmeasurable") rather than something worth waiting out further.
+        ("unmeasurable") rather than something worth waiting out further --
+        extending `window` itself to guarantee a bigger `gap` would break
+        the bounded-time promise this method makes; reporting the honest,
+        possibly-too-small `gap` instead is what keeps that promise while
+        also staying truthful.
         """
         deadline = time.monotonic() + window
         before = self._read_state_tolerant()
@@ -632,37 +680,48 @@ class Channel:
             time.sleep(_TOLERANT_READ_DELAY)
             before = self._read_state_tolerant()
         if before is None:
-            return None, None
+            return None, None, 0.0
+        before_time = time.monotonic()
 
-        remaining = deadline - time.monotonic()
+        remaining = deadline - before_time
         if remaining > 0:
             time.sleep(remaining)
 
         after = self._read_state_tolerant()
-        return before, after
+        gap = time.monotonic() - before_time
+        return before, after, gap
 
     def _classify_samples(
-        self, before: BridgeState | None, after: BridgeState | None
+        self, before: BridgeState | None, after: BridgeState | None, gap: float
     ) -> HeartbeatSample:
         """Reduce two samples (as returned by `_sample_twice`) to
         `heartbeat`'s 4-outcome contract, PLUS the session id(s) observed
-        (see `HeartbeatSample`). Pure function of its two arguments, shared
-        by `heartbeat` and `clear_mailbox` so the classification rule lives
-        in exactly one place.
+        (see `HeartbeatSample`). Pure function of its arguments, shared by
+        `heartbeat` and `clear_mailbox` so the classification rule lives in
+        exactly one place.
 
         Session comparison is checked BEFORE tick comparison, deliberately:
         a session id change means a new world came up, and that must read
         as "restarted" even if the new world's tick happens to already
         exceed the old one's (a smaller old tick does not make the
         comparison "growing" -- it says nothing about progress on the OLD
-        world, which is what "growing" would claim). Only ONE ordering was
-        ever pinned by a test before this fix-round -- a restart where the
-        tick goes down, which both orderings happen to agree on; a restart
-        where the tick goes up is the case that actually distinguishes them.
-        "stalled" covers same-session tick that did not increase, including
-        the (should-never-happen-but-not-this-module's-job-to-assume-away)
-        case of a same-session tick moving backwards -- not just "unchanged"
-        as an earlier version of this docstring said.
+        world, which is what "growing" would claim).
+
+        A same-session tick that did NOT increase is "stalled" only when
+        `gap` (the MEASURED time between the two reads -- see
+        `_sample_twice`'s docstring for why this must be measured, not
+        assumed from the requested window) is at least
+        `_MOD_PUBLISH_INTERVAL_SECONDS`. Below that, the mod genuinely has
+        not had a fair chance to write a new tick yet, so "the same tick
+        twice" is not evidence of a stall -- it is evidence of nothing, and
+        reporting "stalled" there was the exact wrong-diagnosis bug this
+        gap-awareness exists to close. That case reports "unmeasurable"
+        instead (with `after`'s tick/session still, since both reads DID
+        succeed -- only the comparison between them is untrustworthy, not
+        the values themselves). GROWING and RESTARTED are never subject to
+        this: an observed increase, or an observed session change, is real
+        evidence regardless of how little time passed to observe it -- only
+        the ABSENCE of a visible change is ambiguous under too short a gap.
         """
         if before is None:
             return HeartbeatSample(HEARTBEAT_UNMEASURABLE, 0, None)
@@ -674,6 +733,8 @@ class Channel:
             )
         if after.tick > before.tick:
             return HeartbeatSample(HEARTBEAT_GROWING, after.tick, after.session_id)
+        if gap < _MOD_PUBLISH_INTERVAL_SECONDS:
+            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, after.tick, after.session_id)
         return HeartbeatSample(HEARTBEAT_STALLED, after.tick, after.session_id)
 
     def heartbeat(self, window: float = 3.0) -> tuple[str, int]:

@@ -442,10 +442,17 @@ def test_heartbeat_detects_a_growing_tick(tmp_path):
 
 
 def test_heartbeat_detects_a_stalled_tick(tmp_path):
+    """window must be AT LEAST the mod's publish interval for a "stalled"
+    verdict to be trustworthy -- the MEASURED gap between the two samples
+    (here, essentially the whole window, since the file already exists
+    before heartbeat is even called) must be >= 1 Hz's worth of time, or
+    the honest answer is "unmeasurable", not "stalled". See
+    test_heartbeat_does_not_call_a_late_appearing_bridge_frozen for the
+    case where a shorter effective gap is exactly the bug this guards."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=42, session_id="s1")
 
-    status, tick = ch.heartbeat(window=0.15)
+    status, tick = ch.heartbeat(window=1.05)
 
     assert status == HEARTBEAT_STALLED
     assert tick == 42
@@ -461,7 +468,12 @@ def test_heartbeat_with_no_state_file_is_unmeasurable(tmp_path):
 def test_heartbeat_tolerates_a_single_torn_read(tmp_path):
     """A read that fails once (file not there yet -- the same symptom a torn
     write leaves) and recovers shortly after must not be mistaken for a dead
-    bridge, only a genuine run of failures should be."""
+    bridge, only a genuine run of failures should be.
+
+    window must leave enough of a MEASURED gap after recovery (~t=0.02-0.05)
+    for a trustworthy "stalled" verdict -- see
+    test_heartbeat_detects_a_stalled_tick's note.
+    """
     ch = Channel(tmp_path)
 
     def create_soon():
@@ -469,7 +481,7 @@ def test_heartbeat_tolerates_a_single_torn_read(tmp_path):
         _write_state(tmp_path, tick=3, session_id="s1")
 
     threading.Thread(target=create_soon, daemon=True).start()
-    status, tick = ch.heartbeat(window=0.3)
+    status, tick = ch.heartbeat(window=1.1)
 
     assert tick == 3
     assert status == HEARTBEAT_STALLED  # recovered to the same tick both times, not growth
@@ -523,7 +535,8 @@ def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(tmp_
     """Only an INCREASE counts as growth: a same-session tick that moves
     backwards (should never happen for a well-behaved mod, but is not this
     module's job to assume away) reads as "stalled", not "growing" and not
-    a misdetected restart either."""
+    a misdetected restart either. window needs a trustworthy MEASURED gap
+    -- see test_heartbeat_detects_a_stalled_tick's note."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=50, session_id="s1")
 
@@ -532,7 +545,7 @@ def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(tmp_
         _write_state(tmp_path, tick=10, session_id="s1")
 
     threading.Thread(target=regress_soon, daemon=True).start()
-    status, tick = ch.heartbeat(window=0.15)
+    status, tick = ch.heartbeat(window=1.05)
 
     assert status == HEARTBEAT_STALLED
     assert tick == 10
@@ -752,7 +765,13 @@ def test_clear_mailbox_requires_force_when_probe_window_is_too_short_to_trust_st
     assert (tmp_path / CMD_FILENAME).exists()
 
 
-def test_clear_mailbox_force_overrides_window_too_short_and_records_it(tmp_path):
+def test_clear_mailbox_force_overrides_gap_too_short_and_records_it(tmp_path):
+    """Both samples ARE readable here (the file exists the whole time), so
+    the classifier itself downgrades the verdict to "unmeasurable" rather
+    than "stalled" -- see _classify_samples' gap-awareness. force=True
+    proceeds anyway, but override_reason must still name the actual reason
+    (the measured gap, not a bare "unmeasurable" that would look identical
+    to a genuinely down stand)."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=10, session_id="s1")
     cmd = _cmd("ping-1-1")
@@ -762,10 +781,35 @@ def test_clear_mailbox_force_overrides_window_too_short_and_records_it(tmp_path)
 
     assert result.ok, result.error
     assert result.data["discarded"]["id"] == cmd.id
-    assert result.data["heartbeat"] == HEARTBEAT_STALLED
+    assert result.data["heartbeat"] == HEARTBEAT_UNMEASURABLE
     assert result.data["override_reason"] is not None
+    assert "gap" in result.data["override_reason"]
     assert "publish interval" in result.data["override_reason"]
     assert not (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_does_not_destroy_a_late_appearing_live_bridges_command(tmp_path):
+    """Mirrors the exact reported regression at the destructive layer: a
+    bridge that comes up partway through the probe window must not be
+    treated as a genuinely down stand just because the reduced status alone
+    reads "unmeasurable" -- both cases 1 (down stand: no first sample at
+    all) and 2 (proof-of-life-then-lost-contact) fail to catch this, since
+    BOTH samples here are readable. clear_mailbox has to tell this apart
+    from a safe "unmeasurable" itself, by checking whether both raw samples
+    actually came back -- fixing only the classifier is not enough on its
+    own, which is the trap this test exists to catch."""
+    ch = Channel(tmp_path)
+    assert ch.send(_cmd("in-flight"), is_alive=True).ok
+
+    def appear_late():
+        time.sleep(0.8)
+        _write_state(tmp_path, tick=0, session_id="world-new")
+
+    threading.Thread(target=appear_late, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=1.0)
+
+    assert not result.ok
+    assert (tmp_path / CMD_FILENAME).exists()  # NOT destroyed
 
 
 def test_clear_mailbox_reports_what_it_actually_deleted_not_a_stale_read(tmp_path):
@@ -804,7 +848,12 @@ def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_pa
     `window`, so a state file that simply had not been written yet (the
     ORDINARY condition while Task 5's mod is under active development, not
     an edge case) made any longer window meaningless. Here the file appears
-    well after that short budget but comfortably inside a longer window."""
+    well after that short budget, and `window` is generous enough that the
+    MEASURED gap after catching it (see the gap-awareness fix below) is
+    still long enough for a trustworthy verdict -- this test is about
+    finding the file at all, not about the too-short-gap regression, which
+    test_heartbeat_does_not_call_a_late_appearing_bridge_frozen covers
+    separately."""
     ch = Channel(tmp_path)
 
     def create_late():
@@ -812,12 +861,39 @@ def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_pa
         _write_state(tmp_path, tick=5, session_id="s1")
 
     threading.Thread(target=create_late, daemon=True).start()
+    status, tick = ch.heartbeat(window=1.8)
+
+    # Found the file (tick=5, not the "never found it" tick=0 fallback) --
+    # and, since the window left a comfortable gap after catching it, a
+    # trustworthy "stalled", not the pre-fix "unmeasurable, gave up early".
+    assert tick == 5
+    assert status == HEARTBEAT_STALLED
+
+
+def test_heartbeat_does_not_call_a_late_appearing_bridge_frozen(tmp_path):
+    """The Critical regression this round exists to close. M3a's own fix
+    (retry the first sample to window's deadline) bought that by silently
+    shrinking the gap to the SECOND sample -- which is still taken AT
+    window's deadline -- so a bridge appearing partway through the window
+    could end up with the two samples close enough together that a same
+    tick looks "frozen" even though the mod never had a fair chance to
+    publish a new one. Reproduced end-to-end before this fix: a bridge
+    appearing 1.8s into a 2.0s probe window (and 1.5/2.0, 2.5/3.0, 9.5/10.0)
+    all answered "frozen". This is not a corner case: "the file appears
+    partway through the probe" is exactly the shape of the FIRST
+    bridge_status poll after any boot, since the mod publishes once at init
+    and then ticks at 1 Hz."""
+    ch = Channel(tmp_path)
+
+    def appear_late():
+        time.sleep(0.8)
+        _write_state(tmp_path, tick=0, session_id="world-new")
+
+    threading.Thread(target=appear_late, daemon=True).start()
     status, tick = ch.heartbeat(window=1.0)
 
-    # Must have found the file at all -- unmeasurable/tick=0 is what the
-    # pre-fix code returns here (gives up long before t=0.3).
-    assert status != HEARTBEAT_UNMEASURABLE
-    assert tick == 5
+    assert status != HEARTBEAT_STALLED
+    assert tick == 0  # found the file -- not the "never found it" fallback either
 
 
 def test_clear_mailbox_honours_probe_window_when_the_bridge_is_slow_to_become_readable(tmp_path):
@@ -906,10 +982,11 @@ def test_heartbeat_detail_exposes_the_session_id_when_growing(tmp_path):
 
 
 def test_heartbeat_detail_exposes_the_session_id_when_stalled(tmp_path):
+    # window >= the publish interval -- see test_heartbeat_detects_a_stalled_tick's note.
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=42, session_id="s1")
 
-    sample = ch.heartbeat_detail(window=0.15)
+    sample = ch.heartbeat_detail(window=1.05)
 
     assert sample.status == HEARTBEAT_STALLED
     assert sample.session_id == "s1"
@@ -965,11 +1042,14 @@ def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
     """heartbeat()'s own public contract must stay exactly (status, tick) --
     unpacking into more than two variables must fail, the same way it would
     have before heartbeat_detail/HeartbeatSample existed. Nothing already
-    consuming heartbeat() as a 2-tuple should ever need to change."""
+    consuming heartbeat() as a 2-tuple should ever need to change. window
+    >= the publish interval -- see test_heartbeat_detects_a_stalled_tick's
+    note; the point of this test is the tuple shape, not "stalled" itself,
+    but asserting a real, trustworthy status keeps it an honest check."""
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=1, session_id="s1")
 
-    result = ch.heartbeat(window=0.05)
+    result = ch.heartbeat(window=1.05)
 
     assert isinstance(result, tuple)
     assert len(result) == 2
