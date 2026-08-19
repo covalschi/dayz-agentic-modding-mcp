@@ -745,6 +745,36 @@ def test_server_stop_refuses_a_pid_the_session_never_touched(tmp_path):
         procs_stop(real_pid)
 
 
+# --- Requirement 3 (pid reuse): server_stop must not taskkill a process that
+# has recycled a recorded pid ---
+
+
+def test_server_stop_does_not_kill_a_process_that_recycled_the_pid(tmp_path):
+    """If the recorded server pid has since been handed to an unrelated
+    Windows process, server_stop must notice the image-name mismatch and
+    leave that process alone rather than calling taskkill on it."""
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+
+    # A real, unrelated process standing in for "something else now holds
+    # this pid" -- it is this interpreter, not DayZDiag_x64.exe, so recording
+    # the pid together with that image name reproduces a recycled pid.
+    unrelated_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    try:
+        session.set_server_pid(unrelated_pid, "DayZDiag_x64.exe")
+        assert procs_is_alive(unrelated_pid)
+
+        stopped = tools.server_stop()
+        assert stopped.data["stopped"] is True
+        assert stopped.data["pid"] == unrelated_pid
+        # The unrelated process must still be running: it was never touched.
+        assert procs_is_alive(unrelated_pid)
+        assert session.server_pid() == 0
+    finally:
+        procs_stop(unrelated_pid)
+
+
 # --- Review round 3: reopening the SAME project must not mark a still-running
 # job as lost ---
 
