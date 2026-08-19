@@ -126,3 +126,46 @@ def test_group_key_preserves_identity_for_long_lines_differing_after_120_chars()
     # Each should have count=1 (not merged)
     assert got["warnings"][0]["count"] == 1
     assert got["warnings"][1]["count"] == 1
+
+
+def test_engine_storage_file_not_closed_is_noise():
+    """The real engine message when storage files are not properly closed must
+    still be classified as noise with the narrowed pattern."""
+    got = classify(
+        ['WARNING]	File "$mission:storage_1/x/modstorageplayers.bin" was not closed.'],
+        forbid=[],
+        noise=DEFAULT_NOISE,
+    )
+    assert len(got["noise"]) == 1
+    assert 'modstorageplayers.bin" was not closed' in got["noise"][0]["sample"]
+
+
+def test_fatal_with_generic_was_not_closed_is_not_noise():
+    """A FATAL line containing the generic phrase 'was not closed' must not
+    be classified as noise, because the narrowed pattern only matches
+    '.bin" was not closed' (engine storage files)."""
+    got = classify(
+        ["FATAL: primary storage handle was not closed before shutdown, data loss occurred"],
+        forbid=[],
+        noise=DEFAULT_NOISE,
+    )
+    # Should NOT be in noise
+    assert got["noise"] == []
+    # Should be in errors (FATAL keyword)
+    assert len(got["errors"]) == 1
+    assert got["errors"][0]["kind"] == "error"
+    assert "FATAL:" in got["errors"][0]["text"]
+
+
+def test_fatal_keyword_is_classified_as_error():
+    """Lines marked FATAL must be classified as errors at error level,
+    not swallowed by noise or any other bucket."""
+    got = classify(
+        ["11:15:30 SCRIPT    : FATAL: Something went wrong and cannot be recovered"],
+        forbid=[],
+        noise=[],
+    )
+    assert len(got["errors"]) == 1
+    assert got["errors"][0]["kind"] == "error"
+    assert "FATAL:" in got["errors"][0]["text"]
+    assert got["crashes"] == []  # FATAL is error-level, not crash-level

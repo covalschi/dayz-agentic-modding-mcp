@@ -10,7 +10,7 @@ import re
 
 DEFAULT_NOISE = [
     "skeletons.anim.xml",      # the engine probes optional animations in every mod folder
-    "was not closed",          # left behind when a server is killed rather than shut down
+    'bin" was not closed',     # engine storage files not properly closed on shutdown
 ]
 
 _COUNTER = re.compile(r"(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)(?![\w.])")
@@ -18,7 +18,7 @@ _QUOTED = re.compile(r"""(['"])(?:(?!\1).)*\1""")
 _NUMBER = re.compile(r"\d+")
 _TIMESTAMP = re.compile(r"^\s*\d{1,2}:\d{2}:\d{2}(\.\d+)?\s*")
 _WARNING = re.compile(r"\bWARNING\b", re.IGNORECASE)
-_ERROR = re.compile(r"\bERROR\b", re.IGNORECASE)
+_ERROR = re.compile(r"\b(ERROR|FATAL)\b", re.IGNORECASE)
 _CRASH = re.compile(r"(Exception Code|ACCESS_VIOLATION|0xC0000005)", re.IGNORECASE)
 
 
