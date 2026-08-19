@@ -1276,3 +1276,304 @@ def test_the_stale_command_answer_is_true_before_the_mod_reads_commands(tmp_path
     assert "will be executed by the first tick" not in r.error
     assert "expire" in r.error or "survive" in r.error
     assert "bridge_clear" in r.hint
+
+
+# --- Round 4: the same wedge shape, a third time, and the tests that missed it
+
+
+def _accepting_pack_one(name, root, tools_root, log_path, **kw):
+    return PackResult(name=name, pbo=str(kw["mod_dir"] / "addons/x.pbo"), size=1, signed=False)
+
+
+def _ready_to_build(tmp_path, monkeypatch):
+    """An open project, a fake bridge repository and a pack_one that succeeds --
+    everything the wedge tests need except the failure they inject."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", _accepting_pack_one)
+    return project, repo
+
+
+def test_a_failure_preparing_the_artifacts_dir_returns_a_result_and_frees_the_slot(tmp_path, monkeypatch):
+    """Third appearance of one shape: something between "call accepted" and the
+    guarded region raises. store.artifacts_dir() calls mkdir, which fails on
+    exactly the causes the fix already cites -- a permission change, a removed
+    parent, the path replaced by a file. The exception escaped to the MCP layer
+    with NO Result at all, the job stayed queued, and the slot stayed claimed."""
+    _ready_to_build(tmp_path, monkeypatch)
+    store = session.jobs()
+    real_artifacts_dir = store.artifacts_dir
+    calls = {"n": 0}
+
+    def artifacts_dir_that_fails_once(job_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError("cannot create the job directory")
+        return real_artifacts_dir(job_id)
+
+    monkeypatch.setattr(store, "artifacts_dir", artifacts_dir_that_fails_once)
+
+    refused = tools.bridge_build()
+    # A Result, not a traceback: the caller has to be told something.
+    assert not refused.ok
+    assert "PermissionError" in refused.error
+    assert refused.hint
+
+    monkeypatch.setattr(store, "artifacts_dir", real_artifacts_dir)
+    again = tools.bridge_build()
+    assert again.ok, f"the process is wedged: {again.error} | {again.hint}"
+    assert tools.job_wait(again.data["job_id"], timeout=15).data["status"] == "done"
+
+
+def test_a_failure_creating_the_job_still_answers_the_caller(tmp_path, monkeypatch):
+    """The same sweep, one line earlier: store.create() writes job.json and can
+    fail for the same reasons. Nothing is claimed yet at that point, so there is
+    no wedge -- but a tool that raises instead of returning an envelope is its
+    own defect."""
+    _ready_to_build(tmp_path, monkeypatch)
+    store = session.jobs()
+    real_create = store.create
+    calls = {"n": 0}
+
+    def create_that_fails_once(kind):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("no space left on device")
+        return real_create(kind)
+
+    monkeypatch.setattr(store, "create", create_that_fails_once)
+
+    refused = tools.bridge_build()
+    assert not refused.ok
+    assert "OSError" in refused.error
+
+    monkeypatch.setattr(store, "create", real_create)
+    again = tools.bridge_build()
+    assert again.ok, f"the process is wedged: {again.error} | {again.hint}"
+    assert tools.job_wait(again.data["job_id"], timeout=15).data["status"] == "done"
+
+
+def test_the_slot_is_released_even_when_the_job_cannot_be_failed(tmp_path, monkeypatch):
+    """THE test for the release itself. Every other wedge test here passes with
+    both _release_build_slot calls deleted, because the in-flight check's
+    status re-check rescues them: store.fail() marks the job failed, and the
+    backstop then sees a terminal status and lets the next build through. That
+    pins the outcome through the OLD mechanism.
+
+    When store.fail ALSO raises, the job stays at "running" forever and the
+    backstop cannot help. Only the worker's finally frees the slot -- so this
+    is the case that fails if the release is removed."""
+    _ready_to_build(tmp_path, monkeypatch)
+    store = session.jobs()
+
+    def start_that_fails(job_id):
+        raise PermissionError("job.json is locked")
+
+    def fail_that_also_fails(job_id, error):
+        raise PermissionError("job.json is still locked")
+
+    monkeypatch.setattr(store, "start", start_that_fails)
+    monkeypatch.setattr(store, "fail", fail_that_also_fails)
+
+    first = tools.bridge_build()
+    assert first.ok, first.error
+
+    # The job is stuck non-terminal: the backstop has nothing to notice.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        stuck = tools.job_status(first.data["job_id"])
+        if stuck.data["status"] in ("queued", "running"):
+            break
+        time.sleep(0.05)
+    assert tools.job_status(first.data["job_id"]).data["status"] in ("queued", "running")
+
+    monkeypatch.undo()
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", bridge.SERVER_REPO_ROOT)
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", _accepting_pack_one)
+
+    second = tools.bridge_build()
+    assert second.ok, (
+        "the slot outlived a build whose job could not even be marked failed: "
+        f"{second.error} | {second.hint}"
+    )
+
+
+def test_one_readable_sample_at_tick_zero_is_not_an_unreadable_file(tmp_path, monkeypatch):
+    """`tick > 0` as "a sample was read" collides with a real tick of 0: the
+    answer fell through to unreadable_state, which claims no readable snapshot
+    could be taken when one was, threw the tick away as None, and sent the
+    reader to log_verdict and a rebuild. The same scenario at tick 7 answered
+    `unknown` correctly, which is what makes it a regression rather than a
+    gap."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    write_state(profiles, tick=0)
+
+    # One sample read (tick 0), second sample lost -- the channel's own tests
+    # cover producing this; what is under test here is the branch on it.
+    monkeypatch.setattr(
+        "dayz_mcp.bridge.channel.Channel.heartbeat",
+        lambda self, window=3.0: ("unmeasurable", 0),
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert not r.ok
+    assert r.data["state"] == "unknown", r.data
+    assert r.data["tick"] == 0  # the evidence, not None
+    assert "rebuild" not in r.hint
+    assert "log_verdict" not in r.hint
+
+
+def test_a_mangled_session_id_is_not_reported_as_an_outdated_bridge(tmp_path, monkeypatch):
+    """Under a non-truncating in-place overwrite, a length change ahead of the
+    key can leave valid JSON with a tick and a MANGLED session_id -- and the
+    tool then tells the user to rebuild a perfectly current bridge. Which write
+    model the mod really uses is still an open question, so the verdict must not
+    depend on the answer."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.05)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": 1000, "ession_id": "boot-1", "command": None,
+                    "errors": [], "world": {}}),
+        encoding="utf-8",
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert not r.ok
+    assert r.data["state"] == "unreadable_state", r.data
+    assert "rebuild" not in r.hint or "bridge_build" in r.hint  # the corrupt-file advice
+
+
+def test_an_outdated_state_document_needs_two_agreeing_reads(tmp_path, monkeypatch):
+    """The other half: a document that reads as pre-session once and as current
+    a moment later is a transient, not an old mod. Only a verdict that holds
+    across a full publish interval accuses the bridge of being outdated.
+
+    The transition is driven from the read itself, not from a sleeping writer
+    thread. The timed version of this test was vacuous -- the healing write
+    landed before the first read, so the verdict was already "not outdated"
+    and the test passed with the second read deleted entirely. Counting the
+    reads is what actually pins the mechanism."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.01)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": 5, "command": None, "errors": [], "world": {}}), encoding="utf-8"
+    )
+
+    reads = {"n": 0}
+
+    def pre_session_once(state_file):
+        # Old on the first read, current on every later one -- exactly what a
+        # single mangled in-place write looks like from outside.
+        reads["n"] += 1
+        return reads["n"] == 1
+
+    monkeypatch.setattr(bridge, "_reads_as_pre_session", pre_session_once)
+
+    r = tools.bridge_status(window=0.1)
+
+    assert reads["n"] == 2, f"the state file was read {reads['n']} time(s), not twice"
+    assert r.data["state"] != "outdated_bridge", r.data
+
+
+def test_a_genuinely_old_state_document_is_still_named(tmp_path, monkeypatch):
+    """Strictness must not blunt the verdict this exists for."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.05)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": 12, "command": None, "errors": [], "world": {}}), encoding="utf-8"
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "outdated_bridge", r.data
+    assert "bridge_build" in r.hint
+
+
+def test_a_signature_that_cannot_be_removed_fails_the_build(tmp_path, monkeypatch):
+    """The keys half of the strip had a test; the .bisign half did not, though
+    it is the half that makes a stand reject the mod."""
+    session.reset()
+    project = make_project(tmp_path / "project")
+    repo = fake_bridge_sources(tmp_path)
+    mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
+    (mod_dir / "addons").mkdir(parents=True)
+    sig = mod_dir / "addons" / f"{bridge.BRIDGE_MOD_NAME}.pbo.OldKey.bisign"
+    sig.write_bytes(b"signature")
+
+    tools.project_open(str(project))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", _accepting_pack_one)
+
+    real_unlink = Path.unlink
+
+    def unlink_that_fails_for_signatures(self, *args, **kwargs):
+        if self.suffix == ".bisign":
+            raise PermissionError(f"{self} is held open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_that_fails_for_signatures)
+
+    waited = tools.job_wait(tools.bridge_build().data["job_id"], timeout=15)
+    assert waited.data["status"] == "failed", waited.data
+    assert ".bisign" in waited.data["error"]
+    assert sig.exists()
+
+
+def test_the_owner_refusal_spells_a_path_the_way_the_other_hints_do(tmp_path, monkeypatch):
+    """A raw Windows path inside quotes reads as an escape soup and cannot be
+    pasted into project_open. wiring_instructions() already uses as_posix() for
+    exactly this reason."""
+    session.reset()
+    a = make_project(tmp_path / "a")
+    b = make_project(tmp_path / "b")
+    repo = fake_bridge_sources(tmp_path)
+    tools.project_open(str(a))
+    monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
+    monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", repo)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pack_one(name, root, tools_root, log_path, **kw):
+        started.set()
+        assert release.wait(timeout=10), "test never released the worker"
+        return _accepting_pack_one(name, root, tools_root, log_path, **kw)
+
+    monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", slow_pack_one)
+    first = tools.bridge_build()
+    assert started.wait(timeout=10)
+
+    tools.project_open(str(b))
+    refused = tools.bridge_build()
+    assert not refused.ok
+    assert Path(a).as_posix() in refused.hint
+    assert "\\" not in refused.hint
+
+    release.set()
+    tools.project_open(str(a))
+    tools.job_wait(first.data["job_id"], timeout=10)

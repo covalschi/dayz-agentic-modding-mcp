@@ -6,11 +6,19 @@ project that uses it uses the same one. `bridge_build` therefore packs the
 server's own tree with the server's own packer, and `bridge_status` answers
 one question only -- is the code inside the running game still ticking.
 
-"Alive" is deliberately expensive to claim here. The mod republishes its state
-file once a second whether or not the world is progressing, and the file
-outlives the server that wrote it, so its mere existence proves nothing. Only
-a tick number that MOVED between two samples proves anything, which is why
-this tool samples twice and why `ok` is true in exactly that one case.
+"Alive" is deliberately expensive to claim here. The protocol has the mod
+republish its state file once a second whether or not the world is
+progressing, and the file outlives the server that wrote it, so its mere
+existence proves nothing. Only a tick number that MOVED between two samples
+proves anything, which is why this tool samples twice and why `ok` is true in
+exactly that one case.
+
+That 1 Hz publish is the protocol's design, and this file talks about it in
+those terms rather than as something already happening: the bridge mod shipped
+today writes a heartbeat file and nothing else -- no state document, no
+mailbox reading. Every answer below is therefore reachable, but the ones that
+describe a published state document only start occurring when the mod-side
+task lands.
 
 The bridge is built UNSIGNED, and that is a ruling, not an oversight. There is
 one output directory for the whole process, and it used to be fed by whichever
@@ -73,12 +81,24 @@ _build_guard = threading.Lock()
 # hunting a typo.
 _build_in_flight: dict = {"job_id": "", "store": None, "project": ""}
 
-# How long bridge_status may spend watching the tick. The mod publishes once a
-# second, so anything under ~2s can see the same tick twice and call a healthy
-# bridge frozen; the ceiling keeps a health check from becoming a disguised
+# How long bridge_status may spend watching the tick. The protocol publishes
+# once a second, so anything under ~2s can see the same tick twice and call a
+# healthy bridge frozen; the ceiling keeps a health check from becoming a disguised
 # long wait (that is what job_wait is for).
 STATUS_WINDOW_DEFAULT = 2.0
 STATUS_WINDOW_MAX = 10.0
+
+# How long to wait before asking the state file a second time when the first
+# read says "written by a mod older than this server". Longer than the
+# protocol's 1 Hz publish interval on purpose: a document mangled by one in-place write
+# is repaired by the next one, so it cannot look the same across this gap,
+# while a genuinely old mod looks old however long you wait.
+SECOND_OPINION_SECONDS = 1.1
+
+# Every field the pre-session protocol had, and nothing else. Anything outside
+# this set in an otherwise old-looking document means the document was damaged
+# rather than written by an old mod -- see _reads_as_pre_session.
+_PRE_SESSION_KEYS = frozenset({"tick", "command", "errors", "world"})
 
 
 def session_tools_root() -> str | None:
@@ -229,6 +249,32 @@ def _release_build_slot(job_id: str) -> None:
             _build_in_flight.update(job_id="", store=None, project="")
 
 
+def _abandon_build(store, job, exc: BaseException) -> Result:
+    """Something between accepting the call and handing the job to a worker
+    raised. Give back whatever was claimed and ANSWER -- a tool that raises
+    tells the calling agent nothing at all, while the failure it hides is
+    invariably the mundane one: the job store's directory is gone, read-only,
+    or replaced by a file.
+
+    `job` is None when nothing was claimed yet (the failure was in
+    `store.create` itself), and the marking of the job is best-effort by
+    design: the store is precisely the thing that just failed, so its refusal
+    to record the failure must not become a second escaping exception.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    if job is not None:
+        _release_build_slot(job.id)
+        try:
+            store.fail(job.id, f"the build never started: {detail}")
+        except Exception:  # noqa: BLE001 - the store is the broken part here
+            pass
+    return fail(
+        f"the bridge build could not be started: {detail}",
+        hint=f"this is the job store or the output path, not the mod -- check that "
+             f"{Path(store.root).as_posix()} exists and is writable, then try again",
+    )
+
+
 def bridge_build() -> Result:
     """Pack the bridge mod from this repository's own sources."""
     guard = require_project()
@@ -255,29 +301,8 @@ def bridge_build() -> Result:
     store = session.jobs()
     mod_dir = bridge_mod_dir()
     project_root = str(session.profile().root)
-    # Claiming the output directory and creating the job happen together under
-    # one lock, or two callers both pass the check before either has a job to
-    # be seen. See _build_in_flight for why this is not the project's job store.
-    with _build_guard:
-        busy, owner = _bridge_build_in_flight()
-        if busy:
-            shared = (f"there is one {mod_dir.name} output directory, shared by every project, "
-                      "so this refusal holds across a project switch too")
-            if owner and owner != project_root:
-                # The job is real, but invisible from here: job stores are per
-                # project. Saying "job_wait('...')" without this would send the
-                # caller to a tool that answers "unknown job", whose own hint
-                # then blames a typo.
-                hint = (f"that build belongs to the project at {owner}, and job_* tools only "
-                        f"answer for the project that is open -- reopen it with "
-                        f"project_open('{owner}') before job_wait('{busy}'). {shared}")
-            else:
-                hint = (f"wait for it with job_wait('{busy}'), or look at it with "
-                        f"job_status('{busy}') -- {shared}")
-            return fail(f"a bridge build is already running (job {busy})", hint=hint)
-        job = store.create(BRIDGE_BUILD_KIND)
-        _build_in_flight.update(job_id=job.id, store=store, project=project_root)
-    log_dir = store.artifacts_dir(job.id)
+    job = None
+    log_dir = None
 
     def run() -> None:
         # EVERYTHING that can fail lives inside this try, `store.start`
@@ -347,26 +372,60 @@ def bridge_build() -> Result:
             message = f"{type(exc).__name__}: {exc}"
             if leftovers:
                 message += f"; and the output directory still holds: {'; '.join(leftovers)}"
-            store.fail(job.id, message)
+            try:
+                store.fail(job.id, message)
+            except Exception:  # noqa: BLE001 - the store is the broken part here
+                # Same policy as _abandon_build: when the job store itself is
+                # what failed, it cannot also be where the failure is recorded.
+                # The job then stays non-terminal (visible through job_status,
+                # and marked lost on the next process start) -- but the slot
+                # below is still given back, which is what keeps every LATER
+                # build from being refused for the rest of the process.
+                pass
         finally:
             _release_build_slot(job.id)
 
+    # ONE guarded region from "this call is going ahead" to "a worker owns the
+    # job", rather than a line-by-line audit of which statement can raise. Three
+    # separate defects of exactly this shape were fixed one line at a time --
+    # store.start(), the Thread construction, then store.artifacts_dir()'s mkdir
+    # -- and each fix left the next one standing. Everything in here either
+    # claims nothing or hands the claim to `run`; anything that escapes lands in
+    # one handler that gives the claim back and answers the caller.
     try:
+        # Claiming the output directory and creating the job happen together
+        # under one lock, or two callers both pass the check before either has a
+        # job to be seen. See _build_in_flight for why this is not the project's
+        # job store.
+        with _build_guard:
+            busy, owner = _bridge_build_in_flight()
+            if busy:
+                shared = (f"there is one {mod_dir.name} output directory, shared by every "
+                          "project, so this refusal holds across a project switch too")
+                if owner and owner != project_root:
+                    # The job is real, but invisible from here: job stores are
+                    # per project. Saying "job_wait('...')" without this would
+                    # send the caller to a tool that answers "unknown job",
+                    # whose own hint then blames a typo. Spelled with as_posix()
+                    # like every other path in a hint -- a raw Windows path
+                    # inside quotes cannot be pasted back into project_open.
+                    owner_path = Path(owner).as_posix()
+                    hint = (f"that build belongs to the project at {owner_path}, and job_* "
+                            f"tools only answer for the project that is open -- reopen it "
+                            f"with project_open('{owner_path}') before job_wait('{busy}'). "
+                            f"{shared}")
+                else:
+                    hint = (f"wait for it with job_wait('{busy}'), or look at it with "
+                            f"job_status('{busy}') -- {shared}")
+                return fail(f"a bridge build is already running (job {busy})", hint=hint)
+            job = store.create(BRIDGE_BUILD_KIND)
+            _build_in_flight.update(job_id=job.id, store=store, project=project_root)
+        log_dir = store.artifacts_dir(job.id)
         # Construction as well as start(): both allocate, and a process out of
-        # threads or memory can fail at either. Anything that escapes here
-        # leaves a claimed slot with no worker to release it.
+        # threads or memory can fail at either.
         threading.Thread(target=run, daemon=True).start()
-    except Exception as exc:  # noqa: BLE001 - the slot is already claimed
-        # The slot was taken above, and with no worker there is nothing to
-        # release it. Same wedge as a failure inside the worker, reached from
-        # the other side.
-        _release_build_slot(job.id)
-        store.fail(job.id, f"the build thread could not be started: {type(exc).__name__}: {exc}")
-        return fail(
-            f"could not start the build thread: {type(exc).__name__}: {exc}",
-            hint="the process is out of threads or memory -- wait for other jobs to finish "
-                 "(job_status) and try again",
-        )
+    except Exception as exc:  # noqa: BLE001 - a raised tool call answers nobody
+        return _abandon_build(store, job, exc)
     return ok({"job_id": job.id, "mod_dir": str(mod_dir)})
 
 
@@ -456,7 +515,8 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     # collapsing "could not take the second sample" into "the tick did not
     # move" is how a measurement failure became a diagnosis, and sent a reader
     # hunting script errors that were never there.
-    status, tick = Channel(profiles).heartbeat(window)
+    channel = Channel(profiles)
+    status, tick = channel.heartbeat(window)
     observed = {**base, "heartbeat": status, "tick": tick}
 
     if status == HEARTBEAT_GROWING:
@@ -478,13 +538,19 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         )
 
     if status == HEARTBEAT_UNMEASURABLE:
-        if tick > 0:
-            # One sample came back, the other did not. There IS a tick; what
-            # there is not is a comparison.
+        # The question is whether a sample was READ, not whether its tick was
+        # non-zero. heartbeat reports the last tick it saw, or 0 when it saw
+        # nothing, so a mod publishing a genuine tick 0 is indistinguishable
+        # from "nothing readable" by that number alone -- and the same scenario
+        # one tick later answered correctly, which is what made this a
+        # regression rather than a gap. One extra read settles it.
+        snapshot = channel.read_state() if tick <= 0 else None
+        if tick > 0 or snapshot is not None:
+            sampled = tick if tick > 0 else snapshot.tick
             return _not_alive(
                 "unknown",
-                observed,
-                f"read one sample at tick {tick}, but the second could not be read, so "
+                {**observed, "tick": sampled},
+                f"read one sample at tick {sampled}, but the second could not be read, so "
                 "whether the tick is advancing was not measured",
                 hint=_window_hint(),
             )
@@ -557,20 +623,53 @@ def _no_snapshot_answer(data: dict, state_file: Path, mailbox: dict) -> Result:
     )
 
 
-def _predates_the_session_contract(state_file: Path) -> bool:
-    """Whether the state file is a COMPLETE document from an older protocol
-    rather than a torn or corrupt one.
+def _reads_as_pre_session(state_file: Path) -> bool:
+    """One read: does this look like a COMPLETE document from the protocol
+    that predates `session_id`?
 
-    A torn write is a truncated file: it fails `json.loads` outright, so it
-    cannot reach the "complete but missing a field" verdict here. Requiring a
-    parsed object that HAS `tick` and lacks `session_id` is therefore a
-    statement about the writer's vintage, not about this particular read.
+    Strict about the key set, not just about `session_id` being absent. The
+    loose version rested on "a torn write cannot produce valid JSON", which
+    holds only if the mod TRUNCATES when it overwrites. Under a non-truncating
+    in-place overwrite it does not: a length change ahead of the key (tick 999
+    to 1000) can leave valid JSON whose `session_id` has been mangled into
+    something else -- and the tool then tells the user to rebuild a perfectly
+    current bridge. Which write model the mod actually uses is still an open
+    question on the mod side, so this must not depend on the answer.
+    Every such mangle leaves a key that does not belong, which `keys <=
+    _PRE_SESSION_KEYS` rejects; a genuinely old document carries only the
+    fields that protocol had.
+
+    The cost is that an old mod which wrote extra fields of its own reads as
+    corrupt rather than as outdated -- a vaguer answer, never a false
+    accusation, which is the right way round for advice that says "rebuild".
     """
     try:
         raw = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return isinstance(raw, dict) and "tick" in raw and "session_id" not in raw
+    if not isinstance(raw, dict) or "session_id" in raw:
+        return False
+    if "tick" not in raw or not set(raw) <= _PRE_SESSION_KEYS:
+        return False
+    return isinstance(raw["tick"], int) and not isinstance(raw["tick"], bool)
+
+
+def _predates_the_session_contract(state_file: Path) -> bool:
+    """Two agreeing reads, a full publish interval apart.
+
+    The second read is the half that survives BOTH write models: a mangle from
+    an in-place overwrite is transient -- the next publish repairs it -- so it
+    cannot look pre-session twice across a whole interval. A mod that really is
+    old looks old on every read, however many are taken.
+
+    Only reached when nothing readable came back at all, which is already a
+    failing answer, so the wait buys the difference between "rebuild your
+    bridge" and "your state file is corrupt" at a cost nobody is timing.
+    """
+    if not _reads_as_pre_session(state_file):
+        return False
+    time.sleep(SECOND_OPINION_SECONDS)
+    return _reads_as_pre_session(state_file)
 
 
 def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAULT) -> Result:

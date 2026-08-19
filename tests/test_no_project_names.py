@@ -105,6 +105,17 @@ def test_no_concrete_mod_names_anywhere():
     assert not offenders, f"mod names leaked into the repository: {offenders}"
 
 
+def test_the_path_sweep_actually_visits_directories():
+    """Wiring proof for the sweep below. Its whole reason to exist is that a
+    directory NAME can be the leak, and a sweep quietly narrowed to files would
+    still pass every other test in this file -- including the one that looks
+    like it covers this."""
+    swept = set(iter_paths())
+    assert (ROOT / "bridge") in swept
+    assert (ROOT / "bridge" / "scripts") in swept
+    assert any(p.is_dir() for p in swept)
+
+
 def test_no_concrete_mod_names_in_paths():
     """Contents were swept; names were not. A committed mod-named directory, or a
     documentation file named after a mod, is the same leak in a place the
@@ -190,7 +201,14 @@ def test_a_decorators_arguments_and_comment_are_still_swept():
 
 def test_decorator_immunity_applies_to_python_only():
     """Nothing is a decorator in Markdown, TOML or Enforce Script. Granting the
-    immunity there hid a README line that was nothing but a mod name."""
+    immunity there hid a README line that was nothing but a mod name.
+
+    KNOWN AND ACCEPTED LIMIT, so nobody reads it as an oversight: inside a
+    .py file, a line consisting of nothing but a mod name IS still immune,
+    docstrings and comments included -- a positional rule cannot tell that line
+    from a decorator without parsing Python. It was weighed and kept: the
+    alternative mechanisms cost more than the case is worth, and nothing in
+    this repository writes such a line."""
     token = "@" + "protocol"
     assert offending_tokens(token, is_python=True) == set()  # a decorator, in Python
     assert offending_tokens(token) == {token}  # the same line in a README
