@@ -182,6 +182,23 @@ def clear_bridge_transport(profiles: Path) -> list[str]:
 
 
 def server_start(timeout: float = 420) -> Result:
+    """Start the test server and wait for it to be ready. Returns a job id.
+
+    Two things worth knowing before calling, both observable:
+
+    It CLEARS THE BRIDGE TRANSPORT first -- the command mailbox and the state
+    file in the -profiles directory are removed before the server is spawned, so
+    no world ever starts against a command or a state document left by an
+    earlier one. Script logs are deliberately left alone; see
+    clear_bridge_transport for why the two are treated differently. A file that
+    could not be removed is reported in `bridge_transport_left` and on the job,
+    and never fails the boot.
+
+    Readiness means the profile's `expect.ready_line` appeared in a log written
+    by THIS run. With no ready line declared, the job finishes as soon as the
+    process is confirmed to have survived its first moments and says so -- that
+    is not the same claim, and the summary does not pretend otherwise.
+    """
     guard = require_project()
     if guard:
         return guard

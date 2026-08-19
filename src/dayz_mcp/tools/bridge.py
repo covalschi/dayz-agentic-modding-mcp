@@ -139,10 +139,11 @@ def _mailbox_view(mailbox: Path) -> dict:
     """What the command mailbox looks like from outside the game.
 
     Reported on every answer, because "is a command sitting there" is a fact a
-    caller cannot get any other way and cannot guess from the rest: only the
-    MOD ever empties this file (it deletes it as it claims the command), so
-    with no mod running it is not a queue, it is a wedge -- and one that
-    survives into the next boot, since the -profiles directory is reused.
+    caller cannot get any other way and cannot guess from the rest: nothing in
+    the running game empties this file except the mod claiming the command, so
+    with no mod running it is not a queue, it is a wedge. It does not decay on
+    its own either -- the -profiles directory is reused across restarts -- so
+    it is removed only by bridge_clear or by server_start's pre-boot clearing.
     """
     try:
         age = round(max(0.0, time.time() - mailbox.stat().st_mtime), 1)
@@ -276,7 +277,16 @@ def _abandon_build(store, job, exc: BaseException) -> Result:
 
 
 def bridge_build() -> Result:
-    """Pack the bridge mod from this repository's own sources."""
+    """Pack the bridge mod from this repository's own sources.
+
+    The bridge is the server's own mod, not the project's: one copy serves every
+    project, and it is built UNSIGNED -- no project's signing key is used, and
+    the output folder is kept free of signatures and keys.
+
+    Building it does not load it. Attaching it stays a profile decision (the
+    job summary prints the two lines to add), because the bridge is an extra
+    pbo in the stand and a run without it has to remain possible.
+    """
     guard = require_project()
     if guard:
         return guard
@@ -436,7 +446,7 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     because that is what it costs to see a tick MOVE. `window=0` returns at
     once and then usually cannot tell -- it reports "unknown", never "frozen".
 
-    Three genuinely different answers, and they are told apart in this order:
+    The answers, told apart in this order:
 
       no_server         nothing is running, so there is nothing to ask. Checked
                         FIRST and on the process, not on the file: the state
@@ -445,8 +455,10 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                         this ordering prevents.
       stale_command     the same, but with a command still sitting in the
                         mailbox. Its own answer because the remedy is its own:
-                        nothing but the mod removes that file, and the next
-                        boot executes it instead of discarding it.
+                        the command does not expire, it blocks every send, and
+                        a stand booted OUTSIDE these tools would pick it up.
+                        (server_start clears the transport before every boot,
+                        so a server started through these tools will not.)
       no_state_file /   the server is up but nothing readable came back.
       outdated_bridge / Three fixes, so three answers: the mod is not loaded;
       unreadable_state  the mod predates this server's protocol; the file is
@@ -515,8 +527,14 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     # collapsing "could not take the second sample" into "the tick did not
     # move" is how a measurement failure became a diagnosis, and sent a reader
     # hunting script errors that were never there.
+    # The RAW samples, not just heartbeat's four-outcome reduction of them, for
+    # the same reason clear_mailbox takes them this way: the reduction cannot
+    # say whether the FIRST sample was read. `_classify_samples` then applies
+    # the one classification rule that lives in the channel, so this tool never
+    # grows a second opinion about what "growing" means.
     channel = Channel(profiles)
-    status, tick = channel.heartbeat(window)
+    before, after = channel._sample_twice(window)  # noqa: SLF001 - see comment
+    status, tick = channel._classify_samples(before, after)  # noqa: SLF001
     observed = {**base, "heartbeat": status, "tick": tick}
 
     if status == HEARTBEAT_GROWING:
@@ -538,20 +556,25 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         )
 
     if status == HEARTBEAT_UNMEASURABLE:
-        # The question is whether a sample was READ, not whether its tick was
-        # non-zero. heartbeat reports the last tick it saw, or 0 when it saw
-        # nothing, so a mod publishing a genuine tick 0 is indistinguishable
-        # from "nothing readable" by that number alone -- and the same scenario
-        # one tick later answered correctly, which is what made this a
-        # regression rather than a gap. One extra read settles it.
-        snapshot = channel.read_state() if tick <= 0 else None
-        if tick > 0 or snapshot is not None:
-            sampled = tick if tick > 0 else snapshot.tick
+        # WAS a sample read -- not "is its tick non-zero". The reduction reports
+        # the last tick seen, or 0 when it saw nothing, so a mod publishing a
+        # genuine tick 0 is indistinguishable from "nothing readable" by that
+        # number alone. Branching on the value sent a readable tick-0 sample to
+        # `unreadable_state` -- claiming nothing could be read when something
+        # was, throwing the tick away, and advising a rebuild -- while the same
+        # scenario at tick 7 answered correctly.
+        #
+        # An extra read was tried here and is not enough: it fails exactly when
+        # the second sample failed for a persistent reason (a torn file that
+        # stays torn), which is the case that produced the report. `before` is
+        # the only thing that answers the question, and it is why the raw
+        # samples are taken above.
+        if before is not None:
             return _not_alive(
                 "unknown",
-                {**observed, "tick": sampled},
-                f"read one sample at tick {sampled}, but the second could not be read, so "
-                "whether the tick is advancing was not measured",
+                observed,
+                f"read one sample at tick {before.tick}, but the second could not be read, "
+                "so whether the tick is advancing was not measured",
                 hint=_window_hint(),
             )
         return _no_snapshot_answer({**base, "heartbeat": status}, state_file, mailbox)
@@ -675,21 +698,26 @@ def _predates_the_session_contract(state_file: Path) -> bool:
 def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAULT) -> Result:
     """Discard whatever command is sitting in the mailbox.
 
-    The remedy for `bridge_status`'s `stale_command`: only the MOD ever empties
-    the mailbox (claiming a command IS deleting the file), so a command sent
-    while the stand was down, or before the bridge was wired into -serverMod,
-    is never claimed and never expires -- it blocks every later send and then
-    runs at the first tick of whatever boots next.
+    The remedy for `bridge_status`'s `stale_command`. Inside the game, claiming
+    a command IS deleting the file, so a command sent while the stand was down,
+    or before the bridge was wired into -serverMod, is never claimed and never
+    expires on its own: it blocks every later send until something removes it.
+    Two things on this side do -- this tool, and server_start, which clears the
+    transport before every boot. A stand booted outside these tools would run
+    the command instead.
 
     Its own tool, and never a side effect of asking for status: throwing away a
     queued command is a decision, and `bridge_status` reporting the wedge must
     not be the thing that silently resolves it.
 
-    Refuses when the bridge looks alive (the channel probes for `probe_window`
-    seconds and treats "growing" or "restarted" as alive), because a running
-    mod could claim that command at any moment and destroying live in-flight
-    work is worse than leaving the wedge. `force=True` overrides that, and the
-    heartbeat it overrode is reported either way.
+    Refuses when anything suggests the bridge is alive, because a running mod
+    could claim that command at any moment and destroying live in-flight work
+    is worse than leaving the wedge. The channel probes for `probe_window`
+    seconds and refuses on a tick that moved, on a world that restarted, AND on
+    a readable first sample followed by an unreadable second one -- that last
+    is proof something was alive moments ago, which a downed stand never
+    produces. `force=True` overrides all of it, and what it overrode is
+    reported either way.
     """
     guard = require_project()
     if guard:

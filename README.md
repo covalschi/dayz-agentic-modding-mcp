@@ -116,9 +116,11 @@ server_only = ["@DZMCP_Bridge"]
 the stand boots perfectly well and `bridge_status` reports that the bridge never
 wrote any state — which is true, and easy to mistake for a broken bridge.
 
-`bridge_status` also reports the command mailbox, because only the mod ever
-empties it: a command sent while the stand was down, or before the bridge was
-attached, is not discarded and does not expire on its own — it keeps blocking
+`bridge_status` also reports the command mailbox. Inside the game only the mod
+empties it, by claiming the command; on this side `bridge_clear` and
+`server_start`'s pre-boot clearing do. So a command sent while the stand was
+down, or before the bridge was attached, is not discarded and does not expire on
+its own — it keeps blocking
 every later send, and a stand booted outside these tools would pick it up.
 `server_start` clears both transport files before every boot, so a server
 started through this tool never runs a command from a previous session; that is

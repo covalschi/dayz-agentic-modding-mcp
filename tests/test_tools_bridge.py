@@ -812,11 +812,11 @@ def test_bridge_status_clamps_a_silly_window(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_heartbeat(self, window=3.0):
+    def fake_sample_twice(self, window):
         captured["window"] = window
-        return False, 5
+        return None, None
 
-    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.heartbeat", fake_heartbeat)
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel._sample_twice", fake_sample_twice)
     tools.bridge_status(window=10_000)
     assert captured["window"] == bridge.STATUS_WINDOW_MAX
 
@@ -1424,16 +1424,22 @@ def test_one_readable_sample_at_tick_zero_is_not_an_unreadable_file(tmp_path, mo
     monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
     write_state(profiles, tick=0)
 
-    # One sample read (tick 0), second sample lost -- the channel's own tests
-    # cover producing this; what is under test here is the branch on it.
-    monkeypatch.setattr(
-        "dayz_mcp.bridge.channel.Channel.heartbeat",
-        lambda self, window=3.0: ("unmeasurable", 0),
-    )
+    # The reviewer's own reproduction, with no mocking: a readable sample at
+    # tick 0, and a file that is torn by the time the second sample is taken --
+    # and STAYS torn, which is what defeated the extra-read version of this fix.
+    def tear_the_file():
+        time.sleep(0.05)
+        (profiles / STATE_FILENAME).write_text('{"tick": 1, "sess', encoding="utf-8")
 
-    r = tools.bridge_status(window=0.1)
+    worker = threading.Thread(target=tear_the_file, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.4)
+    finally:
+        worker.join(timeout=5)
     assert not r.ok
     assert r.data["state"] == "unknown", r.data
+    assert r.data["heartbeat"] == "unmeasurable"
     assert r.data["tick"] == 0  # the evidence, not None
     assert "rebuild" not in r.hint
     assert "log_verdict" not in r.hint
@@ -1583,3 +1589,49 @@ def test_the_owner_refusal_spells_a_path_the_way_the_other_hints_do(tmp_path, mo
     release.set()
     tools.project_open(str(a))
     tools.job_wait(first.data["job_id"], timeout=10)
+
+
+# --- The tool descriptions are a contract, and they have rotted three times ---
+
+
+@pytest.mark.anyio
+async def test_the_tool_descriptions_do_not_contradict_the_code():
+    """These strings are what FastMCP hands the driving agent, and what the
+    mod-side author reads as the contract, so a wrong one costs more than a
+    wrong comment. Three separate rounds have had to correct a claim here that
+    described how the system USED to work -- "only the mod empties the mailbox"
+    after two Python-side emptiers existed, "the next boot executes it" after
+    server_start started clearing the transport.
+
+    Pinned as load-bearing FACTS rather than sentences: the phrasing is free to
+    change, but a description that stops mentioning the behaviour it is the
+    contract for fails here.
+    """
+    # Whitespace-normalised: a docstring rewrap is not rot, and a phrase split
+    # across two lines would otherwise fail for the wrong reason.
+    listed = {
+        t.name: " ".join((t.description or "").split())
+        for t in await mcp_server.mcp.list_tools()
+    }
+
+    # server_start deletes two files before spawning. An agent that does not
+    # know this cannot reason about a command it queued a moment ago -- so the
+    # description has to name WHAT is removed, not merely mention the bridge.
+    start = listed["server_start"].lower()
+    assert "mailbox" in start
+    assert "state file" in start
+    assert "clear" in start or "remove" in start
+
+    # bridge_clear is not the only thing that empties the mailbox, and the
+    # description must not go back to implying it is.
+    assert "server_start" in listed["bridge_clear"]
+    assert "force" in listed["bridge_clear"]
+    for gone in ("only the MOD ever empties", "boots next"):
+        assert gone not in listed["bridge_clear"], gone
+
+    # bridge_status's stale_command answer must not claim the next boot runs it.
+    assert "next\n                    boot executes" not in listed["bridge_status"]
+    assert "server_start" in listed["bridge_status"]
+
+    # bridge_build produces an UNSIGNED artifact and does not attach it.
+    assert "unsigned" in listed["bridge_build"].lower()
