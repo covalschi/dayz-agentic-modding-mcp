@@ -145,10 +145,16 @@ different facts:
 | `frozen` | `stalled` | the same world seen twice, not moving — a script-side problem, so `log_verdict` is the next step |
 | `unknown` | `unmeasurable` | a sample could not be read (or `window=0`): no comparison was made. **Not** a diagnosis — call again |
 
-`no_server`, `stale_command`, `no_state_file`, `unreadable_state` and
-`outdated_bridge` come before any of that: nothing is running, a command is
-wedged, the mod is not loaded, its file never parses, or the file parses but
-predates this server's protocol (rebuild it with `bridge_build`).
+Every answer that read a sample also carries `session_id` — the live world's
+id — and a `restarted` answer carries `previous_session_id` too, so a caller can
+say which world went away.
+
+`no_server`, `stale_command`, `no_state_file`, `invalid_state`,
+`unreadable_state` and `outdated_bridge` come before any of that: nothing is
+running, a command is wedged, the mod is not loaded, the state document is valid
+JSON with a named field wrong (it says which, and checks twice before saying it),
+the file never parses at all, or it parses but predates this server's protocol
+(rebuild it with `bridge_build`).
 
 ## Known limitations
 

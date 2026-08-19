@@ -95,6 +95,13 @@ STATUS_WINDOW_MAX = 10.0
 # while a genuinely old mod looks old however long you wait.
 SECOND_OPINION_SECONDS = 1.1
 
+# The shortest probe bridge_clear will run. The channel refuses to clear on a
+# "stalled" verdict taken over a window shorter than the mod's publish interval
+# -- correctly, since a live bridge that has simply not ticked again yet looks
+# identical to a frozen one there. Flooring the window means a caller's small
+# number never turns into a refusal about their own argument.
+CLEAR_PROBE_MIN_SECONDS = 1.1
+
 # Every field the pre-session protocol had, and nothing else. Anything outside
 # this set in an otherwise old-looking document means the document was damaged
 # rather than written by an old mod -- see _reads_as_pre_session.
@@ -446,6 +453,13 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     because that is what it costs to see a tick MOVE. `window=0` returns at
     once and then usually cannot tell -- it reports "unknown", never "frozen".
 
+    A stand with no state file at all now costs the FULL window too (measured:
+    2.07s at the default, 10.05s at the cap), because the reader retries to the
+    deadline rather than giving up on the first miss. If the question is only
+    "is the bridge publishing anything yet" -- the usual one while wiring it up
+    -- pass window=0 and get the same answer in a tenth of a second; a window
+    buys movement, and nothing else.
+
     The answers, told apart in this order:
 
       no_server         nothing is running, so there is nothing to ask. Checked
@@ -459,10 +473,14 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                         a stand booted OUTSIDE these tools would pick it up.
                         (server_start clears the transport before every boot,
                         so a server started through these tools will not.)
-      no_state_file /   the server is up but nothing readable came back.
-      outdated_bridge / Three fixes, so three answers: the mod is not loaded;
-      unreadable_state  the mod predates this server's protocol; the file is
-                        there but never parses.
+      no_state_file /   the server is up but nothing readable came back. Four
+      outdated_bridge / fixes, so four answers: the mod is not loaded; the mod
+      invalid_state /   predates this server's protocol (no session_id at all);
+      unreadable_state  the document is valid JSON but a named field is wrong
+                        (the answer says which field, what was expected and
+                        what was seen, and it is checked twice a publish
+                        interval apart so a mangled write is never reported as
+                        a schema bug); or it does not parse at all.
       alive / restarted a comparison was made. `alive` means the tick moved;
       / frozen /        `restarted` means a new world came up mid-sample (also
       unknown           alive, and NOT frozen); `frozen` means the same world
@@ -488,6 +506,10 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         # None on the answers that never got as far as measuring anything.
         "heartbeat": None,
         "tick": None,
+        # The live world's id, on every answer that actually read a sample.
+        # Task 5's acceptance probes need it, and nothing else can tell them
+        # what it is.
+        "session_id": None,
         "advancing": None,
     }
 
@@ -527,15 +549,15 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     # collapsing "could not take the second sample" into "the tick did not
     # move" is how a measurement failure became a diagnosis, and sent a reader
     # hunting script errors that were never there.
-    # The RAW samples, not just heartbeat's four-outcome reduction of them, for
-    # the same reason clear_mailbox takes them this way: the reduction cannot
-    # say whether the FIRST sample was read. `_classify_samples` then applies
-    # the one classification rule that lives in the channel, so this tool never
-    # grows a second opinion about what "growing" means.
+    # heartbeat_detail, not heartbeat: the plain (status, tick) reduction has no
+    # room for the session id, and cannot say whether a sample was read at all.
+    # This replaced a reach-in to the channel's private sampling internals --
+    # the information is public now, so the layering violation goes away rather
+    # than being re-aimed at whatever those internals became.
     channel = Channel(profiles)
-    before, after = channel._sample_twice(window)  # noqa: SLF001 - see comment
-    status, tick = channel._classify_samples(before, after)  # noqa: SLF001
-    observed = {**base, "heartbeat": status, "tick": tick}
+    detail = channel.heartbeat_detail(window)
+    status, tick = detail.status, detail.tick
+    observed = {**base, "heartbeat": status, "tick": tick, "session_id": detail.session_id}
 
     if status == HEARTBEAT_GROWING:
         return ok({"state": "alive", "alive": True, **observed, "advancing": True})
@@ -549,6 +571,11 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         return ok(
             {
                 "state": "restarted", "alive": True, **observed, "advancing": None,
+                # BOTH halves of the restart: what it was and what it is now.
+                # "a restart happened" without the old id leaves a caller unable
+                # to say whether the session IT was talking to is the one that
+                # went away.
+                "previous_session_id": detail.previous_session_id,
                 "note": "a new world came up between the two samples -- the tick belongs to "
                         "that new session and was deliberately not compared with the old "
                         "one. Any command sent to the previous session is gone with it.",
@@ -569,15 +596,15 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         # stays torn), which is the case that produced the report. `before` is
         # the only thing that answers the question, and it is why the raw
         # samples are taken above.
-        if before is not None:
+        if _a_sample_was_read(detail):
             return _not_alive(
                 "unknown",
                 observed,
-                f"read one sample at tick {before.tick}, but the second could not be read, "
+                f"read one sample at tick {tick}, but the second could not be read, "
                 "so whether the tick is advancing was not measured",
                 hint=_window_hint(),
             )
-        return _no_snapshot_answer({**base, "heartbeat": status}, state_file, mailbox)
+        return _no_snapshot_answer({**base, "heartbeat": status}, channel, state_file, mailbox)
 
     # HEARTBEAT_STALLED: two samples, the same world, the same tick.
     if window <= 0:
@@ -600,9 +627,63 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
     )
 
 
-def _no_snapshot_answer(data: dict, state_file: Path, mailbox: dict) -> Result:
-    """Nothing readable came back at all. Three different reasons, three
+def _a_sample_was_read(detail) -> bool:
+    """Did the probe read a state document at all?
+
+    `HeartbeatSample.session_id` is documented as the most recently observed
+    session, and `None` only when NEITHER sample came back -- so this is the
+    field that says what is being asked, rather than a sentinel that happens to
+    correlate (the tick does not: a mod publishing a genuine tick of 0 is
+    indistinguishable from "nothing read" by that number, which is exactly the
+    defect this replaced).
+
+    It rests on one invariant of the layer below: a state document that parses
+    always carries a non-empty session id, because `parse_state` rejects any
+    other. If that ever stops holding, "read but sessionless" would silently
+    read as "not read" here -- so the invariant is pinned by a test of its own
+    rather than assumed (see test_tools_bridge's seam test).
+    """
+    return detail.session_id is not None
+
+
+def _persistent_rejection(channel: Channel):
+    """A schema rejection that is still there a publish interval later, or None.
+
+    The difference between a mod-side bug and a moment's bad luck, and the same
+    discipline `_predates_the_session_contract` uses for the same reason: a
+    genuine schema mistake repeats on every tick until someone fixes the field,
+    while a document mangled by one in-place overwrite is repaired by the very
+    next write. Without the second look, a single mangled write would tell an
+    author to go and fix a field that is perfectly correct -- and the answer
+    would claim, falsely, that it will keep happening every tick.
+
+    Same field both times, not merely "some rejection twice": two different
+    fields failing in succession is a file being written through, not a
+    consistent shape being published.
+    """
+    first = channel.read_state_rejection()
+    if first is None:
+        return None
+    time.sleep(SECOND_OPINION_SECONDS)
+    second = channel.read_state_rejection()
+    if second is None or second.field != first.field:
+        return None
+    return second
+
+
+def _render_value(value: object) -> str:
+    """The offending value as the caller would recognise it, truncated. Kept as
+    a real Python value all the way from the parser so this layer chooses the
+    presentation -- and quoted, because "7" and 7 are the whole difference in
+    the most common of these."""
+    text = repr(value)
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def _no_snapshot_answer(data: dict, channel: Channel, state_file: Path, mailbox: dict) -> Result:
+    """Nothing readable came back at all. Four different reasons, four
     different fixes, and getting this wrong is expensive in both directions."""
+    data = {**data, "invalid_field": None}
     if state_file.exists():
         if _predates_the_session_contract(state_file):
             # The one cost of making session_id required. A state document that
@@ -619,6 +700,30 @@ def _no_snapshot_answer(data: dict, state_file: Path, mailbox: dict) -> Result:
                 hint="rebuild the bridge with bridge_build and restart the server; nothing "
                      "is wrong with the project's own mod",
             )
+        # A document that IS valid JSON but breaks the schema is a mod-side bug
+        # that will repeat on every tick until the field is fixed -- the exact
+        # opposite of a torn write, which fixes itself a millisecond later.
+        # Checked AFTER the pre-session test above, which is the stricter and
+        # more specific claim: a document missing session_id entirely is
+        # reported as an outdated mod, not as a field to go and correct.
+        rejection = _persistent_rejection(channel)
+        if rejection is not None:
+            seen = "" if rejection.value is None and "missing" in rejection.reason else (
+                f", saw {_render_value(rejection.value)}"
+            )
+            return _not_alive(
+                "invalid_state",
+                {**data, "invalid_field": rejection.field, "invalid_reason": rejection.reason,
+                 "invalid_value": _render_value(rejection.value)},
+                f"{state_file} is valid JSON, but the field {rejection.field!r} is not usable: "
+                f"{rejection.reason}{seen}. The mod is publishing a state document this "
+                "server cannot accept, and will keep publishing it every tick",
+                hint=f"fix {rejection.field!r} where the bridge mod writes its state document "
+                     "(bridge/scripts), then bridge_build and restart the server. This is a "
+                     "schema mistake in the document, not a half-written file and not a "
+                     "script error -- nothing in the server log will mention it",
+            )
+
         return _not_alive(
             "unreadable_state",
             data,
@@ -712,7 +817,11 @@ def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAUL
 
     Refuses when anything suggests the bridge is alive, because a running mod
     could claim that command at any moment and destroying live in-flight work
-    is worse than leaving the wedge. The channel probes for `probe_window`
+    is worse than leaving the wedge. FIRST on the plain fact that a server this
+    session started is running -- whatever its bridge is or is not publishing,
+    which matters most for a mod that has not started writing state yet -- and
+    that refusal costs no probe at all. Otherwise the channel probes for
+    `probe_window`
     seconds and refuses on a tick that moved, on a world that restarted, AND on
     a readable first sample followed by an unreadable second one -- that last
     is proof something was alive moments ago, which a downed stand never
@@ -723,7 +832,29 @@ def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAUL
     if guard:
         return guard
 
-    probe_window = max(0.0, min(probe_window, STATUS_WINDOW_MAX))
+    # The state file is not the only evidence of life, and this layer holds the
+    # other half. A server this session started IS running whatever its bridge
+    # publishes -- and a mod that has not written a state document yet (every
+    # mod until the state writer lands) looks exactly like a downed stand to a
+    # probe that only reads files. Checked BEFORE the probe, so a refusal costs
+    # nothing: the channel now retries its first sample to the window's
+    # deadline, which would otherwise buy a whole window to learn nothing.
+    pid = session.server_pid()
+    server_running = bool(pid and is_alive(pid, image=session.server_image()))
+    if server_running and not force:
+        return fail(
+            f"a server this session started is running (pid {pid}), so the bridge inside it "
+            "could claim this command at any moment",
+            hint="stop it with server_stop, or pass force=True if you are certain the command "
+                 "should be discarded out from under a live world; bridge_status first if you "
+                 "are not sure",
+        )
+
+    # Floored as well as capped: below the mod's publish interval a "same tick"
+    # verdict proves nothing, and the channel rightly demands force for it --
+    # so a caller passing 0.1 would be refused over their own window rather
+    # than over anything about the bridge.
+    probe_window = max(CLEAR_PROBE_MIN_SECONDS, min(probe_window, STATUS_WINDOW_MAX))
     profiles = server_profiles_dir()
     result = Channel(profiles).clear_mailbox(force=force, probe_window=probe_window)
     if not result.ok:
@@ -740,4 +871,9 @@ def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAUL
     data["discarded_id"] = discarded.get("id") if isinstance(discarded, dict) else None
     data["mailbox"] = str(profiles / CMD_FILENAME)
     data["forced"] = force
+    # What a force overrode ON THIS SIDE, next to the channel's own
+    # override_reason: a forced clear over a live server is the one that can
+    # destroy work someone is waiting on.
+    data["server_running"] = server_running
+    data["server_pid"] = pid
     return ok(data)

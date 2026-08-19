@@ -18,7 +18,7 @@ import pytest
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
 from dayz_mcp.errors import ok as errors_ok
-from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME
+from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel
 from dayz_mcp.packer import PackResult
 from dayz_mcp.tools import bridge, session
 
@@ -1457,17 +1457,31 @@ def test_a_mangled_session_id_is_not_reported_as_an_outdated_bridge(tmp_path, mo
     tools.project_open(str(root))
     session.set_server_pid(4321, "DayZDiag_x64.exe")
     monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
-    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.05)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.01)
     (profiles / STATE_FILENAME).write_text(
         json.dumps({"tick": 1000, "ession_id": "boot-1", "command": None,
                     "errors": [], "world": {}}),
         encoding="utf-8",
     )
 
+    # A live mod repairs the mangle with its very next write, so the rejection
+    # is there once and gone a moment later. Driven from the read rather than
+    # from a sleeping writer thread, and counted -- the timed version of this
+    # shape was vacuous once already, passing with the second read deleted.
+    reads = {"n": 0}
+    real_rejection = Channel.read_state_rejection
+
+    def mangled_once(self):
+        reads["n"] += 1
+        return real_rejection(self) if reads["n"] == 1 else None
+
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.read_state_rejection", mangled_once)
+
     r = tools.bridge_status(window=0.1)
     assert not r.ok
-    assert r.data["state"] == "unreadable_state", r.data
-    assert "rebuild" not in r.hint or "bridge_build" in r.hint  # the corrupt-file advice
+    assert reads["n"] == 2, f"the rejection was checked {reads['n']} time(s), not twice"
+    assert r.data["state"] != "invalid_state", r.data
+    assert r.data["state"] != "outdated_bridge", r.data
 
 
 def test_an_outdated_state_document_needs_two_agreeing_reads(tmp_path, monkeypatch):
@@ -1635,3 +1649,261 @@ async def test_the_tool_descriptions_do_not_contradict_the_code():
 
     # bridge_build produces an UNSIGNED artifact and does not attach it.
     assert "unsigned" in listed["bridge_build"].lower()
+
+    # The live session id is a contract fact the mod-side acceptance probes
+    # depend on, and the only place it is published is this answer.
+    assert "session_id" in listed["bridge_status"]
+    # bridge_clear refuses on a running server before it probes anything.
+    assert "session started is running" in listed["bridge_clear"]
+
+
+# --- M4b: the live session id, on every answer that read one ------------------
+
+
+def test_the_alive_answer_carries_the_session_id(tmp_path, monkeypatch):
+    """Three of Task 5's acceptance probes need to know which world they are
+    talking to, and until heartbeat_detail existed no tool could tell them."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    stop = threading.Event()
+
+    def ticker():
+        n = 1
+        while not stop.is_set():
+            write_state(profiles, tick=n, session_id="world-abc")
+            n += 1
+            time.sleep(0.02)
+
+    write_state(profiles, tick=1, session_id="world-abc")
+    worker = threading.Thread(target=ticker, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.3)
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["state"] == "alive"
+    assert r.data["session_id"] == "world-abc"
+    assert r.data["previous_session_id"] is None if "previous_session_id" in r.data else True
+
+
+def test_the_restarted_answer_carries_both_session_ids(tmp_path, monkeypatch):
+    """What it was and what it is now. "A restart happened" without the old id
+    leaves a caller unable to say whether the session IT was talking to is the
+    one that went away."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    write_state(profiles, tick=5000, session_id="world-before")
+
+    def restart():
+        time.sleep(0.05)
+        write_state(profiles, tick=1, session_id="world-after")
+
+    worker = threading.Thread(target=restart, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.3)
+    finally:
+        worker.join(timeout=5)
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["state"] == "restarted"
+    assert r.data["session_id"] == "world-after"
+    assert r.data["previous_session_id"] == "world-before"
+
+
+def test_an_answer_that_read_nothing_reports_no_session(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "no_state_file"
+    assert r.data["session_id"] is None
+
+
+def test_the_seam_invariant_a_readable_state_always_has_a_session(tmp_path):
+    """_a_sample_was_read reads `session_id is not None` as "a sample came
+    back", which is only sound while the layer below cannot produce a state
+    that parses AND has no session id. That is parse_state's rule, not mine, so
+    it is pinned here: if it ever changes, this fails loudly instead of
+    bridge_status silently reporting a readable sample as unread."""
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    channel = Channel(profiles)
+    state = profiles / STATE_FILENAME
+
+    for document in (
+        {"tick": 5, "command": None, "errors": [], "world": {}},          # no session_id
+        {"tick": 5, "session_id": "", "command": None, "errors": []},      # empty
+        {"tick": 5, "session_id": None, "command": None, "errors": []},    # null
+    ):
+        state.write_text(json.dumps(document), encoding="utf-8")
+        assert channel.read_state() is None, document
+
+    state.write_text(json.dumps({"tick": 5, "session_id": "w1"}), encoding="utf-8")
+    read = channel.read_state()
+    assert read is not None and read.session_id == "w1"
+
+
+# --- M1b: name the offending field instead of blaming a torn write ------------
+
+
+def _status_over_a_state_document(tmp_path, monkeypatch, document_text: str):
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr(bridge, "SECOND_OPINION_SECONDS", 0.01)
+    (profiles / STATE_FILENAME).write_text(document_text, encoding="utf-8")
+    return tools.bridge_status(window=0.1)
+
+
+@pytest.mark.parametrize(
+    ("label", "document", "field"),
+    [
+        ("root is not an object", "[1, 2, 3]", "<root>"),
+        ("bad command status",
+         json.dumps({"tick": 1, "session_id": "w", "command": {"id": "c", "status": "nope"}}),
+         "command.status"),
+        ("errors is not a list",
+         json.dumps({"tick": 1, "session_id": "w", "errors": "boom"}), "errors"),
+        ("world is not an object",
+         json.dumps({"tick": 1, "session_id": "w", "world": [1]}), "world"),
+        ("tick is not a genuine int",
+         json.dumps({"tick": "7", "session_id": "w"}), "tick"),
+        ("session_id is empty",
+         json.dumps({"tick": 1, "session_id": "", "command": None, "errors": [], "world": {}}),
+         "session_id"),
+    ],
+)
+def test_a_schema_failure_names_the_field(tmp_path, monkeypatch, label, document, field):
+    """A mod author reads this answer at six minutes a try -- a boot each. It
+    has to let them fix a field, not rebuild a healthy mod. All six shapes
+    parse_state validates are covered, because a diagnosis that only works for
+    some of them sends the rest to the torn-write advice."""
+    r = _status_over_a_state_document(tmp_path, monkeypatch, document)
+
+    assert not r.ok
+    assert r.data["state"] == "invalid_state", f"{label}: {r.data}"
+    assert field in r.error, f"{label}: {r.error}"
+    assert r.data["invalid_field"] == field
+    assert r.data["invalid_reason"]
+    # The torn-write advice must not be reached: nothing here is a half-written
+    # file, and a rebuild of a healthy mod is not the fix.
+    assert "cannot finish" not in r.error, label
+    assert "log_verdict" not in r.hint, label
+    assert "log_tail" not in r.hint, label
+
+
+def test_a_schema_failure_shows_the_value_that_was_seen(tmp_path, monkeypatch):
+    """The field name alone still costs a boot to act on: "tick is wrong" and
+    "tick is the STRING '7'" are minutes apart for whoever has to fix it."""
+    r = _status_over_a_state_document(
+        tmp_path, monkeypatch, json.dumps({"tick": "7", "session_id": "w"})
+    )
+    assert "'7'" in r.error or '"7"' in r.error
+
+
+def test_a_torn_write_still_gets_the_torn_write_answer(tmp_path, monkeypatch):
+    """The other side of the same rule: a document that is not valid JSON at all
+    is the ordinary once-a-second condition, and keeps the answer that says so."""
+    r = _status_over_a_state_document(tmp_path, monkeypatch, '{"tick": 1, "sess')
+    assert r.data["state"] == "unreadable_state", r.data
+    assert r.data["invalid_field"] is None
+
+
+# --- M3b: a tracked live server needs force, whatever the state file says -----
+
+
+def test_bridge_clear_refuses_while_this_sessions_server_is_running(tmp_path, monkeypatch):
+    """The state file is not the only evidence of life, and the tool layer holds
+    the other half: a server this session started IS running, whatever its
+    bridge is or is not publishing. A mod that has not written a state document
+    yet -- every mod before the state writer lands -- otherwise looks exactly
+    like a downed stand to the probe."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    mailbox = profiles / CMD_FILENAME
+    mailbox.write_text('{"id": "ping-9", "verb": "ping", "args": {}}', encoding="utf-8")
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    refused = tools.bridge_clear()
+    assert not refused.ok
+    assert "4321" in refused.error
+    assert "force" in refused.hint
+    assert mailbox.exists(), "a refusal still deleted the command"
+
+    forced = tools.bridge_clear(force=True)
+    assert forced.ok, f"{forced.error} | {forced.hint}"
+    assert forced.data["discarded_id"] == "ping-9"
+    # What the force overrode stays on the record, from this layer as well as
+    # the channel's.
+    assert forced.data["server_running"] is True
+    assert forced.data["forced"] is True
+    assert not mailbox.exists()
+
+
+def test_bridge_clear_does_not_probe_at_all_when_it_can_refuse_outright(tmp_path, monkeypatch):
+    """The channel now retries its first sample to the window's deadline, so a
+    probe over a missing state file costs the whole window. Refusing on the
+    liveness this layer already knows costs nothing -- and must not pay it."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text('{"id": "x", "verb": "x", "args": {}}', encoding="utf-8")
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    probed = {"n": 0}
+
+    def counting_clear(self, force=False, probe_window=3.0):
+        probed["n"] += 1
+        return errors_ok({"discarded": None, "heartbeat": "unmeasurable"})
+
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.clear_mailbox", counting_clear)
+    tools.bridge_clear()
+    assert probed["n"] == 0, "it probed for a window it did not need"
+
+
+def test_bridge_clear_floors_its_probe_window(tmp_path, monkeypatch):
+    """Below the mod's publish interval a "stalled" verdict proves nothing, and
+    the channel rightly demands force for it. A caller who passes 0.1 should get
+    a probe that can actually answer, not a refusal about their own window."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text('{"id": "x", "verb": "x", "args": {}}', encoding="utf-8")
+
+    captured = {}
+
+    def fake_clear(self, force=False, probe_window=3.0):
+        captured["probe_window"] = probe_window
+        return errors_ok({"discarded": {"id": "x"}, "heartbeat": "unmeasurable"})
+
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.clear_mailbox", fake_clear)
+    tools.bridge_clear(probe_window=0.1)
+    assert captured["probe_window"] == bridge.CLEAR_PROBE_MIN_SECONDS
+    tools.bridge_clear(probe_window=10_000)
+    assert captured["probe_window"] == bridge.STATUS_WINDOW_MAX
