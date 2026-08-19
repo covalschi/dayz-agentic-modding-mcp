@@ -73,6 +73,40 @@ class CommandState:
 
 
 @dataclass(frozen=True)
+class ParseRejection:
+    """Why `parse_state(text)` returned `None` for a document that WAS
+    valid JSON but failed schema validation -- see `parse_rejection`, the
+    function that produces this.
+
+    NEVER populated for invalid JSON syntax (a torn write): that is the
+    ordinary, once-a-second, uninteresting condition this whole module
+    exists to treat as unremarkable, and stays silent (both `parse_state`
+    and `parse_rejection` return `None` for it, with nothing to tell them
+    apart from a genuine rejection at the type level -- callers that need
+    to distinguish "no rejection because it parsed fine" from "no rejection
+    because it was a torn write" already have that from `parse_state`'s own
+    `None`-or-`BridgeState` result).
+
+    `field` is a dotted path into the document (`"tick"`, `"session_id"`,
+    `"command.status"`, `"errors"`, `"world"`, or `"<root>"` for the
+    document itself not being an object) -- one of the six shapes
+    `parse_state` explicitly validates, not every possible KeyError this
+    module's broad `except` also catches (a missing `command.id`, for
+    instance, is not detailed -- it was not one of the fields this exists
+    to cover). `reason` is a short human-readable explanation of what was
+    expected. `value` is the actual JSON-decoded value that was seen (not
+    pre-formatted text) -- `None` if the field was missing outright, kept
+    as a real Python value rather than a string so the tool layer that
+    renders this can choose its own presentation rather than re-parsing a
+    description back apart.
+    """
+
+    field: str
+    reason: str
+    value: object = None
+
+
+@dataclass(frozen=True)
 class BridgeState:
     """One snapshot of the mod's state file.
 
@@ -97,28 +131,39 @@ class BridgeState:
     world: dict = field(default_factory=dict)
 
 
-def parse_state(text: str) -> BridgeState | None:
-    """Parse one snapshot of the mod's state file.
+def _parse_state_checked(text: str) -> tuple[BridgeState | None, ParseRejection | None]:
+    """The one real implementation behind both `parse_state` and
+    `parse_rejection` -- see their docstrings for the public contract. Two
+    thin wrappers around one function rather than two independent
+    implementations, so the validation rules can never drift out of sync
+    between "does it parse" and "why didn't it".
 
-    Returns None for anything that doesn't parse into a well-formed
-    BridgeState: invalid JSON syntax (the expected shape of a torn write),
-    JSON that parses but isn't an object, or a value in the wrong shape
-    (missing field, wrong type, status outside the closed set). All of
-    these are the same case from the caller's point of view -- this read
-    didn't land on a complete write, try again next tick -- so they all
-    collapse to the same None rather than some raising and some not.
+    Returns `(state, rejection)`: exactly one of the two is populated for
+    a rejected document (rejection only for the six shapes explicitly
+    validated below; everything else -- invalid JSON syntax, or any other
+    KeyError/TypeError/ValueError/AttributeError this function's broad
+    `except` also catches, such as a missing `command.id` -- falls back to
+    `(None, None)`, the same as a torn write).
     """
     try:
         raw = json.loads(text)
+    except json.JSONDecodeError:
+        return None, None  # torn write: ordinary, not a rejection
+
+    try:
         if not isinstance(raw, dict):
-            return None
+            return None, ParseRejection("<root>", "must be a JSON object", raw)
 
         command_raw = raw.get("command")
         command: CommandState | None = None
         if command_raw is not None:
+            if not isinstance(command_raw, dict) or "status" not in command_raw:
+                return None, ParseRejection("command.status", "missing", command_raw)
             status = str(command_raw["status"])
             if status not in STATUSES:
-                return None
+                return None, ParseRejection(
+                    "command.status", f"must be one of {STATUSES}", status
+                )
             finished_at = command_raw.get("finished_at")
             command = CommandState(
                 id=str(command_raw["id"]),
@@ -129,20 +174,24 @@ def parse_state(text: str) -> BridgeState | None:
 
         errors = raw.get("errors", [])
         if not isinstance(errors, list):
-            return None
+            return None, ParseRejection("errors", "must be a list", errors)
 
         world = raw.get("world", {})
         if not isinstance(world, dict):
-            return None
+            return None, ParseRejection("world", "must be an object", world)
 
         # tick: required, and must genuinely be a JSON integer -- not a
         # numeric string (int("42") would silently accept one), not a float
         # (int(7.9) would silently truncate instead of rejecting it), and
         # not a bool (bool is a subtype of int in Python, so True/False
         # would otherwise slip past an isinstance(int) check unnoticed).
+        if "tick" not in raw:
+            return None, ParseRejection("tick", "missing")
         tick_raw = raw["tick"]
         if not isinstance(tick_raw, int) or isinstance(tick_raw, bool):
-            return None
+            return None, ParseRejection(
+                "tick", "must be a genuine integer (not a string, float, or bool)", tick_raw
+            )
 
         # session_id: required, same as tick -- see BridgeState's docstring.
         # A state JSON that parses but omits it entirely means whatever
@@ -176,9 +225,13 @@ def parse_state(text: str) -> BridgeState | None:
         # produces exactly this: an unset `string` field serialises as "",
         # not as an absent key. So the VALUE is validated too: it must be a
         # genuine, non-empty JSON string.
+        if "session_id" not in raw:
+            return None, ParseRejection("session_id", "missing")
         session_id_raw = raw["session_id"]
         if not isinstance(session_id_raw, str) or not session_id_raw:
-            return None
+            return None, ParseRejection(
+                "session_id", "must be a non-empty string", session_id_raw
+            )
 
         return BridgeState(
             tick=tick_raw,
@@ -186,9 +239,60 @@ def parse_state(text: str) -> BridgeState | None:
             command=command,
             errors=[str(e) for e in errors],
             world=world,
-        )
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
-        return None
+        ), None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None, None
+
+
+def parse_state(text: str) -> BridgeState | None:
+    """Parse one snapshot of the mod's state file.
+
+    Returns None for anything that doesn't parse into a well-formed
+    BridgeState: invalid JSON syntax (the expected shape of a torn write),
+    JSON that parses but isn't an object, or a value in the wrong shape
+    (missing field, wrong type, status outside the closed set). All of
+    these are the same case from the caller's point of view -- this read
+    didn't land on a complete write, try again next tick -- so they all
+    collapse to the same None rather than some raising and some not.
+
+    This is the hot path every tolerant-reading call site in `Channel`
+    polls once a second: deliberately unchanged in shape from before
+    `parse_rejection` existed, so nothing that already treats a bare `None`
+    as "try again" needs to change. Call `parse_rejection(text)` alongside
+    this when a `None` needs explaining instead of just retrying -- see its
+    own docstring for when that is (and is not) the right tool.
+    """
+    state, _rejection = _parse_state_checked(text)
+    return state
+
+
+def parse_rejection(text: str) -> ParseRejection | None:
+    """Explain why `parse_state(text)` would return `None` for this
+    document -- for the DIAGNOSTIC case only, not the routine polling loop.
+
+    Returns `None` in two situations that look identical from the outside
+    but mean opposite things: the document actually parses fine (nothing to
+    explain), and the document is a torn write (invalid JSON syntax -- the
+    ordinary, once-a-second condition this whole module treats as
+    unremarkable, deliberately never detailed; see `ParseRejection`'s
+    docstring). Returns a populated `ParseRejection` only for the third
+    case: a document that parsed as valid JSON but failed schema
+    validation -- a genuine mod-side bug (a wrong type, a typo'd status, an
+    empty session id), not a mid-write snapshot.
+
+    A caller cannot tell which of the two `None` cases happened from this
+    function alone -- call `parse_state(text)` on the SAME text first (or
+    use `Channel.read_state_rejection`, which does exactly that) to know
+    whether there was anything to explain in the first place. This
+    function's whole reason to exist is that `parse_state`'s own `None`
+    already conflates "torn write, try again" with "persistent schema bug,
+    something is actually wrong" -- the six named shapes this covers
+    (`<root>`, `command.status`, `errors`, `world`, `tick`, `session_id`)
+    are exactly parse_state's own explicit validation checks, not every
+    possible malformation its broader exception handling also catches.
+    """
+    _state, rejection = _parse_state_checked(text)
+    return rejection
 
 
 _id_lock = threading.Lock()

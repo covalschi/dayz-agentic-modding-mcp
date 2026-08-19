@@ -21,7 +21,7 @@ from dayz_mcp.bridge.channel import (
     STATE_FILENAME,
     Channel,
 )
-from dayz_mcp.bridge.protocol import Command
+from dayz_mcp.bridge.protocol import Command, ParseRejection
 
 
 def _write_state(profiles_dir, **overrides) -> None:
@@ -589,6 +589,7 @@ def test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive(tmp_pa
     assert result.data["discarded"]["id"] == cmd.id
     assert result.data["discarded"]["verb"] == cmd.verb
     assert result.data["heartbeat"] == HEARTBEAT_UNMEASURABLE
+    assert result.data["override_reason"] is None  # nothing needed overriding
     assert not (tmp_path / CMD_FILENAME).exists()
     # The wedge is gone -- a fresh send() succeeds right away.
     assert ch.send(_cmd("ping-2-1"), is_alive=True).ok
@@ -598,15 +599,23 @@ def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
     """A state file that exists but is frozen (same tick, same session,
     across the probe window) is the OTHER shape a genuinely down or
     not-yet-wired bridge can take -- e.g. a stale file left over from a
-    previous run. Also clearable without force: "stalled" is not "alive"."""
+    previous run. Also clearable without force: "stalled" is not "alive".
+
+    probe_window must be AT LEAST the mod's publish interval here -- a
+    shorter window cannot trust its own "stalled" verdict (see
+    test_clear_mailbox_requires_force_when_probe_window_is_too_short_to_trust_stalled),
+    so this uses one comfortably past it to test the STALLED path
+    specifically, not the window-too-short path.
+    """
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=99, session_id="stale-session")
     assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
 
-    result = ch.clear_mailbox(probe_window=0.05)
+    result = ch.clear_mailbox(probe_window=1.05)
 
     assert result.ok, result.error
     assert result.data["heartbeat"] == HEARTBEAT_STALLED
+    assert result.data["override_reason"] is None
 
 
 def test_clear_mailbox_refuses_when_bridge_looks_alive(tmp_path):
@@ -669,6 +678,8 @@ def test_clear_mailbox_force_overrides_an_alive_looking_bridge(tmp_path):
     assert result.ok, result.error
     assert result.data["discarded"]["id"] == cmd.id
     assert result.data["heartbeat"] == HEARTBEAT_GROWING
+    assert result.data["override_reason"] is not None
+    assert "alive" in result.data["override_reason"]
     assert not (tmp_path / CMD_FILENAME).exists()
 
 
@@ -715,6 +726,45 @@ def test_clear_mailbox_force_overrides_lost_contact_after_a_readable_first_sampl
 
     assert result.ok, result.error
     assert result.data["discarded"]["id"] == cmd.id
+    # Recorded even though "heartbeat" alone reads as the harmless
+    # "unmeasurable" -- the specific reason force was needed must survive.
+    assert result.data["heartbeat"] == HEARTBEAT_UNMEASURABLE
+    assert result.data["override_reason"] is not None
+    assert "alive moments ago" in result.data["override_reason"]
+    assert not (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_requires_force_when_probe_window_is_too_short_to_trust_stalled(tmp_path):
+    """A probe window shorter than the mod's publish interval cannot tell
+    "frozen" apart from "alive, but has not ticked again yet" -- both look
+    identical (same tick, both samples readable). Without this interlock, a
+    genuinely live bridge would silently classify as "stalled" and
+    clear_mailbox would destroy an in-flight command without force."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")  # a real, live, ticking bridge
+    assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
+
+    result = ch.clear_mailbox(probe_window=0.1)  # far shorter than the 1 Hz publish interval
+
+    assert not result.ok
+    assert "publish interval" in result.error
+    assert "force=True" in result.hint
+    assert (tmp_path / CMD_FILENAME).exists()
+
+
+def test_clear_mailbox_force_overrides_window_too_short_and_records_it(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")
+    cmd = _cmd("ping-1-1")
+    assert ch.send(cmd, is_alive=True).ok
+
+    result = ch.clear_mailbox(force=True, probe_window=0.1)
+
+    assert result.ok, result.error
+    assert result.data["discarded"]["id"] == cmd.id
+    assert result.data["heartbeat"] == HEARTBEAT_STALLED
+    assert result.data["override_reason"] is not None
+    assert "publish interval" in result.data["override_reason"]
     assert not (tmp_path / CMD_FILENAME).exists()
 
 
@@ -742,3 +792,187 @@ def test_clear_mailbox_reports_what_it_actually_deleted_not_a_stale_read(tmp_pat
     # the original, which was already gone by the time the unlink happened.
     assert result.data["discarded"]["id"] == "ping-2-1"
     assert not (tmp_path / CMD_FILENAME).exists()
+
+
+# --- _sample_twice honours window on the FIRST sample too -------------------
+
+
+def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_path):
+    """_read_state_tolerant's own retry budget is only ~0.1-0.15s -- far
+    shorter than a realistic probe window. Before this fix, _sample_twice
+    gave up on the FIRST sample after that short budget regardless of
+    `window`, so a state file that simply had not been written yet (the
+    ORDINARY condition while Task 5's mod is under active development, not
+    an edge case) made any longer window meaningless. Here the file appears
+    well after that short budget but comfortably inside a longer window."""
+    ch = Channel(tmp_path)
+
+    def create_late():
+        time.sleep(0.3)  # well past _read_state_tolerant's own ~0.15s budget
+        _write_state(tmp_path, tick=5, session_id="s1")
+
+    threading.Thread(target=create_late, daemon=True).start()
+    status, tick = ch.heartbeat(window=1.0)
+
+    # Must have found the file at all -- unmeasurable/tick=0 is what the
+    # pre-fix code returns here (gives up long before t=0.3).
+    assert status != HEARTBEAT_UNMEASURABLE
+    assert tick == 5
+
+
+def test_clear_mailbox_honours_probe_window_when_the_bridge_is_slow_to_become_readable(tmp_path):
+    """Reproduced consequence of _sample_twice not honouring window on its
+    first sample: a live bridge whose state file is not yet readable when
+    clear_mailbox starts (the ORDINARY condition while Task 5's mod is
+    being iterated on) used to be misread as a down stand within ~0.15s
+    regardless of probe_window, letting clear_mailbox destroy an in-flight
+    command without force. With a probe_window long enough to span the
+    mod's publish interval, this must find the live bridge and require
+    force instead."""
+    ch = Channel(tmp_path)
+    cmd = _cmd("ping-1-1")
+    assert ch.send(cmd, is_alive=True).ok
+
+    def go_live_late():
+        time.sleep(0.3)
+        _write_state(tmp_path, tick=5, session_id="s1")
+        time.sleep(0.3)
+        _write_state(tmp_path, tick=6, session_id="s1")
+
+    threading.Thread(target=go_live_late, daemon=True).start()
+    result = ch.clear_mailbox(probe_window=1.0)
+
+    assert not result.ok
+    assert (tmp_path / CMD_FILENAME).exists()  # NOT destroyed
+
+
+# --- Channel.read_state_rejection: WHY the state file cannot be read now ----
+
+
+def test_read_state_rejection_is_none_for_a_valid_state(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=7, session_id="s1")
+    assert ch.read_state_rejection() is None
+
+
+def test_read_state_rejection_is_none_for_a_missing_file(tmp_path):
+    ch = Channel(tmp_path)
+    assert ch.read_state_rejection() is None
+
+
+def test_read_state_rejection_is_none_for_a_torn_write(tmp_path):
+    ch = Channel(tmp_path)
+    (tmp_path / STATE_FILENAME).write_text('{"tick": 7, "wor', encoding="utf-8")
+    assert ch.read_state() is None  # sanity: this really is the torn-write path
+    assert ch.read_state_rejection() is None
+
+
+def test_read_state_rejection_explains_a_genuine_schema_bug(tmp_path):
+    """The exact scenario this exists for: a document that parses as valid
+    JSON but fails schema validation -- a real mod-side bug, not a
+    mid-write snapshot -- must be explained, not silently folded into
+    "try again next tick"."""
+    ch = Channel(tmp_path)
+    payload = {
+        "tick": 7, "session_id": "", "command": None, "errors": [], "world": {}
+    }
+    (tmp_path / STATE_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    rejection = ch.read_state_rejection()
+
+    assert rejection is not None
+    assert isinstance(rejection, ParseRejection)
+    assert rejection.field == "session_id"
+
+
+# --- heartbeat_detail: exposes the session id(s) M4a asked for --------------
+
+
+def test_heartbeat_detail_exposes_the_session_id_when_growing(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=10, session_id="s1")
+
+    def bump_later():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=11, session_id="s1")
+
+    threading.Thread(target=bump_later, daemon=True).start()
+    sample = ch.heartbeat_detail(window=0.15)
+
+    assert sample.status == HEARTBEAT_GROWING
+    assert sample.tick == 11
+    assert sample.session_id == "s1"
+    assert sample.previous_session_id is None
+
+
+def test_heartbeat_detail_exposes_the_session_id_when_stalled(tmp_path):
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=42, session_id="s1")
+
+    sample = ch.heartbeat_detail(window=0.15)
+
+    assert sample.status == HEARTBEAT_STALLED
+    assert sample.session_id == "s1"
+    assert sample.previous_session_id is None
+
+
+def test_heartbeat_detail_exposes_both_session_ids_on_restart(tmp_path):
+    """The tool layer has to report the live session -- and, for a restart,
+    BOTH halves: what it was, what it is now."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=500, session_id="session-old")
+
+    def reboot_soon():
+        time.sleep(0.03)
+        _write_state(tmp_path, tick=3, session_id="session-new")
+
+    threading.Thread(target=reboot_soon, daemon=True).start()
+    sample = ch.heartbeat_detail(window=0.15)
+
+    assert sample.status == HEARTBEAT_RESTARTED
+    assert sample.session_id == "session-new"
+    assert sample.previous_session_id == "session-old"
+
+
+def test_heartbeat_detail_session_id_is_none_when_nothing_was_ever_read(tmp_path):
+    ch = Channel(tmp_path)
+    sample = ch.heartbeat_detail(window=0.05)
+
+    assert sample.status == HEARTBEAT_UNMEASURABLE
+    assert sample.session_id is None
+    assert sample.previous_session_id is None
+
+
+def test_heartbeat_detail_session_id_reflects_the_readable_first_sample_on_lost_contact(tmp_path):
+    """Proof-of-life-then-lost-contact still has a session id to report --
+    the one from the sample that DID succeed -- not None."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=7, session_id="s1")
+
+    def delete_soon():
+        time.sleep(0.05)
+        (tmp_path / STATE_FILENAME).unlink()
+
+    threading.Thread(target=delete_soon, daemon=True).start()
+    sample = ch.heartbeat_detail(window=0.3)
+
+    assert sample.status == HEARTBEAT_UNMEASURABLE
+    assert sample.session_id == "s1"
+    assert sample.previous_session_id is None
+
+
+def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
+    """heartbeat()'s own public contract must stay exactly (status, tick) --
+    unpacking into more than two variables must fail, the same way it would
+    have before heartbeat_detail/HeartbeatSample existed. Nothing already
+    consuming heartbeat() as a 2-tuple should ever need to change."""
+    ch = Channel(tmp_path)
+    _write_state(tmp_path, tick=1, session_id="s1")
+
+    result = ch.heartbeat(window=0.05)
+
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    status, tick = result  # must not raise ValueError: too many values to unpack
+    assert status == HEARTBEAT_STALLED
+    assert tick == 1

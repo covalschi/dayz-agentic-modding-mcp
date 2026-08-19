@@ -1,11 +1,13 @@
 import json
 
 from dayz_mcp.bridge.protocol import (
+    STATUSES,
     BridgeState,
     Command,
     CommandState,
     classify_timeout,
     new_command_id,
+    parse_rejection,
     parse_state,
 )
 
@@ -240,3 +242,117 @@ def test_classify_timeout_counts_from_sent_at_not_from_zero():
     # confused with "elapsed since program start" or similar.
     assert classify_timeout(sent_at=1_000_000.0, now=1_000_004.0, timeout=5.0) == "waiting"
     assert classify_timeout(sent_at=1_000_000.0, now=1_000_005.0, timeout=5.0) == "expired"
+
+
+# --- parse_rejection: WHY parse_state returned None -------------------------
+
+
+def test_parse_rejection_is_none_for_a_valid_document():
+    # Nothing to explain -- must not invent a rejection for a document that
+    # actually parsed fine.
+    assert parse_rejection(_state_json()) is None
+
+
+def test_parse_rejection_is_none_for_a_torn_write():
+    # The ordinary, once-a-second case this whole module treats as
+    # unremarkable stays unremarkable here too -- a torn write must never
+    # be reported as a schema rejection, or every routine mid-write read
+    # would start looking like a mod bug.
+    torn = _state_json()[:40]
+    assert parse_state(torn) is None  # sanity: this really is the torn-write path
+    assert parse_rejection(torn) is None
+
+
+def test_parse_rejection_for_non_object_root():
+    rejection = parse_rejection("[1, 2, 3]")
+    assert rejection is not None
+    assert rejection.field == "<root>"
+    assert rejection.value == [1, 2, 3]
+
+
+def test_parse_rejection_for_missing_status():
+    payload = json.loads(_state_json())
+    del payload["command"]["status"]
+    rejection = parse_rejection(json.dumps(payload))
+    assert rejection is not None
+    assert rejection.field == "command.status"
+    assert "missing" in rejection.reason
+
+
+def test_parse_rejection_for_bad_status():
+    rejection = parse_rejection(_state_json(
+        command={"id": "x", "status": "dun", "detail": "", "finished_at": None}
+    ))
+    assert rejection is not None
+    assert rejection.field == "command.status"
+    assert rejection.value == "dun"
+    # The reason should actually be useful -- name the closed set, not just
+    # say "invalid".
+    for known in STATUSES:
+        assert known in rejection.reason
+
+
+def test_parse_rejection_for_errors_not_a_list():
+    rejection = parse_rejection(_state_json(errors="none"))
+    assert rejection is not None
+    assert rejection.field == "errors"
+    assert rejection.value == "none"
+
+
+def test_parse_rejection_for_world_not_an_object():
+    rejection = parse_rejection(_state_json(world="everything"))
+    assert rejection is not None
+    assert rejection.field == "world"
+    assert rejection.value == "everything"
+
+
+def test_parse_rejection_for_missing_tick():
+    payload = json.loads(_state_json())
+    del payload["tick"]
+    rejection = parse_rejection(json.dumps(payload))
+    assert rejection is not None
+    assert rejection.field == "tick"
+    assert "missing" in rejection.reason
+
+
+def test_parse_rejection_for_tick_not_a_genuine_int():
+    for bad_tick in ("7", 7.0, True):
+        rejection = parse_rejection(_state_json(tick=bad_tick))
+        assert rejection is not None, f"tick={bad_tick!r} should have been rejected"
+        assert rejection.field == "tick"
+        assert rejection.value == bad_tick
+
+
+def test_parse_rejection_for_missing_session_id():
+    payload = json.loads(_state_json())
+    del payload["session_id"]
+    rejection = parse_rejection(json.dumps(payload))
+    assert rejection is not None
+    assert rejection.field == "session_id"
+    assert "missing" in rejection.reason
+
+
+def test_parse_rejection_for_session_id_not_a_non_empty_string():
+    for bad_session_id in ("", None, 0, False):
+        rejection = parse_rejection(_state_json(session_id=bad_session_id))
+        assert rejection is not None, f"session_id={bad_session_id!r} should have been rejected"
+        assert rejection.field == "session_id"
+        assert rejection.value == bad_session_id
+
+
+def test_parse_rejection_and_parse_state_agree_on_which_documents_are_bad():
+    # Every document parse_rejection explains must also be one parse_state
+    # rejects, and vice versa (excluding the torn-write case, covered
+    # separately above) -- the two must never disagree about WHETHER a
+    # document is bad, only about whether the reason is known.
+    bad_docs = [
+        "[1, 2, 3]",
+        _state_json(command={"id": "x", "status": "dun", "detail": "", "finished_at": None}),
+        _state_json(errors="none"),
+        _state_json(world="everything"),
+        _state_json(tick="7"),
+        _state_json(session_id=""),
+    ]
+    for doc in bad_docs:
+        assert parse_state(doc) is None
+        assert parse_rejection(doc) is not None

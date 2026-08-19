@@ -43,10 +43,19 @@ import json
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import Result, fail, ok
-from .protocol import BridgeState, Command, CommandState, new_command_id, parse_state
+from .protocol import (
+    BridgeState,
+    Command,
+    CommandState,
+    ParseRejection,
+    new_command_id,
+    parse_rejection,
+    parse_state,
+)
 
 # Wire filenames inside a server's -profiles directory. See spec Sec 5.2.
 CMD_FILENAME = "dayz_mcp_cmd.json"
@@ -59,6 +68,14 @@ STATE_FILENAME = "dayz_mcp_state.json"
 _TOLERANT_READ_ATTEMPTS = 3
 _TOLERANT_READ_DELAY = 0.05
 
+# The mod publishes its tick once per second (spec Sec 5.1: CallLater on
+# CALL_CATEGORY_SYSTEM, 1 Hz -- see Task 1's measurement). A probe window
+# shorter than this cannot tell "frozen" apart from "alive, but has not had
+# a chance to tick again yet" -- both look identical (same tick, both
+# samples readable). Used by `clear_mailbox` to require `force` for a
+# "stalled" verdict a too-short window cannot actually back up.
+_MOD_PUBLISH_INTERVAL_SECONDS = 1.0
+
 # Once the mod reports one of these for the command we asked about, waiting
 # longer cannot produce more information -- that IS the result.
 _TERMINAL_STATUSES = ("done", "failed")
@@ -70,6 +87,31 @@ HEARTBEAT_GROWING = "growing"
 HEARTBEAT_STALLED = "stalled"
 HEARTBEAT_RESTARTED = "restarted"
 HEARTBEAT_UNMEASURABLE = "unmeasurable"
+
+
+@dataclass(frozen=True)
+class HeartbeatSample:
+    """The full result of one heartbeat probe: `status`/`tick` (see
+    `heartbeat`'s own docstring for exactly what these mean) plus the
+    session id(s) observed -- information `heartbeat`'s plain `(status,
+    tick)` contract has no room for, and which the tool layer needs to
+    report the live session to a caller (several of Task 5's acceptance
+    probes need to know it, and until this existed nothing could tell them).
+
+    `session_id` is the most recently observed session: `after.session_id`
+    if the second sample was read, else `before.session_id` if only the
+    first was, else `None` if neither was (mirrors `tick`'s own "last
+    actually read, or 0" rule). `previous_session_id` is populated ONLY
+    when `status == "restarted"` -- the OLD session's id, so a caller can
+    report both halves of a restart (what it was, what it is now), not just
+    that one happened; `None` in every other case, including when there is
+    no session to report at all.
+    """
+
+    status: str
+    tick: int
+    session_id: str | None
+    previous_session_id: str | None = None
 
 
 class Channel:
@@ -190,6 +232,19 @@ class Channel:
         the refusal, because a caller who thinks it MIGHT have been written
         will not retry, and a wedge nothing can ever clear is worse than a
         refusal that is clear about what did not happen.
+
+        NOTE, not a defect today: a bool over a callable trades away
+        lifetime concerns, but not EVALUATION POINT. `is_alive` is computed
+        by the caller before this call -- typically before `build_command`
+        too, which itself spends up to `_TOLERANT_READ_ATTEMPTS *
+        _TOLERANT_READ_DELAY` (currently ~0.1s) on its own tolerant read.
+        A server that dies in that window is not re-checked: `is_alive`
+        stays whatever it was computed as, and `send` writes the command
+        the "no live server" gate exists specifically to prevent. Narrow,
+        and not worth a callable (which would only move WHEN the check
+        runs, not eliminate the gap -- the server could still die between
+        the callable firing and the write completing), but real; worth
+        knowing rather than rediscovering.
 
         `cmd.session_id` must also be non-empty: a command with no session
         is indistinguishable to the mod from a stale one (see `Command`'s
@@ -317,27 +372,43 @@ class Channel:
         layer, ultimately a human) has to decide to call this.
 
         Refuses to act, and reports what it found, unless `force=True`, in
-        TWO situations that both mean "something may claim this any
-        moment": `_classify_samples` reporting `"growing"`/`"restarted"`
-        (the bridge is visibly alive), and a subtler one this method checks
-        directly rather than trusting `heartbeat`'s own reduction of the
-        same two samples -- a readable FIRST sample followed by a failed
-        SECOND one. `heartbeat` reports both that case and "never got any
-        sample at all" as the same `"unmeasurable"`, which is exactly right
-        for `heartbeat`'s own job (a caller just wants to know "is it
-        growing", and both are equally "no"), but wrong for THIS method's
-        job: a readable first sample is proof something was alive inside
-        the probe window, which a genuinely down stand or an unwired bridge
-        never produces even once. Reproduced without mocks: while the tick
-        was genuinely advancing, a second sample blocked by another process
-        holding an exclusive handle on the state file (the same real
-        Windows condition this module has already had to account for
-        elsewhere) made the reduced status read `"unmeasurable"` -- and
-        without checking the raw samples here, `force` was never required
-        to destroy a command a live bridge was about to claim. The
-        genuinely-down-stand path is untouched: it never produces even a
-        first sample, so it is unaffected by this check and still proceeds
-        without `force`.
+        THREE situations that all mean "this verdict cannot be trusted
+        enough to destroy something":
+
+        1. `_classify_samples` reporting `"growing"`/`"restarted"` -- the
+           bridge is visibly alive and could claim the mailbox any moment.
+        2. A readable FIRST sample followed by a failed SECOND one, checked
+           directly against the raw samples rather than trusting
+           `heartbeat`'s own reduction of them. `heartbeat` reports both
+           that case and "never got any sample at all" as the same
+           `"unmeasurable"` -- exactly right for `heartbeat`'s own job (a
+           caller just wants to know "is it growing", and both are equally
+           "no"), but wrong here: a readable first sample is proof
+           something was alive inside the probe window, which a genuinely
+           down stand or an unwired bridge never produces even once.
+           Reproduced without mocks: while the tick was genuinely
+           advancing, a second sample blocked by another process holding an
+           exclusive handle on the state file (the same real Windows
+           condition this module has already had to account for elsewhere)
+           made the reduced status read `"unmeasurable"` -- and without
+           checking the raw samples here, `force` was never required to
+           destroy a command a live bridge was about to claim.
+        3. A `"stalled"` verdict reached with `probe_window` shorter than
+           the mod's publish interval (`_MOD_PUBLISH_INTERVAL_SECONDS`).
+           Below that, "the tick did not move" and "the tick has not had a
+           chance to move yet" look IDENTICAL -- same tick, both samples
+           readable -- so "stalled" from a too-short window is not evidence
+           of anything, and treating it as safe-to-clear risks destroying
+           an in-flight command on a live bridge whose window was simply
+           too short to prove it. `bridge_status` already refuses to call
+           two back-to-back samples "frozen" for the same reason; this is
+           the same interlock on the path that can actually destroy
+           something.
+
+        The genuinely-down-stand path (case 1's opposite: no first sample
+        at all) is untouched by cases 2 and 3 -- it never produces even a
+        first sample, so it is unaffected and still proceeds without
+        `force`, no matter how short `probe_window` is.
 
         On success, reports the discarded command (parsed back from its
         JSON: id, verb, args) so a caller can tell whether the thing just
@@ -349,10 +420,19 @@ class Channel:
         window, at which point an early read reports discarding the OLD
         command while the file actually removed holds the NEW one -- a
         caller trusting the report would believe it recovered what it
-        wanted when the real, current command was destroyed instead. Also
-        includes the heartbeat status the probe saw, recorded even when
-        `force=True` bypassed a refusal, so a forced clear still leaves a
-        record of what it overrode.
+        wanted when the real, current command was destroyed instead.
+
+        Also includes `"heartbeat"` (the plain 4-outcome status the probe
+        saw) and `"override_reason"` -- `None` when nothing needed
+        overriding, otherwise the SPECIFIC reason `force` was required,
+        even though `"heartbeat"` alone might read as the harmless
+        `"unmeasurable"` or `"stalled"` (cases 2 and 3 above cannot be told
+        apart from their safe counterparts by `"heartbeat"` alone -- that is
+        the whole reason this method checks them separately). A forced
+        clear is therefore never silent about what it overrode, and a
+        caller that only wants to know "did this override something
+        questionable" can check `override_reason is not None` without
+        having to re-derive cases 2/3 itself.
         """
         cmd_path = self._cmd_path()
         if not cmd_path.exists():
@@ -362,25 +442,41 @@ class Channel:
             )
 
         before, after = self._sample_twice(probe_window)
-        status, tick = self._classify_samples(before, after)
-        # See this method's own docstring: a readable first sample proves
-        # something was alive inside the window even though the second read
-        # then failed, which `status == "unmeasurable"` alone cannot say.
+        sample = self._classify_samples(before, after)
+        status, tick = sample.status, sample.tick
+
+        # Case 2 (see docstring): a readable first sample proves something
+        # was alive inside the window even though the second read then
+        # failed, which `status == "unmeasurable"` alone cannot say.
         proof_of_life_then_lost_contact = before is not None and after is None
-        if not force and (
-            status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED) or proof_of_life_then_lost_contact
-        ):
-            if proof_of_life_then_lost_contact:
-                reason = (
-                    f"a readable state was seen (tick={tick}) inside the probe window, but "
-                    f"a second sample could not be read within {probe_window}s -- this "
-                    f"proves something was alive moments ago, not a downed stand"
-                )
-            else:
-                reason = f"the bridge looks alive (heartbeat={status!r}, tick={tick})"
+        # Case 3 (see docstring): a "stalled" verdict from a window too
+        # short to span even one publish interval proves nothing either way.
+        window_too_short_to_trust_stalled = (
+            status == HEARTBEAT_STALLED and probe_window < _MOD_PUBLISH_INTERVAL_SECONDS
+        )
+
+        if status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED):
+            override_reason = f"the bridge looks alive (heartbeat={status!r}, tick={tick})"
+        elif proof_of_life_then_lost_contact:
+            override_reason = (
+                f"a readable state was seen (tick={tick}) inside the probe window, but "
+                f"a second sample could not be read within {probe_window}s -- this "
+                f"proves something was alive moments ago, not a downed stand"
+            )
+        elif window_too_short_to_trust_stalled:
+            override_reason = (
+                f"the probe window ({probe_window}s) is shorter than the mod's publish "
+                f"interval ({_MOD_PUBLISH_INTERVAL_SECONDS}s), so a same tick proves "
+                f"nothing -- a live bridge that simply has not ticked again yet looks "
+                f"identical to a frozen one at this window"
+            )
+        else:
+            override_reason = None  # genuinely safe to clear without force
+
+        if override_reason is not None and not force:
             return fail(
-                f"refusing to clear the mailbox at {cmd_path}: {reason} and may claim "
-                f"this command any moment",
+                f"refusing to clear the mailbox at {cmd_path}: {override_reason} and may "
+                f"claim this command any moment",
                 hint="pass force=True if you are certain this command should be discarded "
                      "anyway; check bridge_status/world_state first if you are not sure",
             )
@@ -391,7 +487,7 @@ class Channel:
         try:
             raw = cmd_path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return ok({"discarded": None, "heartbeat": status,
+            return ok({"discarded": None, "heartbeat": status, "override_reason": override_reason,
                        "note": "mailbox was claimed or cleared concurrently"})
         except OSError as exc:
             return fail(
@@ -416,14 +512,14 @@ class Channel:
             # gone either way, which is the outcome this method exists to
             # reach. (This particular race's window is one read/unlink pair
             # apart, not the multi-second probe -- see the docstring.)
-            return ok({"discarded": None, "heartbeat": status,
+            return ok({"discarded": None, "heartbeat": status, "override_reason": override_reason,
                        "note": "mailbox was claimed or cleared concurrently"})
         except OSError as exc:
             return fail(
                 f"failed to remove the mailbox: {exc}",
                 hint=f"check that {cmd_path} is writable",
             )
-        return ok({"discarded": discarded, "heartbeat": status})
+        return ok({"discarded": discarded, "heartbeat": status, "override_reason": override_reason})
 
     def read_state(self) -> BridgeState | None:
         """One read of the mod's state file. None covers every unusable
@@ -435,6 +531,38 @@ class Channel:
         except (OSError, UnicodeDecodeError):
             return None
         return parse_state(text)
+
+    def read_state_rejection(self) -> ParseRejection | None:
+        """Explain why the state file cannot be read RIGHT NOW, for the
+        diagnostic case only -- not the routine polling loop, which
+        `read_state`/`_read_state_tolerant` already serve correctly on
+        their own. Before this existed, every realistic mod-side schema
+        slip during Task 5 (`session_id: ""`, `tick: "7"`, a typo'd
+        `status`) was reported to the person debugging it as an ordinary
+        torn write, with a hint naming the wrong cause and the wrong
+        remedy ("rebuild the mod") -- because `parse_state`'s plain `None`
+        cannot tell "caught mid-write, try again next tick" apart from "this
+        document will NEVER parse, something is actually wrong". This can.
+
+        Returns `None` for a missing file (nothing to explain: `read_state`
+        already says so) and for a torn write (see `protocol.parse_rejection`
+        -- the ordinary, once-a-second condition this whole module treats as
+        unremarkable, deliberately never detailed). Returns a populated
+        `ParseRejection` only when the state file parses as valid JSON but
+        fails schema validation -- the one case worth surfacing, because
+        retrying will not fix it.
+
+        A SINGLE read, not tolerant like `_read_state_tolerant`: retrying a
+        persistent schema failure would not change the answer (unlike a
+        torn write, which `parse_rejection` already refuses to detail on
+        its own), so there is nothing extra tolerance would buy a caller
+        who is diagnosing an ALREADY-persistent failure.
+        """
+        try:
+            text = self._state_path().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        return parse_rejection(text)
 
     def _read_state_tolerant(self) -> BridgeState | None:
         """`read_state`, but absorbs a short run of torn reads instead of
@@ -478,9 +606,31 @@ class Channel:
         either of which may be `None`. Exposed as its own method (not
         inlined into `heartbeat`) because `clear_mailbox` needs the RAW
         samples, not just heartbeat's 4-outcome reduction of them -- see
-        `_classify_samples` and `clear_mailbox`'s own docstring for why."""
+        `_classify_samples` and `clear_mailbox`'s own docstring for why.
+
+        The FIRST sample retries all the way to `window`'s own deadline,
+        not just `_read_state_tolerant`'s own short (~0.1-0.15s) budget.
+        Giving up on the first sample after that short budget regardless of
+        a much longer `window` silently defeated `window` on this path
+        entirely: `clear_mailbox` could still destroy an in-flight command
+        on a genuinely live bridge whenever the state file merely happened
+        to be unreadable at the exact moment the probe started, and ANY
+        `probe_window` shorter than the time it took the state file to
+        become readable again had the exact same effect as `probe_window`
+        not existing. This is not an exotic timing edge case: while a mod
+        is under active development (Task 5), a state file that is
+        unreadable right now -- because the mod has not started writing it
+        yet, or is mid-crash-and-recover -- is the ORDINARY condition, and
+        `clear_mailbox` is exactly the tool its author reaches for then.
+        The SECOND sample keeps its original short budget: `heartbeat`'s own
+        docstring already treats a failed second sample as its own outcome
+        ("unmeasurable") rather than something worth waiting out further.
+        """
         deadline = time.monotonic() + window
         before = self._read_state_tolerant()
+        while before is None and time.monotonic() < deadline:
+            time.sleep(_TOLERANT_READ_DELAY)
+            before = self._read_state_tolerant()
         if before is None:
             return None, None
 
@@ -493,11 +643,12 @@ class Channel:
 
     def _classify_samples(
         self, before: BridgeState | None, after: BridgeState | None
-    ) -> tuple[str, int]:
+    ) -> HeartbeatSample:
         """Reduce two samples (as returned by `_sample_twice`) to
-        `heartbeat`'s 4-outcome contract. Pure function of its two
-        arguments, shared by `heartbeat` and `clear_mailbox` so the
-        classification rule lives in exactly one place.
+        `heartbeat`'s 4-outcome contract, PLUS the session id(s) observed
+        (see `HeartbeatSample`). Pure function of its two arguments, shared
+        by `heartbeat` and `clear_mailbox` so the classification rule lives
+        in exactly one place.
 
         Session comparison is checked BEFORE tick comparison, deliberately:
         a session id change means a new world came up, and that must read
@@ -514,14 +665,16 @@ class Channel:
         as an earlier version of this docstring said.
         """
         if before is None:
-            return HEARTBEAT_UNMEASURABLE, 0
+            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, 0, None)
         if after is None:
-            return HEARTBEAT_UNMEASURABLE, before.tick
+            return HeartbeatSample(HEARTBEAT_UNMEASURABLE, before.tick, before.session_id)
         if after.session_id != before.session_id:
-            return HEARTBEAT_RESTARTED, after.tick
+            return HeartbeatSample(
+                HEARTBEAT_RESTARTED, after.tick, after.session_id, before.session_id
+            )
         if after.tick > before.tick:
-            return HEARTBEAT_GROWING, after.tick
-        return HEARTBEAT_STALLED, after.tick
+            return HeartbeatSample(HEARTBEAT_GROWING, after.tick, after.session_id)
+        return HeartbeatSample(HEARTBEAT_STALLED, after.tick, after.session_id)
 
     def heartbeat(self, window: float = 3.0) -> tuple[str, int]:
         """Is the world's tick counter growing over `window` seconds -- and
@@ -578,6 +731,30 @@ class Channel:
                              life moments ago) -- `clear_mailbox` needs that
                              distinction and gets it from `_sample_twice`
                              directly rather than from this method.
+
+        This is `heartbeat_detail(window).status, heartbeat_detail(window).tick`
+        -- unchanged in shape from before `HeartbeatSample` existed, so
+        nothing already unpacking a plain 2-tuple needs to change. Call
+        `heartbeat_detail` instead when the session id itself is needed
+        (e.g. to report the live session to a caller), not just whether the
+        tick is moving.
         """
-        before, after = self._sample_twice(window)
-        return self._classify_samples(before, after)
+        sample = self._classify_samples(*self._sample_twice(window))
+        return sample.status, sample.tick
+
+    def heartbeat_detail(self, window: float = 3.0) -> HeartbeatSample:
+        """Like `heartbeat`, but returns the full `HeartbeatSample` --
+        status, tick, AND the session id(s) observed -- instead of just
+        `(status, tick)`.
+
+        Several of Task 5's acceptance probes need to know the bridge's
+        live session id, and until this existed nothing could tell them
+        without a second, separate probe (`current_session_id` does its own
+        fresh tolerant read, which would cost another `_read_state_tolerant`
+        round trip for information this method already has in hand from the
+        same two samples `heartbeat` itself takes). Same timing and
+        tolerance as `heartbeat` -- this is not a second, independent
+        measurement, just a richer view of the one `heartbeat` already
+        takes.
+        """
+        return self._classify_samples(*self._sample_twice(window))
