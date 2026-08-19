@@ -37,6 +37,24 @@ items = 12
 """
 
 
+@pytest.fixture(autouse=True)
+def _no_real_ports(monkeypatch):
+    """Nothing in this file may consult the machine's actual network state.
+
+    server_start now checks the game port before spawning, and that check reads
+    netstat. Without this, twelve tests started failing the moment ANOTHER
+    AGENT's live stand bound udp/2302 on this machine -- tests that had passed
+    minutes earlier, for a reason nothing in them could express. A unit test
+    that reads global machine state is flaky by construction, and this is a
+    repository where a second stand really does come and go.
+
+    The default is "nothing holds any port"; the tests that are about the port
+    override it explicitly, which also makes them the only place the reader has
+    to look for that behaviour.
+    """
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [])
+
+
 PROFILE_WITHOUT_READY_LINE = """
 [project]
 name = "my-mod"
