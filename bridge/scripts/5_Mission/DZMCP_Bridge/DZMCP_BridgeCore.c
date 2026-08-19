@@ -470,12 +470,15 @@ class DZMCP_BridgeCore
 
     protected string KnownVerbs()
     {
-        return "ping, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, teleport, set, delete, query, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
     {
-        return verb == "ping" || verb == "probe_bloat" || verb == "probe_stall" || verb == "probe_fault";
+        if (verb == "ping" || verb == "probe_bloat" || verb == "probe_stall" || verb == "probe_fault")
+            return true;
+
+        return verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query";
     }
 
     protected void Dispatch(string verb, string raw)
@@ -509,6 +512,31 @@ class DZMCP_BridgeCore
         if (verb == "ping")
         {
             VerbPing(args);
+            return;
+        }
+        if (verb == "spawn")
+        {
+            VerbSpawn(args);
+            return;
+        }
+        if (verb == "teleport")
+        {
+            VerbTeleport(args);
+            return;
+        }
+        if (verb == "set")
+        {
+            VerbSet(args);
+            return;
+        }
+        if (verb == "delete")
+        {
+            VerbDelete(args);
+            return;
+        }
+        if (verb == "query")
+        {
+            VerbQuery(args);
             return;
         }
         if (verb == "probe_bloat")
@@ -579,6 +607,340 @@ class DZMCP_BridgeCore
             return;
 
         FinishCommand(DZMCP_STATUS_DONE, "pong from session " + m_SessionId);
+    }
+
+    // ---- world verbs ------------------------------------------------------
+    //
+    // Argument reading is uniform and explicit: presence is asked with
+    // Contains, never inferred from an empty value, and every key a verb does
+    // not know is named in the refusal. The deserializer drops members a class
+    // does not declare and still reports success, so without that a typo in an
+    // argument name reports done having done nothing.
+
+    protected string ArgOr(map<string, string> args, string key, string fallback)
+    {
+        if (args && args.Contains(key))
+            return args.Get(key);
+
+        return fallback;
+    }
+
+    protected bool HasArg(map<string, string> args, string key)
+    {
+        return args && args.Contains(key);
+    }
+
+    // Every verb that needs a player calls this first, and the refusal is a
+    // sentence rather than a shrug. Nobody connected is the ORDINARY state on
+    // a headless stand, so "it did not work" here has to name the reason or a
+    // caller will go looking for a bug in the mod under test.
+    protected bool NoPlayerRefusal()
+    {
+        if (DZMCP_World.PlayerCount() > 0)
+            return false;
+
+        FinishCommand(DZMCP_STATUS_FAILED, "no player is on the server, so there is nobody to act on -- connect a client and try again, or use a verb that takes an explicit position");
+        return true;
+    }
+
+    // spawn: class (required), where = ground|hands|inventory, pos, quantity.
+    //
+    // Ground spawning falls back to the player's own position when no pos is
+    // given, and refuses in words when there is neither.
+    protected void VerbSpawn(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|where|pos|quantity|", "class, where, pos, quantity"))
+            return;
+
+        string className = ArgOr(args, "class", "");
+        if (className == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "spawn needs a class argument naming what to create");
+            return;
+        }
+
+        string where = ArgOr(args, "where", "ground");
+        if (where != "ground" && where != "hands" && where != "inventory")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "spawn: where must be ground, hands or inventory, not '" + where + "'");
+            return;
+        }
+
+        if (where == "ground")
+        {
+            SpawnOnGround(className, args);
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        EntityAI created;
+        if (where == "hands")
+            created = DZMCP_World.SpawnInHands(player, className);
+        else
+            created = DZMCP_World.SpawnInInventory(player, className);
+
+        if (!created)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the engine created nothing for class '" + className + "' in " + where + " -- the class may not exist, or there may be no room");
+            return;
+        }
+
+        ApplyQuantity(created, args);
+        FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " in " + where);
+    }
+
+    protected void SpawnOnGround(string className, map<string, string> args)
+    {
+        vector pos;
+        if (HasArg(args, "pos"))
+        {
+            string posText = args.Get("pos");
+            if (!DZMCP_World.TextToPos(posText, pos))
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "pos must be three numbers like '7500 0 7500', not '" + posText + "'");
+                return;
+            }
+        }
+        else
+        {
+            if (NoPlayerRefusal())
+                return;
+
+            pos = DZMCP_World.FirstPlayer().GetPosition();
+        }
+
+        Object created = DZMCP_World.SpawnOnGround(className, pos);
+        if (!created)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the engine created nothing for class '" + className + "' -- the class most likely does not exist in any loaded config");
+            return;
+        }
+
+        EntityAI asEntity;
+        if (Class.CastTo(asEntity, created))
+            ApplyQuantity(asEntity, args);
+
+        FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " on the ground at " + DZMCP_World.PosToText(created.GetPosition()) + " with no lifetime set");
+    }
+
+    // Quantity is optional everywhere it appears, and a class that has no
+    // quantity is not an error -- saying so is better than pretending it was
+    // applied.
+    protected void ApplyQuantity(EntityAI entity, map<string, string> args)
+    {
+        if (!HasArg(args, "quantity"))
+            return;
+
+        ItemBase item;
+        if (!Class.CastTo(item, entity))
+            return;
+
+        string raw = args.Get("quantity");
+        item.SetQuantity(raw.ToFloat());
+    }
+
+    // teleport: pos (required).
+    protected void VerbTeleport(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|pos|", "pos"))
+            return;
+
+        if (!HasArg(args, "pos"))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "teleport needs a pos argument like '7500 0 7500'");
+            return;
+        }
+
+        string posText = args.Get("pos");
+        vector pos;
+        if (!DZMCP_World.TextToPos(posText, pos))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "pos must be three numbers like '7500 0 7500', not '" + posText + "'");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        string from = DZMCP_World.PosToText(player.GetPosition());
+        player.SetPosition(pos);
+        FinishCommand(DZMCP_STATUS_DONE, "moved the player from " + from + " to " + DZMCP_World.PosToText(player.GetPosition()));
+    }
+
+    // set: what = health|quantity, value (required), target = player|hands.
+    //
+    // target defaults per `what` rather than to one value for both: quantity on
+    // a player is meaningless and health on empty hands is meaningless, so a
+    // single default would make one of the two combinations a trap.
+    protected void VerbSet(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|what|value|target|", "what, value, target"))
+            return;
+
+        string what = ArgOr(args, "what", "");
+        if (what != "health" && what != "quantity")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "set: what must be health or quantity, not '" + what + "'");
+            return;
+        }
+
+        if (!HasArg(args, "value"))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "set needs a value argument");
+            return;
+        }
+
+        string valueText = args.Get("value");
+        if (!DZMCP_World.IsNumeric(valueText))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "set: value must be a number, not '" + valueText + "'");
+            return;
+        }
+
+        string fallbackTarget = "player";
+        if (what == "quantity")
+            fallbackTarget = "hands";
+
+        string target = ArgOr(args, "target", fallbackTarget);
+        if (target != "player" && target != "hands")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "set: target must be player or hands, not '" + target + "'");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        float value = valueText.ToFloat();
+
+        if (target == "player")
+        {
+            if (what == "quantity")
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "set: a player has no quantity -- use target=hands to set the quantity of the held item");
+                return;
+            }
+            player.SetHealth("", "", value);
+            FinishCommand(DZMCP_STATUS_DONE, "player health set to " + value);
+            return;
+        }
+
+        EntityAI held = player.GetEntityInHands();
+        if (!held)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the player's hands are empty, so there is nothing to set");
+            return;
+        }
+
+        if (what == "health")
+        {
+            held.SetHealth("", "", value);
+            FinishCommand(DZMCP_STATUS_DONE, "health of " + held.GetType() + " in hands set to " + value);
+            return;
+        }
+
+        ItemBase item;
+        if (!Class.CastTo(item, held))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, held.GetType() + " in hands is not an item that carries a quantity");
+            return;
+        }
+
+        item.SetQuantity(value);
+        FinishCommand(DZMCP_STATUS_DONE, "quantity of " + held.GetType() + " in hands set to " + value);
+    }
+
+    // delete: class (required), radius, pos.
+    protected void VerbDelete(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|radius|pos|", "class, radius, pos"))
+            return;
+
+        string className = ArgOr(args, "class", "");
+        if (className == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "delete needs a class argument -- deleting everything nearby regardless of class is not something this verb will do");
+            return;
+        }
+
+        vector pos;
+        if (!ResolvePosition(args, pos))
+            return;
+
+        string radiusText = ArgOr(args, "radius", "0");
+        float radius = DZMCP_World.ClampRadius(radiusText.ToFloat());
+
+        array<Object> found;
+        DZMCP_World.Gather(className, pos, radius, found);
+
+        int removed = 0;
+        for (int i = 0; i < found.Count(); i++)
+        {
+            GetGame().ObjectDelete(found.Get(i));
+            removed++;
+        }
+
+        FinishCommand(DZMCP_STATUS_DONE, "deleted " + removed + " object(s) of class '" + className + "' within " + radius + "m of " + DZMCP_World.PosToText(pos));
+    }
+
+    // query: class, radius. Answers into the world block as well as the detail,
+    // so a caller can read the count without correlating a command at all.
+    protected void VerbQuery(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|radius|pos|", "class, radius, pos"))
+            return;
+
+        string className = ArgOr(args, "class", "");
+        if (className == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "query needs a class argument naming what to count");
+            return;
+        }
+
+        vector pos;
+        if (!ResolvePosition(args, pos))
+            return;
+
+        string radiusText = ArgOr(args, "radius", "0");
+        float radius = DZMCP_World.ClampRadius(radiusText.ToFloat());
+
+        array<Object> found;
+        DZMCP_World.Gather(className, pos, radius, found);
+
+        m_State.world.query_class = DZMCP_Text.Sanitize(className, ID_LEN);
+        m_State.world.query_radius = radius;
+        m_State.world.query_count = found.Count();
+
+        FinishCommand(DZMCP_STATUS_DONE, "found " + found.Count() + " object(s) of class '" + className + "' within " + radius + "m of " + DZMCP_World.PosToText(pos));
+    }
+
+    // An explicit pos, or the player's own, or a named refusal. Returns false
+    // when it has already finished the command with that refusal.
+    protected bool ResolvePosition(map<string, string> args, out vector pos)
+    {
+        pos = "0 0 0";
+
+        if (HasArg(args, "pos"))
+        {
+            string posText = args.Get("pos");
+            if (!DZMCP_World.TextToPos(posText, pos))
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "pos must be three numbers like '7500 0 7500', not '" + posText + "'");
+                return false;
+            }
+            return true;
+        }
+
+        if (NoPlayerRefusal())
+            return false;
+
+        pos = DZMCP_World.FirstPlayer().GetPosition();
+        return true;
     }
 
     // Makes the next published document long, then lets it snap back to its
@@ -667,6 +1029,45 @@ class DZMCP_BridgeCore
     // Publishing
     // -----------------------------------------------------------------------
 
+    // The world, as of this publish. Runs BEFORE the document is serialized and
+    // long before the file is opened, so it never lands inside the write window
+    // where a fault would leave a half-written file and an open handle.
+    //
+    // Published every tick rather than only in answer to a query: a snapshot a
+    // caller has to ask for is a snapshot that costs a full command round trip
+    // (a second to be claimed, a second of terminal dwell) to answer "where is
+    // the player" -- and world_state, which exists precisely to be cheap, would
+    // then be the most expensive tool in the set.
+    //
+    // The counted query is NOT here. It takes a class and a radius that only a
+    // command carries, and walking every object in a sphere once a second on
+    // the chance somebody wants it is the kind of cost that turns a 1 Hz tick
+    // into a stutter. Its answer is left in place by the verb, so it stays
+    // readable afterwards.
+    protected void RefreshWorld()
+    {
+        int players = DZMCP_World.PlayerCount();
+        m_State.world.players = players;
+
+        if (players == 0)
+        {
+            m_State.world.player_pos = "";
+            m_State.world.player_health = -1;
+            m_State.world.hands = "";
+            return;
+        }
+
+        Man player = DZMCP_World.FirstPlayer();
+        m_State.world.player_pos = DZMCP_World.PosToText(player.GetPosition());
+        m_State.world.player_health = player.GetHealth("", "");
+
+        EntityAI held = player.GetEntityInHands();
+        if (held)
+            m_State.world.hands = DZMCP_Text.Sanitize(held.GetType(), ID_LEN);
+        else
+            m_State.world.hands = "";
+    }
+
     protected void Publish()
     {
         // The counter advances only when a document actually reaches the disk.
@@ -686,6 +1087,7 @@ class DZMCP_BridgeCore
         m_State.world.errors_total = m_ErrorsTotal;
         m_State.world.pad = m_PadNext;
         m_PadNext = "";
+        RefreshWorld();
 
         // Serialized by the engine's own serializer, never assembled by hand.
         // Two independent reasons: detail and error strings carry quotes,

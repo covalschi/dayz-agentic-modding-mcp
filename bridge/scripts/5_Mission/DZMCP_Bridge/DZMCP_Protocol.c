@@ -89,6 +89,25 @@ class DZMCP_CommandState
 //                    closing brace and the channel is unreadable PERMANENTLY,
 //                    not intermittently -- which is why this is measured
 //                    before any variable-length world snapshot exists.
+//
+// From Task 6 it also carries the world itself, refreshed every tick:
+//
+//   players          how many are connected. Zero is the ordinary state on a
+//                    headless stand, and the reason every verb needing a
+//                    player refuses in words rather than doing nothing.
+//   player_pos       "x y z", the simple form -- which is exactly what
+//                    string.ToVector() reads back, so a position taken from a
+//                    snapshot can be handed straight back as an argument.
+//                    Empty when nobody is connected.
+//   player_health    the first player's health, -1 when nobody is connected
+//                    (0 is a real health value; absence needs its own).
+//   hands            config class of what the first player is holding, empty
+//                    for empty hands or no player.
+//   query_class      the last count asked for, and its answer. query_count is
+//   query_radius     -1 until a query has run, for the same reason as health:
+//   query_count      zero found is a real answer and must not read as "never
+//                    asked". This is how "is the item I spawned still there?"
+//                    gets answered a minute later.
 class DZMCP_WorldSnapshot
 {
     float tick_time;
@@ -98,6 +117,14 @@ class DZMCP_WorldSnapshot
     int errors_total;
     string pad;
 
+    int players;
+    string player_pos;
+    float player_health;
+    string hands;
+    string query_class;
+    float query_radius;
+    int query_count;
+
     void DZMCP_WorldSnapshot()
     {
         tick_time = 0;
@@ -106,6 +133,14 @@ class DZMCP_WorldSnapshot
         commands_claimed = 0;
         errors_total = 0;
         pad = "";
+
+        players = 0;
+        player_pos = "";
+        player_health = -1;
+        hands = "";
+        query_class = "";
+        query_radius = 0;
+        query_count = -1;
     }
 }
 

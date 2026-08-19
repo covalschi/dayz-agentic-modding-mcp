@@ -54,6 +54,12 @@ for _fn in (
     tools.log_verdict, tools.log_tail,
     tools.job_status, tools.job_wait, tools.job_artifacts,
     tools.bridge_build, tools.bridge_status, tools.bridge_clear,
+    # world_ready comes first on purpose: the bridge starts reading commands
+    # about 35 seconds AFTER the server reports ready (measured twice on a live
+    # stand), so it is the tool that belongs between a finished boot job and the
+    # first world command.
+    tools.world_ready, tools.world_state,
+    tools.world_spawn, tools.world_teleport, tools.world_set, tools.world_delete,
 ):
     mcp.tool()(_wrap(_fn))
 
