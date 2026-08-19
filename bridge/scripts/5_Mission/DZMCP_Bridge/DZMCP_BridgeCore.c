@@ -6,6 +6,14 @@
 // EVERY file operation in this class happens inside the 1 Hz call, never in a
 // per-frame update: a mod's frame budget is around 2 ms and serializing a JSON
 // document does not fit inside it.
+//
+// FORMATTING RULE, measured on this stand rather than assumed: an Enforce
+// statement ends at the end of its line. A line starting with "+" or "||" is
+// not a continuation -- the compiler warns "Missing ';' at the end of line",
+// then reports the next line as "Expected ',' or ')', not a '+'", and then
+// blames the CLASS DECLARATION with "Syntax error", which is where a reader
+// starts hunting. Not one of the 2810 vanilla script files begins a line with
+// "+". So: one statement, one line, however long that line has to be.
 class DZMCP_BridgeCore
 {
     // ---- limits -----------------------------------------------------------
@@ -142,9 +150,7 @@ class DZMCP_BridgeCore
         // surface and the runtime behaviour identical between the two.
         LogManager.ActionLogEnable(true);
 
-        DZMCP_Log.Info("session " + m_SessionId + " starting; watchdog "
-            + FormatSeconds(WATCHDOG_SECONDS) + "s, hard limit "
-            + FormatSeconds(HARD_LIMIT_SECONDS) + "s");
+        DZMCP_Log.Info("session " + m_SessionId + " starting; watchdog " + FormatSeconds(WATCHDOG_SECONDS) + "s, hard limit " + FormatSeconds(HARD_LIMIT_SECONDS) + "s");
 
         // Publish immediately rather than waiting a second for the first tick.
         // This is the one file write outside the 1 Hz call, and it is
@@ -216,8 +222,7 @@ class DZMCP_BridgeCore
             RecordError("a previous tick did not reach its publish -- see the script log for the fault");
             if (m_State.command.status == DZMCP_STATUS_RUNNING && m_State.command.id != "")
             {
-                FinishCommand(DZMCP_STATUS_FAILED,
-                    "the tick running this command did not complete -- see the script log");
+                FinishCommand(DZMCP_STATUS_FAILED, "the tick running this command did not complete -- see the script log");
             }
         }
 
@@ -259,27 +264,21 @@ class DZMCP_BridgeCore
 
         if (m_CmdInstant)
         {
-            FinishCommand(DZMCP_STATUS_FAILED,
-                "the immediate verb '" + m_CmdVerb + "' did not report a result within its own"
-                + " tick -- see the script log for the fault that stopped it");
+            FinishCommand(DZMCP_STATUS_FAILED, "the immediate verb '" + m_CmdVerb + "' did not report a result within its own" + " tick -- see the script log for the fault that stopped it");
             return;
         }
 
         float elapsed = now - m_CmdStartedAt;
         if (elapsed >= HARD_LIMIT_SECONDS)
         {
-            FinishCommand(DZMCP_STATUS_FAILED,
-                "verb '" + m_CmdVerb + "' hit the hard limit after " + FormatSeconds(elapsed)
-                + "s (limit " + FormatSeconds(HARD_LIMIT_SECONDS) + "s)");
+            FinishCommand(DZMCP_STATUS_FAILED, "verb '" + m_CmdVerb + "' hit the hard limit after " + FormatSeconds(elapsed) + "s (limit " + FormatSeconds(HARD_LIMIT_SECONDS) + "s)");
             return;
         }
 
         float idle = now - m_CmdProgressAt;
         if (idle >= WATCHDOG_SECONDS)
         {
-            FinishCommand(DZMCP_STATUS_FAILED,
-                "verb '" + m_CmdVerb + "' made no progress for " + FormatSeconds(idle)
-                + "s (watchdog " + FormatSeconds(WATCHDOG_SECONDS) + "s)");
+            FinishCommand(DZMCP_STATUS_FAILED, "verb '" + m_CmdVerb + "' made no progress for " + FormatSeconds(idle) + "s (watchdog " + FormatSeconds(WATCHDOG_SECONDS) + "s)");
             return;
         }
     }
@@ -322,8 +321,7 @@ class DZMCP_BridgeCore
         // try again, which is recoverable; executing it repeatedly is not.
         if (!DeleteFile(DZMCP_CMD_PATH))
         {
-            Malfunction("the mailbox was read but could not be deleted -- the command is NOT claimed"
-                + " and nothing was executed; the next tick will try again");
+            Malfunction("the mailbox was read but could not be deleted -- the command is NOT claimed" + " and nothing was executed; the next tick will try again");
             return;
         }
 
@@ -386,10 +384,8 @@ class DZMCP_BridgeCore
             if (seen == "")
                 seen = "(none)";
 
-            RecordError("refused a command from another session: id=" + id
-                + " carried " + seen + ", this session is " + m_SessionId);
-            DZMCP_Log.Info("refused command " + id + " from session " + seen
-                + "; this session is " + m_SessionId);
+            RecordError("refused a command from another session: id=" + id + " carried " + seen + ", this session is " + m_SessionId);
+            DZMCP_Log.Info("refused command " + id + " from session " + seen + "; this session is " + m_SessionId);
             return;
         }
 
@@ -432,8 +428,7 @@ class DZMCP_BridgeCore
         m_CmdInstant = false;
         m_TerminalPublishes = 0;
 
-        DZMCP_Log.Info("command " + m_State.command.id + " -> " + status
-            + ": " + m_State.command.detail);
+        DZMCP_Log.Info("command " + m_State.command.id + " -> " + status + ": " + m_State.command.detail);
     }
 
     // -----------------------------------------------------------------------
@@ -447,8 +442,7 @@ class DZMCP_BridgeCore
 
     protected bool IsKnownVerb(string verb)
     {
-        return verb == "ping" || verb == "probe_bloat"
-            || verb == "probe_stall" || verb == "probe_fault";
+        return verb == "ping" || verb == "probe_bloat" || verb == "probe_stall" || verb == "probe_fault";
     }
 
     protected void Dispatch(string verb, string raw)
@@ -463,8 +457,7 @@ class DZMCP_BridgeCore
         // verb is a loud, specific refusal, not a shrug.
         if (!IsKnownVerb(verb))
         {
-            FinishCommand(DZMCP_STATUS_FAILED,
-                "unknown verb '" + verb + "'; this build knows: " + KnownVerbs());
+            FinishCommand(DZMCP_STATUS_FAILED, "unknown verb '" + verb + "'; this build knows: " + KnownVerbs());
             return;
         }
 
@@ -474,9 +467,7 @@ class DZMCP_BridgeCore
         string parseError;
         if (!m_Json.ReadFromString(full, raw, parseError))
         {
-            FinishCommand(DZMCP_STATUS_FAILED,
-                "the command could not be parsed past its id and verb -- most likely an args value"
-                + " that is not a string: " + Excerpt(parseError));
+            FinishCommand(DZMCP_STATUS_FAILED, "the command could not be parsed past its id and verb -- most likely an args value" + " that is not a string: " + Excerpt(parseError));
             return;
         }
 
@@ -505,8 +496,7 @@ class DZMCP_BridgeCore
 
         // Unreachable while IsKnownVerb and the routing above agree. If they
         // ever drift apart, the caller is told rather than left waiting.
-        FinishCommand(DZMCP_STATUS_FAILED,
-            "verb '" + verb + "' is listed as known but has no handler in this build");
+        FinishCommand(DZMCP_STATUS_FAILED, "verb '" + verb + "' is listed as known but has no handler in this build");
     }
 
     // The first key in `args` that `allowed` does not list, or "" when every
@@ -538,8 +528,7 @@ class DZMCP_BridgeCore
         if (bad == "")
             return false;
 
-        FinishCommand(DZMCP_STATUS_FAILED,
-            "unknown argument '" + bad + "'; this verb knows: " + knownList);
+        FinishCommand(DZMCP_STATUS_FAILED, "unknown argument '" + bad + "'; this verb knows: " + knownList);
         return true;
     }
 
@@ -585,8 +574,7 @@ class DZMCP_BridgeCore
             bytes = PAD_MAX;
 
         m_PadNext = DZMCP_Text.Repeat("x", bytes);
-        FinishCommand(DZMCP_STATUS_DONE,
-            "padding exactly one state document with " + bytes + " bytes");
+        FinishCommand(DZMCP_STATUS_DONE, "padding exactly one state document with " + bytes + " bytes");
     }
 
     // Starts and never progresses, so the no-progress watchdog is the only
@@ -599,8 +587,7 @@ class DZMCP_BridgeCore
             return;
 
         m_CmdInstant = false;
-        DZMCP_Log.Info("command " + m_State.command.id
-            + " will stall on purpose until the watchdog ends it");
+        DZMCP_Log.Info("command " + m_State.command.id + " will stall on purpose until the watchdog ends it");
     }
 
     // Deliberately raises a script fault inside the tick handler.
@@ -617,8 +604,7 @@ class DZMCP_BridgeCore
         if (RefuseUnknownArgs(args, "|", "(none)"))
             return;
 
-        DZMCP_Log.Info("command " + m_State.command.id
-            + " will raise a deliberate script fault; the next tick reports what survived");
+        DZMCP_Log.Info("command " + m_State.command.id + " will raise a deliberate script fault; the next tick reports what survived");
 
         m_NeverAssigned.status = "this line dereferences a null reference on purpose";
     }
