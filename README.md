@@ -81,7 +81,8 @@ in its notes.
 | `job_wait(job_id, timeout)` | wait for a job to finish |
 | `job_artifacts(job_id)` | retrieve outputs from a completed job |
 | `bridge_build()` | pack the bridge mod, whose sources ship with this server (`bridge/`), not with your project; returns a job id. Built **unsigned** — see below |
-| `bridge_status(window)` | is the bridge inside the running game still ticking: reports the tick number and whether it advanced over `window` seconds. Succeeds only for a tick that actually moved |
+| `bridge_status(window)` | is the bridge inside the running game still ticking: reports the tick number and whether it advanced over `window` seconds. Succeeds only for a tick that actually moved, or for a stand that restarted mid-sample |
+| `bridge_clear(force, probe_window)` | discard the command stuck in the mailbox, naming what it threw away. Refuses while the bridge looks alive unless `force=True` |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`
@@ -118,8 +119,30 @@ wrote any state — which is true, and easy to mistake for a broken bridge.
 `bridge_status` also reports the command mailbox, because only the mod ever
 empties it: a command sent while the stand was down, or before the bridge was
 attached, is not discarded — it waits in the profile directory and runs at the
-first tick of the next boot. That state comes back as `stale_command`, with the
-file to delete if that is not what you want.
+first tick of the next boot. That state comes back as `stale_command`, and
+`bridge_clear()` is the way out of it. Clearing is a separate tool on purpose:
+throwing away a queued command is a decision, not something a status check
+should do behind your back. It refuses while the bridge looks alive unless you
+pass `force=True`, and either way it reports the command id it discarded.
+
+### What `bridge_status` can tell apart
+
+The tick alone is not enough to judge a bridge, because it restarts at 0 every
+boot while the state file survives in the profile directory. Every answer
+carries the channel's own verdict in `heartbeat`, and the four are genuinely
+different facts:
+
+| `state` | `heartbeat` | meaning |
+|---|---|---|
+| `alive` | `growing` | the tick moved within one session — the only `ok: true` liveness answer |
+| `restarted` | `restarted` | a new world came up between the two samples: alive, **not** frozen, and anything sent to the old session is gone |
+| `frozen` | `stalled` | the same world seen twice, not moving — a script-side problem, so `log_verdict` is the next step |
+| `unknown` | `unmeasurable` | a sample could not be read (or `window=0`): no comparison was made. **Not** a diagnosis — call again |
+
+`no_server`, `stale_command`, `no_state_file`, `unreadable_state` and
+`outdated_bridge` come before any of that: nothing is running, a command is
+wedged, the mod is not loaded, its file never parses, or the file parses but
+predates this server's protocol (rebuild it with `bridge_build`).
 
 ## Known limitations
 

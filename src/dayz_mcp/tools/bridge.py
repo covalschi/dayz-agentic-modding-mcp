@@ -24,12 +24,20 @@ report.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 import time
 from pathlib import Path
 
-from ..bridge.channel import CMD_FILENAME, STATE_FILENAME, Channel
+from ..bridge.channel import (
+    CMD_FILENAME,
+    HEARTBEAT_GROWING,
+    HEARTBEAT_RESTARTED,
+    HEARTBEAT_UNMEASURABLE,
+    STATE_FILENAME,
+    Channel,
+)
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..packer import pack_one
@@ -301,11 +309,15 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                         mailbox. Its own answer because the remedy is its own:
                         nothing but the mod removes that file, and the next
                         boot executes it instead of discarding it.
-      no_state_file /   the server is up but the mod never published anything --
-      unreadable_state  almost always "the bridge is not in -serverMod", or was
-                        never built. Told apart because the fixes differ.
-      alive / frozen /  a snapshot exists; the tick decides. Only a tick that
-      unknown           advanced returns ok.
+      no_state_file /   the server is up but nothing readable came back.
+      outdated_bridge / Three fixes, so three answers: the mod is not loaded;
+      unreadable_state  the mod predates this server's protocol; the file is
+                        there but never parses.
+      alive / restarted a comparison was made. `alive` means the tick moved;
+      / frozen /        `restarted` means a new world came up mid-sample (also
+      unknown           alive, and NOT frozen); `frozen` means the same world
+                        was seen twice without moving; `unknown` means no
+                        comparison could be made. Only the first two return ok.
     """
     guard = require_project()
     if guard:
@@ -321,6 +333,10 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         "state_file": str(state_file),
         "mailbox": mailbox,
         "window": window,
+        # The channel's own verdict, passed through unchanged rather than
+        # re-spelled: "growing" / "stalled" / "restarted" / "unmeasurable".
+        # None on the answers that never got as far as measuring anything.
+        "heartbeat": None,
         "tick": None,
         "advancing": None,
     }
@@ -339,9 +355,9 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                 f"{mailbox['path']} for {mailbox['age_seconds']}s -- nothing can claim it "
                 "while the stand is down, and it will be executed by the first tick of the "
                 "NEXT boot rather than expiring",
-                hint=f"delete {mailbox['path']} before starting the server, unless that "
+                hint="discard it with bridge_clear() before starting the server, unless that "
                      "command really is meant to run on the next boot; then server_start and "
-                     "bridge_status again",
+                     f"bridge_status again (the file itself is {mailbox['path']})",
             )
         return _not_alive(
             "no_server",
@@ -353,71 +369,166 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
         )
 
     # heartbeat() samples the tick at both ends of `window`, tolerating the
-    # torn reads that come with a mod that cannot write atomically.
-    channel = Channel(profiles)
-    growing, tick = channel.heartbeat(window)
+    # torn reads that come with a mod that cannot write atomically, and reports
+    # FOUR outcomes rather than a bool. Each one gets its own answer here --
+    # collapsing "could not take the second sample" into "the tick did not
+    # move" is how a measurement failure became a diagnosis, and sent a reader
+    # hunting script errors that were never there.
+    status, tick = Channel(profiles).heartbeat(window)
+    observed = {**base, "heartbeat": status, "tick": tick}
 
-    if tick <= 0:
-        # heartbeat reports 0 both for "nothing readable at either end" and for
-        # a snapshot whose tick genuinely IS 0, and the two deserve opposite
-        # answers: one sends the reader hunting script errors, the other is a
-        # perfectly well-formed file. One extra read settles it.
-        snapshot = channel.read_state()
-        if snapshot is not None:
-            return _not_alive(
-                "unknown",
-                {**base, "tick": snapshot.tick},
-                f"the state file reads back cleanly with tick {snapshot.tick}, but no two "
-                "comparable samples were obtained across the window, so whether the tick is "
-                "advancing is unknown",
-                hint=_window_hint(),
-            )
-        if state_file.exists():
-            return _not_alive(
-                "unreadable_state",
-                base,
-                f"{state_file} exists but no readable snapshot could be taken from it",
-                hint="a single torn read is ordinary and already retried; a file that never "
-                     "parses means the mod is writing something it cannot finish -- check "
-                     "log_verdict and log_tail for script errors, and rebuild with bridge_build",
-            )
-        waiting = ""
-        if mailbox["present"]:
-            # The bridge is not loaded, so nothing will ever claim this -- and
-            # the moment the wiring is fixed, the first tick runs a command
-            # sent long before. Better said here than discovered then.
-            waiting = (
-                f"; a command has also been waiting unclaimed in {mailbox['path']} for "
-                f"{mailbox['age_seconds']}s, and it will run at the first tick once the "
-                "bridge does load"
-            )
-        return _not_alive(
-            "no_state_file",
-            base,
-            f"the server is running but the bridge has never written {state_file}{waiting}",
-            hint=f"build it with bridge_build, then let the stand load it: {wiring_instructions()}",
-        )
-
-    observed = {**base, "tick": tick}
-    if growing:
+    if status == HEARTBEAT_GROWING:
         return ok({"state": "alive", "alive": True, **observed, "advancing": True})
 
+    if status == HEARTBEAT_RESTARTED:
+        # A DIFFERENT world published between the two samples. Alive, and the
+        # exact opposite of frozen -- but its own answer rather than a flavour
+        # of "alive", because two things follow that "alive" would hide:
+        # nothing was measured about movement within the new session, and
+        # anything sent to the previous one died with it.
+        return ok(
+            {
+                "state": "restarted", "alive": True, **observed, "advancing": None,
+                "note": "a new world came up between the two samples -- the tick belongs to "
+                        "that new session and was deliberately not compared with the old "
+                        "one. Any command sent to the previous session is gone with it.",
+            }
+        )
+
+    if status == HEARTBEAT_UNMEASURABLE:
+        if tick > 0:
+            # One sample came back, the other did not. There IS a tick; what
+            # there is not is a comparison.
+            return _not_alive(
+                "unknown",
+                observed,
+                f"read one sample at tick {tick}, but the second could not be read, so "
+                "whether the tick is advancing was not measured",
+                hint=_window_hint(),
+            )
+        return _no_snapshot_answer({**base, "heartbeat": status}, state_file, mailbox)
+
+    # HEARTBEAT_STALLED: two samples, the same world, the same tick.
     if window <= 0:
         return _not_alive(
             "unknown",
             observed,
-            f"the bridge published tick {tick}, but with window=0 there is no second sample "
-            "to compare it against, so whether it is still advancing is unknown",
+            f"the bridge published tick {tick}, but with window=0 the two samples are taken "
+            "back to back, which cannot show movement either way",
             hint=_window_hint(),
         )
 
     return _not_alive(
         "frozen",
         {**observed, "advancing": False},
-        f"the bridge's tick is stuck at {tick} over {window}s -- the state file is there, but "
-        "nothing inside the game is updating it",
+        f"the bridge's tick is stuck at {tick} over {window}s -- the same world was observed "
+        "twice and did not move, so the state file is there while nothing inside the game "
+        "updates it",
         hint="the server process is alive while its script side is not: look for script errors "
-             "with log_verdict and log_tail, then restart with server_stop and server_start. "
-             "Call bridge_status once more first -- a single torn read at the wrong moment can "
-             "also look like a stuck tick",
+             "with log_verdict and log_tail, then restart with server_stop and server_start",
     )
+
+
+def _no_snapshot_answer(data: dict, state_file: Path, mailbox: dict) -> Result:
+    """Nothing readable came back at all. Three different reasons, three
+    different fixes, and getting this wrong is expensive in both directions."""
+    if state_file.exists():
+        if _predates_the_session_contract(state_file):
+            # The one cost of making session_id required. A state document that
+            # parses cleanly but has no session_id was written by a bridge mod
+            # older than this server -- calling that "the mod is writing
+            # something it cannot finish" is simply false, and sends the reader
+            # to log_verdict and a rebuild of their own mod instead of ours.
+            return _not_alive(
+                "outdated_bridge",
+                data,
+                f"{state_file} parses, but carries no session_id -- it was written by a "
+                "bridge mod older than this server, which cannot tell a restart from a "
+                "freeze and is therefore not trusted",
+                hint="rebuild the bridge with bridge_build and restart the server; nothing "
+                     "is wrong with the project's own mod",
+            )
+        return _not_alive(
+            "unreadable_state",
+            data,
+            f"{state_file} exists but no readable snapshot could be taken from it",
+            hint="a single torn read is ordinary and already retried; a file that never "
+                 "parses means the mod is writing something it cannot finish -- check "
+                 "log_verdict and log_tail for script errors, and rebuild with bridge_build",
+        )
+
+    waiting = ""
+    if mailbox["present"]:
+        # The bridge is not loaded, so nothing will ever claim this -- and the
+        # moment the wiring is fixed, the first tick runs a command sent long
+        # before. Better said here than discovered then.
+        waiting = (
+            f"; a command has also been waiting unclaimed in {mailbox['path']} for "
+            f"{mailbox['age_seconds']}s, and it will run at the first tick once the "
+            "bridge does load (bridge_clear discards it)"
+        )
+    return _not_alive(
+        "no_state_file",
+        data,
+        f"the server is running but the bridge has never written {state_file}{waiting}",
+        hint=f"build it with bridge_build, then let the stand load it: {wiring_instructions()}",
+    )
+
+
+def _predates_the_session_contract(state_file: Path) -> bool:
+    """Whether the state file is a COMPLETE document from an older protocol
+    rather than a torn or corrupt one.
+
+    A torn write is a truncated file: it fails `json.loads` outright, so it
+    cannot reach the "complete but missing a field" verdict here. Requiring a
+    parsed object that HAS `tick` and lacks `session_id` is therefore a
+    statement about the writer's vintage, not about this particular read.
+    """
+    try:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(raw, dict) and "tick" in raw and "session_id" not in raw
+
+
+def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAULT) -> Result:
+    """Discard whatever command is sitting in the mailbox.
+
+    The remedy for `bridge_status`'s `stale_command`: only the MOD ever empties
+    the mailbox (claiming a command IS deleting the file), so a command sent
+    while the stand was down, or before the bridge was wired into -serverMod,
+    is never claimed and never expires -- it blocks every later send and then
+    runs at the first tick of whatever boots next.
+
+    Its own tool, and never a side effect of asking for status: throwing away a
+    queued command is a decision, and `bridge_status` reporting the wedge must
+    not be the thing that silently resolves it.
+
+    Refuses when the bridge looks alive (the channel probes for `probe_window`
+    seconds and treats "growing" or "restarted" as alive), because a running
+    mod could claim that command at any moment and destroying live in-flight
+    work is worse than leaving the wedge. `force=True` overrides that, and the
+    heartbeat it overrode is reported either way.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+
+    probe_window = max(0.0, min(probe_window, STATUS_WINDOW_MAX))
+    profiles = server_profiles_dir()
+    result = Channel(profiles).clear_mailbox(force=force, probe_window=probe_window)
+    if not result.ok:
+        # The channel's own refusals ("already empty", "looks alive, pass
+        # force=True") already name the path and the way out; re-wording them
+        # here would only create a second version of the same message.
+        return result
+
+    data = dict(result.data or {})
+    discarded = data.get("discarded")
+    # The id, promoted out of the payload: "which command did I just throw
+    # away" is the question a caller actually has, and making them dig it out
+    # of a nested dict invites not checking at all.
+    data["discarded_id"] = discarded.get("id") if isinstance(discarded, dict) else None
+    data["mailbox"] = str(profiles / CMD_FILENAME)
+    data["forced"] = force
+    return ok(data)

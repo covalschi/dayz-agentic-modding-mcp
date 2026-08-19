@@ -17,6 +17,7 @@ import pytest
 
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
+from dayz_mcp.errors import ok as errors_ok
 from dayz_mcp.bridge.channel import CMD_FILENAME, STATE_FILENAME
 from dayz_mcp.packer import PackResult
 from dayz_mcp.tools import bridge, session
@@ -64,8 +65,13 @@ def fake_bridge_sources(tmp_path: Path) -> Path:
     return repo
 
 
-def write_state(profiles: Path, tick: int) -> None:
+def write_state(profiles: Path, tick: int, session_id: str = "boot-1") -> None:
     """Write a state snapshot the way a reader must be able to consume it.
+
+    `session_id` is REQUIRED on the wire (protocol.BridgeState): the mod's tick
+    restarts at 0 every boot while this file survives in the profile directory,
+    so a tick comparison is only meaningful within one session. Tests that care
+    about a restart pass a different one for the second boot.
 
     Deliberately atomic (temp file + replace) even though the real mod cannot
     be: these tests are about liveness, not about torn-read tolerance, which
@@ -73,9 +79,25 @@ def write_state(profiles: Path, tick: int) -> None:
     """
     tmp = profiles / f".state-{tick}.tmp"
     tmp.write_text(
-        json.dumps({"tick": tick, "command": None, "errors": [], "world": {}}), encoding="utf-8"
+        json.dumps({
+            "tick": tick, "session_id": session_id,
+            "command": None, "errors": [], "world": {},
+        }),
+        encoding="utf-8",
     )
-    os.replace(tmp, profiles / STATE_FILENAME)
+    # Windows denies a replace while the destination is open for reading, and
+    # these tests deliberately have a reader sampling the same file a few times
+    # a second. That is an artifact of writing atomically -- the real mod
+    # overwrites in place and never hits it -- so retry briefly rather than
+    # letting a ticker thread die mid-test.
+    for attempt in range(50):
+        try:
+            os.replace(tmp, profiles / STATE_FILENAME)
+            return
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.005)
 
 
 # --- bridge_build ------------------------------------------------------------
@@ -678,8 +700,15 @@ def test_bridge_status_tells_an_unreadable_state_file_from_a_missing_one(tmp_pat
 
 def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_path, monkeypatch):
     """"Parsed, and the tick is 0" is a different fact from "nothing parseable
-    in there". Reporting the second sends the reader off to hunt script errors
-    and rebuild the mod for a file that is perfectly well-formed."""
+    in there", and reporting the second would send the reader off to rebuild a
+    mod whose file is perfectly well-formed.
+
+    The tick-0 ambiguity is now settled upstream: with session_id on the wire,
+    two readable samples of the same session with the same tick are `stalled`
+    whatever that tick happens to be, so 0 reaches the ordinary frozen answer
+    instead of a reason about readability. That IS the truth here -- a
+    published tick that does not move is frozen -- so the assertions are about
+    which diagnosis is NOT reached."""
     session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
@@ -690,10 +719,11 @@ def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_pat
 
     r = tools.bridge_status(window=0.2)
     assert not r.ok
-    assert r.data["state"] != "unreadable_state"
+    assert r.data["state"] not in ("unreadable_state", "outdated_bridge", "no_state_file")
+    assert r.data["state"] == "frozen"
+    assert r.data["heartbeat"] == "stalled"
     assert r.data["tick"] == 0
-    assert "rebuild" not in r.hint
-    assert "log_verdict" not in r.hint
+    assert "rebuild" not in r.hint  # nothing is wrong with the mod's build
 
 
 def test_bridge_status_reports_a_frozen_tick_as_not_alive(tmp_path, monkeypatch):
@@ -803,7 +833,12 @@ async def test_bridge_tools_are_registered_with_their_real_parameters():
     listed = {t.name: t for t in await mcp_server.mcp.list_tools()}
     assert "bridge_build" in listed
     assert "bridge_status" in listed
+    assert "bridge_clear" in listed
     assert "window" in listed["bridge_status"].inputSchema["properties"]
+    clear_params = listed["bridge_clear"].inputSchema["properties"]
+    assert "force" in clear_params and "probe_window" in clear_params
+    # The destructive path is opt-in, and the schema is where a caller sees it.
+    assert clear_params["force"].get("default") is False
 
 
 @pytest.mark.anyio
@@ -816,3 +851,222 @@ async def test_bridge_status_through_fastmcp_returns_the_envelope(tmp_path):
     assert structured["ok"] is False
     assert structured["hint"]
     assert structured["data"]["state"] == "no_server"
+
+
+# --- The channel's session-aware heartbeat: four outcomes, four answers -------
+
+
+def test_bridge_status_tells_a_restart_from_a_freeze(tmp_path, monkeypatch):
+    """The tick restarts at 0 every boot while the state file survives in the
+    profile directory, so a naive comparison reads a freshly booted, healthy
+    bridge as dead. A changed session id between the two samples means a NEW
+    world came up -- alive, and emphatically not frozen."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    write_state(profiles, tick=5000, session_id="boot-before")
+
+    def restart():
+        time.sleep(0.05)
+        write_state(profiles, tick=1, session_id="boot-after")
+
+    worker = threading.Thread(target=restart, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.3)
+    finally:
+        worker.join(timeout=5)
+
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["state"] == "restarted"
+    assert r.data["alive"] is True
+    assert r.data["heartbeat"] == "restarted"
+    assert r.data["tick"] == 1  # the NEW session's own tick, never compared to the old
+    # Nothing was measured about movement WITHIN the new session.
+    assert r.data["advancing"] is None
+
+
+def test_bridge_status_says_it_could_not_measure_rather_than_frozen(tmp_path, monkeypatch):
+    """A failed second sample is a measurement failure, not a diagnosis.
+    Reporting it as "frozen" is what sent an agent hunting script errors that
+    were never there."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+
+    write_state(profiles, tick=77)
+
+    def vanish():
+        time.sleep(0.05)
+        (profiles / STATE_FILENAME).unlink(missing_ok=True)
+
+    worker = threading.Thread(target=vanish, daemon=True)
+    worker.start()
+    try:
+        r = tools.bridge_status(window=0.4)
+    finally:
+        worker.join(timeout=5)
+
+    assert not r.ok
+    assert r.data["state"] == "unknown", r.data
+    assert r.data["heartbeat"] == "unmeasurable"
+    assert r.data["tick"] == 77  # the one sample that WAS read
+    assert r.data["advancing"] is None
+    # The frozen diagnosis, and its script-error hunt, must not be reached here.
+    assert "frozen" not in r.error
+    assert "log_verdict" not in r.hint
+
+
+def test_bridge_status_names_a_bridge_mod_older_than_this_server(tmp_path, monkeypatch):
+    """session_id is required on the wire, and required only works if its
+    absence is diagnosable. A state document that parses perfectly but has no
+    session_id was written by a bridge mod predating this server -- saying "the
+    mod is writing something it cannot finish" is false, and sends the reader to
+    log_verdict and a rebuild of the wrong thing."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    session.set_server_pid(4321, "DayZDiag_x64.exe")
+    monkeypatch.setattr("dayz_mcp.tools.bridge.is_alive", lambda pid, image="": True)
+    (profiles / STATE_FILENAME).write_text(
+        json.dumps({"tick": 12, "command": None, "errors": [], "world": {}}), encoding="utf-8"
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert not r.ok
+    assert r.data["state"] == "outdated_bridge", r.data
+    assert "session_id" in r.error
+    assert "bridge_build" in r.hint
+    assert "cannot finish" not in r.error  # that is the OTHER diagnosis
+
+
+# --- bridge_clear -------------------------------------------------------------
+
+
+def test_bridge_clear_refuses_without_an_open_project():
+    session.reset()
+    r = tools.bridge_clear()
+    assert not r.ok
+    assert "project_open" in r.hint
+
+
+def test_bridge_clear_on_an_empty_mailbox_says_so(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+
+    r = tools.bridge_clear()
+    assert not r.ok
+    assert "empty" in r.error
+    assert r.hint
+
+
+def test_bridge_clear_discards_a_wedged_command_and_names_it(tmp_path):
+    """The remedy for the wedge bridge_status reports. WHICH command was thrown
+    away is the whole point: an agent has to be able to tell whether it was the
+    one it cared about."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    mailbox = profiles / CMD_FILENAME
+    mailbox.write_text(
+        json.dumps({"id": "spawn-17", "verb": "spawn", "args": {"type": "Apple"}}), encoding="utf-8"
+    )
+
+    r = tools.bridge_clear(probe_window=0.1)
+    assert r.ok, f"{r.error} | {r.hint}"
+    assert r.data["discarded_id"] == "spawn-17"
+    assert r.data["discarded"]["verb"] == "spawn"
+    assert r.data["heartbeat"] == "unmeasurable"  # nothing running, nothing to measure
+    assert not mailbox.exists()
+
+    # And the channel is usable again: there is nothing left to clear.
+    assert not tools.bridge_clear(probe_window=0.1).ok
+
+
+def test_bridge_clear_refuses_a_live_bridge_unless_forced(tmp_path):
+    """Discarding a command a running mod could claim any moment is worse than
+    the wedge. The destructive path exists, but it has to be asked for."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text(
+        '{"id": "ping-3", "verb": "ping", "args": {}}', encoding="utf-8"
+    )
+
+    stop = threading.Event()
+
+    def ticker():
+        n = 1
+        while not stop.is_set():
+            write_state(profiles, tick=n)
+            n += 1
+            time.sleep(0.02)
+
+    write_state(profiles, tick=1)
+    worker = threading.Thread(target=ticker, daemon=True)
+    worker.start()
+    try:
+        refused = tools.bridge_clear(probe_window=0.3)
+        assert not refused.ok
+        assert "force" in refused.hint
+        assert (profiles / CMD_FILENAME).exists(), "a refusal still deleted the command"
+
+        forced = tools.bridge_clear(force=True, probe_window=0.3)
+        assert forced.ok, f"{forced.error} | {forced.hint}"
+        assert forced.data["discarded_id"] == "ping-3"
+        # What the force overrode stays on the record.
+        assert forced.data["heartbeat"] == "growing"
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+
+    assert not (profiles / CMD_FILENAME).exists()
+
+
+def test_bridge_clear_clamps_its_probe_window(tmp_path, monkeypatch):
+    """It blocks for probe_window like every other sampling call here, so it
+    obeys the same ceiling."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text('{"id": "x", "verb": "x", "args": {}}', encoding="utf-8")
+
+    captured = {}
+
+    def fake_clear(self, force=False, probe_window=3.0):
+        captured["force"] = force
+        captured["probe_window"] = probe_window
+        return errors_ok({"discarded": {"id": "x"}, "heartbeat": "unmeasurable"})
+
+    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.clear_mailbox", fake_clear)
+    tools.bridge_clear(probe_window=10_000)
+    assert captured["probe_window"] == bridge.STATUS_WINDOW_MAX
+    assert captured["force"] is False
+
+
+def test_stale_command_points_at_the_tool_that_fixes_it(tmp_path):
+    """The state and its remedy shipped a round apart; they have to meet."""
+    session.reset()
+    root = make_project(tmp_path)
+    profiles = with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    (profiles / CMD_FILENAME).write_text(
+        '{"id": "c-1", "verb": "ping", "args": {}}', encoding="utf-8"
+    )
+
+    r = tools.bridge_status(window=0.1)
+    assert r.data["state"] == "stale_command"
+    assert "bridge_clear" in r.hint
