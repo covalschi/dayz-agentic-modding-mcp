@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -103,6 +104,43 @@ def udp_port_holders(port: int) -> list[int]:
         except ValueError:
             continue
     return sorted(set(holders))
+
+
+def process_mods_tail(pid: int) -> str:
+    """The @Name basenames of `pid`'s -mod= argument, ";"-joined, or "".
+
+    The one cheap field that tells two DayZ stands apart on one machine: this
+    project learned that the hard way, when a neighbouring stand's server on
+    the same port and the same -profiles directory was mistaken for an engine
+    relaunch of ours -- every field of its command line matched except -mod=.
+    Used to IDENTIFY a process to a human deciding whether to stop it, so it
+    must never guess: evidence when present, "" on any failure (dead pid,
+    access denied, no -mod= argument, no PowerShell), and never an exception
+    on the refusal path that calls it.
+
+    Basenames only. The full paths are noise for recognition; the @Name
+    segments are what a stand is known by.
+    """
+    if os.name != "nt" or pid <= 0:
+        return ""
+    exe = shutil.which("pwsh") or "powershell.exe"
+    try:
+        out = subprocess.run(  # noqa: S603 - pid is an int, no user input
+            [exe, "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}').CommandLine"],
+            capture_output=True, text=True, check=False, timeout=15,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not out:
+        return ""
+    matched = re.search(r'-mod=("([^"]*)"|\S+)', out)
+    if not matched:
+        return ""
+    value = matched.group(2) if matched.group(2) is not None else matched.group(1)
+    names = [seg.rstrip("\\/").replace("/", "\\").rsplit("\\", 1)[-1]
+             for seg in value.split(";") if seg.strip()]
+    return ";".join(n for n in names if n)
 
 
 def is_alive(pid: int, image: str = "") -> bool:

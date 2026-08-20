@@ -8,7 +8,7 @@ from ..bridge.channel import CMD_FILENAME, STATE_FILENAME
 from ..compilecheck import client_cmd, judge
 from ..errors import Result, fail, ok
 from ..paths import GAME_PROBE
-from ..procs import is_alive, spawn, stop, udp_port_holders
+from ..procs import is_alive, process_mods_tail, spawn, stop, udp_port_holders
 from . import session
 from .project import require_project
 
@@ -207,9 +207,11 @@ def server_start(timeout: float = 420) -> Result:
     stand is shared -- one machine, one port, one profile directory -- and
     booting into a held port produces a server that dies during world load with
     nothing in its own log to say why. If the holder is a server this session
-    started, the hint says to stop it; if it is anyone else's, the hint says to
-    find out whose before stopping anything, because this tool only ever stops a
-    server it started itself.
+    started, the hint says to stop it with server_stop. If it is anyone else's,
+    the refusal identifies it (pid and -mod= tail) and offers stopping it as the
+    caller's own act -- the owner authorised stopping a neighbouring stand that
+    blocks a live run -- but this tool never auto-stops a process it did not
+    start.
 
     Readiness has two independent signals, and the summary always names which
     one answered. `expect.ready_line` appearing in a log written by THIS run
@@ -275,20 +277,33 @@ def server_start(timeout: float = 420) -> Result:
     # presented. The holder is NOT ours to stop: this refuses and names it.
     busy = udp_port_holders(prof.machine.port)
     if busy:
-        # Whose it is decides what to do about it, and only one of the two
-        # answers is ours to act on.
+        # Whose it is decides what to do about it. A holder this session
+        # started is ours, and server_stop is the way out. Anyone else's may
+        # ALSO be stopped -- the owner authorised stopping a neighbouring
+        # stand that blocks a live run -- but that decision authorises the
+        # CALLER, not this machine: the tool never auto-stops what it did not
+        # start, and the offer travels with identification (the pid, and the
+        # -mod= tail where it can be read), because the caller is choosing
+        # what to kill. The -mod= tail is the one cheap field that tells two
+        # stands apart; this project once mistook a neighbour's server for a
+        # relaunch of its own on every other field.
         ours = [holder for holder in busy if session.known_pid(holder)]
         if ours:
             hint = (f"that is a server this session started -- call server_stop(pid={ours[0]}) "
                     "and try again")
+            described = ", ".join(str(x) for x in busy)
         else:
-            hint = ("something else is already using this stand's port -- another agent's "
-                    "server, or one started outside these tools. Find out whose it is "
-                    "before stopping anything (this tool only ever stops a server it "
-                    "started itself), or give this project its own machine.port")
+            described = ", ".join(
+                f"{holder} (mods: {process_mods_tail(holder) or 'unknown'})" for holder in busy
+            )
+            hint = ("another stand holds this port -- the mod list above says whose. The "
+                    "owner has authorised stopping a neighbouring stand when it blocks a "
+                    f"live run: check the mods are not a stand you need, then stop it "
+                    f"yourself (taskkill /PID {busy[0]} /F) and retry, or give this "
+                    "project its own machine.port. This tool will not stop it for you")
         return fail(
-            f"udp port {prof.machine.port} is already held by pid(s) "
-            f"{', '.join(str(x) for x in busy)}, so this server would not get it",
+            f"udp port {prof.machine.port} is already held by pid(s) {described}, "
+            "so this server would not get it",
             hint=hint,
         )
 

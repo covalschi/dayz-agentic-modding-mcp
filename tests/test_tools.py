@@ -17,6 +17,7 @@ from dayz_mcp.packer import PackResult
 from dayz_mcp.procs import is_alive as procs_is_alive
 from dayz_mcp.procs import spawn as procs_spawn
 from dayz_mcp.procs import stop as procs_stop
+from dayz_mcp.procs import process_mods_tail as procs_process_mods_tail
 from dayz_mcp.procs import udp_port_holders as procs_udp_port_holders
 from dayz_mcp.profile import load_profile
 from dayz_mcp.tools import jobs_api, lifecycle, session
@@ -1439,8 +1440,11 @@ def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypat
     machine, one port, one profile directory. Booting into a held port produces
     a server that dies mid-world-load with nothing in its own log to say why.
 
-    The holder is not ours to stop -- it may be another agent's server -- so
-    this refuses and NAMES it rather than clearing the way."""
+    The owner has since authorised stopping a neighbouring stand that blocks a
+    live run, so the stranger branch now OFFERS that -- but the offer must come
+    with identification (the pid, and the -mod= tail where it can be read),
+    because the caller is choosing what to kill. The tool itself still never
+    auto-stops what it did not start."""
     session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
@@ -1449,6 +1453,8 @@ def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypat
     tools.project_open(str(root))
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [4242])
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.process_mods_tail",
+                        lambda pid: "@CF;@Dep;@SomeDependency")
     spawned = []
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn",
                         lambda cmd, cwd: spawned.append(cmd) or 1)
@@ -1458,8 +1464,14 @@ def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypat
     assert "4242" in r.error
     assert "2302" in r.error
     assert not spawned, "it started a server into a port it knew was taken"
-    # Not an invitation to go killing things.
-    assert "only ever stops a server it started" in r.hint
+    # Identification travels WITH the offer: the mod set is the one cheap field
+    # that tells two stands on this machine apart.
+    assert "@SomeDependency" in r.error
+    # The offer itself, and its limits: stopping is the caller's act (the tool
+    # never auto-stops a stranger), and the alternative is still named.
+    assert "taskkill" in r.hint
+    assert "4242" in r.hint
+    assert "machine.port" in r.hint
 
     # A holder this session DID start is a different situation with a different
     # answer: it is ours, and server_stop is the way out.
@@ -1467,6 +1479,72 @@ def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypat
     mine = tools.server_start(timeout=5)
     assert not mine.ok
     assert "server_stop(pid=4242)" in mine.hint
+
+
+def test_the_port_refusal_degrades_to_pid_only_when_the_command_line_is_unreadable(tmp_path, monkeypatch):
+    """Identification is best-effort: a pid that died between netstat and the
+    lookup, or an access-denied process, yields no -mod= tail. The offer stands
+    -- on the pid alone -- and nothing invents a mod list."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [4242])
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.process_mods_tail", lambda pid: "")
+
+    r = tools.server_start(timeout=5)
+    assert not r.ok
+    assert "4242" in r.error
+    assert "mods: unknown" in r.error
+    assert "taskkill" in r.hint
+
+
+def test_process_mods_tail_extracts_basenames_from_a_real_command_line(monkeypatch):
+    """Parsed against the shape of a real stand's command line (quoted exe,
+    -mod= with absolute paths). Basenames only: the full paths are noise, the
+    @Name segments are what a human recognises a stand by."""
+    line = (
+        '"C:\\game\\DayZDiag_x64.exe" -server -config=C:\\stand\\serverDZ.cfg -port=2302 '
+        "-mod=C:\\ws\\@CF;C:\\ws\\@Dep;E:\\proj\\build\\@MyMod "
+        "-profiles=C:\\stand\\profiles"
+    )
+
+    class Done:
+        returncode = 0
+        stdout = line + "\n"
+
+    monkeypatch.setattr("dayz_mcp.procs.subprocess.run", lambda *a, **kw: Done())
+    monkeypatch.setattr("dayz_mcp.procs.os.name", "nt")
+    assert procs_process_mods_tail(4242) == "@CF;@Dep;@MyMod"
+
+
+def test_process_mods_tail_returns_empty_on_any_failure(monkeypatch):
+    """Evidence when present, silence when not -- never a guess and never an
+    exception on the refusal path that uses it."""
+    monkeypatch.setattr("dayz_mcp.procs.os.name", "nt")
+
+    class NoLine:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr("dayz_mcp.procs.subprocess.run", lambda *a, **kw: NoLine())
+    assert procs_process_mods_tail(4242) == ""
+
+    class NoMods:
+        returncode = 0
+        stdout = "C:\\game\\DayZDiag_x64.exe -server -port=2302\n"
+
+    monkeypatch.setattr("dayz_mcp.procs.subprocess.run", lambda *a, **kw: NoMods())
+    assert procs_process_mods_tail(4242) == ""
+
+    def boom(*a, **kw):
+        raise OSError("powershell missing")
+
+    monkeypatch.setattr("dayz_mcp.procs.subprocess.run", boom)
+    assert procs_process_mods_tail(4242) == ""
 
 
 def test_the_port_is_the_readiness_signal_when_no_ready_line_is_declared(tmp_path, monkeypatch):
