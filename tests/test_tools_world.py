@@ -346,3 +346,50 @@ def test_world_ready_is_registered_and_so_are_the_world_tools():
     names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert {"world_spawn", "world_teleport", "world_set", "world_delete",
             "world_state", "world_ready"} <= names
+
+
+# --------------------------------------------------------------- world_action
+
+def test_world_action_stringifies_and_omits_like_every_other_verb(live):
+    world.world_action("ActionEatBig", target_class="Apple", radius=25)
+
+    cmd = live.sent[-1]
+    assert cmd.verb == "action"
+    assert cmd.args == {"action": "ActionEatBig", "target_class": "Apple", "radius": "25"}
+    for value in cmd.args.values():
+        assert isinstance(value, str)
+
+
+def test_world_action_returns_the_mods_refusal_verbatim(live):
+    """The five classified refusals arrive as the mod's own sentence; the one
+    that matters most -- Can() said no -- is a successful TEST, reported as a
+    failed command."""
+    live.answer = CommandState(
+        id="x", status="failed",
+        detail="refused: the action's own Can() said no -- its conditions did not hold "
+               "for this player, target and item",
+        finished_at=50.0)
+
+    result = world.world_action("ActionEatBig")
+
+    assert not result.ok
+    assert "Can() said no" in result.error
+    assert result.data["status"] == "failed"
+
+
+def test_world_action_success_reports_the_mods_completion_detail(live):
+    live.answer = CommandState(id="x", status="done",
+                               detail="the action started and has ended -- the manager released it",
+                               finished_at=61.0)
+
+    result = world.world_action("ActionEatBig")
+
+    assert result.ok
+    assert "manager released it" in result.data["detail"]
+
+
+def test_world_action_is_registered():
+    from dayz_mcp import server as mcp_server
+
+    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
+    assert "world_action" in names

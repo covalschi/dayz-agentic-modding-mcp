@@ -392,6 +392,44 @@ def world_set(what: str, value: float, target: str = "",
     return _run("set", {"what": what, "value": value, "target": target or None}, timeout)
 
 
+def world_action(action_class: str, target_class: str = "", subject: str = "",
+                 radius: float = 30.0, pos: str = "",
+                 timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Run a mod's own action through the engine's gate, on the server.
+
+    `action_class` is the action's script class name. There is deliberately no
+    verb dictionary: the same word means different things in a mod depending on
+    context, so applicability is decided by the ACTION'S OWN `Can()` -- and its
+    refusal is a meaningful test result, not a tool failure. The distinguishable
+    refusals, classified in the mod before the engine is touched: the manager is
+    busy; the player is already acting; the player is sprinting; the action
+    class is unknown; and "the action's own Can() said no" -- the last one being
+    the answer this tool exists to produce.
+
+    `target_class` names the config class of the object to aim at (resolved to
+    the first match near the player); many actions take no target and it can be
+    omitted. `subject` optionally names a Man-derived entity class to act AS
+    instead of the connected player -- a diagnostic escape hatch, because a
+    spawned survivor owns an action manager while not being counted as a
+    player.
+
+    "Accepted" is not success: the engine can drop an accepted action one frame
+    later without clearing it. The mod therefore holds the command `running`
+    until the manager actually releases the action, and any failure path
+    releases it too -- otherwise that player could never act again for the rest
+    of the session. Expect an answer only after the action has genuinely ended;
+    a stuck action fails by the mod's own 20s watchdog, with the release noted
+    in the detail.
+    """
+    return _run("action", {
+        "action": action_class,
+        "target_class": target_class or None,
+        "subject": subject or None,
+        "radius": radius,
+        "pos": pos or None,
+    }, timeout)
+
+
 def world_delete(class_name: str, radius: float = 30.0, pos: str = "",
                  timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """Delete every object of `class_name` within `radius` of `pos` (or of the

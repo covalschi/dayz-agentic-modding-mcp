@@ -128,6 +128,13 @@ class DZMCP_BridgeCore
     // Set by probe_bloat for exactly one publish.
     protected string m_PadNext;
 
+    // The action manager an in-flight `action` command was delivered through.
+    // Deliberately NOT a ref: a plain object variable in Enforce is a weak
+    // pointer, so if the acting player leaves the server this reads null
+    // instead of keeping a destroyed manager alive. Null whenever no action
+    // command is running.
+    protected ActionManagerServer m_ActionManager;
+
     // Consecutive-failure counters, one per retryable file operation. Each is
     // reset by its own success, so they measure a RUN of failures rather than a
     // total -- see FAULT_STREAK_LIMIT.
@@ -161,6 +168,7 @@ class DZMCP_BridgeCore
         m_MailboxOpenFails = 0;
         m_MailboxDeleteFails = 0;
         m_StateWriteFails = 0;
+        m_ActionManager = null;
     }
 
     // -----------------------------------------------------------------------
@@ -295,6 +303,30 @@ class DZMCP_BridgeCore
         {
             FinishCommand(DZMCP_STATUS_FAILED, "the immediate verb '" + m_CmdVerb + "' did not report a result within its own" + " tick -- see the script log for the fault that stopped it");
             return;
+        }
+
+        // An action in flight: the engine "accepted" it, which is not success
+        // -- the real start happens on the player's next command-handler frame,
+        // and one frame later the engine re-checks conditions and can drop the
+        // action without clearing the manager. So the only trustworthy signal
+        // of completion is the manager actually letting go of the data.
+        if (m_CmdVerb == "action")
+        {
+            if (!m_ActionManager)
+            {
+                // The weak pointer went null: the acting player left the
+                // server, taking the manager with it.
+                FinishCommand(DZMCP_STATUS_FAILED, "the acting player left the server while the action was in flight");
+                return;
+            }
+            if (!m_ActionManager.DZMCP_HasPendingActionData())
+            {
+                FinishCommand(DZMCP_STATUS_DONE, "the action started and has ended -- the manager released it");
+                return;
+            }
+            // Still held: fall through to the two deadlines below. When one of
+            // them fires, FinishActionByDeadline releases the manager too --
+            // without that, this player could never act again (R25/R27).
         }
 
         float elapsed = now - m_CmdStartedAt;
@@ -455,6 +487,22 @@ class DZMCP_BridgeCore
 
     protected void FinishCommand(string status, string detail)
     {
+        // Whatever ends an action command also ends the bridge's claim on its
+        // manager -- and if the manager is still holding action data at that
+        // moment (the watchdog fired on a stuck action, the hard limit hit, a
+        // later tick failed it), it MUST be released here, or that player can
+        // never perform any action again for the rest of the session (R25/R27:
+        // neither the engine's rejected branch nor its dropped-at-possibility-
+        // check path clears the data). The release is null-checked inside, and
+        // the detail says it happened so the caller knows the engine accepted
+        // the action and then never finished it.
+        if (m_ActionManager)
+        {
+            if (m_ActionManager.DZMCP_ReleasePendingActionData())
+                detail = detail + "; the manager still held the action data -- released, so the player can act again";
+            m_ActionManager = null;
+        }
+
         m_State.command.status = status;
         m_State.command.detail = DZMCP_Text.Sanitize(detail, DETAIL_LEN);
         m_State.command.finished_at = GetGame().GetTickTime();
@@ -470,7 +518,7 @@ class DZMCP_BridgeCore
 
     protected string KnownVerbs()
     {
-        return "ping, spawn, teleport, set, delete, query, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, teleport, set, delete, query, action, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
@@ -478,7 +526,10 @@ class DZMCP_BridgeCore
         if (verb == "ping" || verb == "probe_bloat" || verb == "probe_stall" || verb == "probe_fault")
             return true;
 
-        return verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query";
+        if (verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query")
+            return true;
+
+        return verb == "action";
     }
 
     protected void Dispatch(string verb, string raw)
@@ -537,6 +588,11 @@ class DZMCP_BridgeCore
         if (verb == "query")
         {
             VerbQuery(args);
+            return;
+        }
+        if (verb == "action")
+        {
+            VerbAction(args);
             return;
         }
         if (verb == "probe_bloat")
@@ -919,6 +975,138 @@ class DZMCP_BridgeCore
         FinishCommand(DZMCP_STATUS_DONE, "found " + found.Count() + " object(s) of class '" + className + "' within " + radius + "m of " + DZMCP_World.PosToText(pos));
     }
 
+    // action: run a mod's own action through the engine's gate.
+    //
+    //   action        the action's script class name (required)
+    //   target_class  config class of the object to aim at; resolved to the
+    //                 first match near `pos`/the subject (optional -- many
+    //                 actions take no target)
+    //   subject       script/config class of a Man-derived entity to act AS,
+    //                 instead of the first connected player. Exists because a
+    //                 conjured survivor is not counted by GetPlayers (measured
+    //                 in Task 6) but still owns an action manager -- and it is
+    //                 how much of this path can be exercised on a stand with
+    //                 no client attached.
+    //   radius, pos   where to look for the target and the subject
+    //
+    // The refusal classification, the R25 release and the outcome reading all
+    // live in the 4_World tier (DZMCP_DeliverAction) -- the fields the engine
+    // reads are protected members of that tier and this one cannot touch them.
+    // What this verb owns is the multi-tick half: "accepted" is NOT success
+    // (the real start happens on the player's next command-handler frame, and
+    // one frame later the engine re-checks conditions and can drop the action
+    // without clearing it), so the command stays running until a later tick
+    // observes the manager actually released -- see AdvanceRunning.
+    protected void VerbAction(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|action|target_class|subject|radius|pos|", "action, target_class, subject, radius, pos"))
+            return;
+
+        string actionName = ArgOr(args, "action", "");
+        if (actionName == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "action needs an action argument naming the action's script class");
+            return;
+        }
+
+        // The subject: a connected player by default, or a named Man-derived
+        // entity found nearby.
+        PlayerBase subject;
+        string subjectClass = ArgOr(args, "subject", "");
+        if (subjectClass == "")
+        {
+            if (NoPlayerRefusal())
+                return;
+            if (!Class.CastTo(subject, DZMCP_World.FirstPlayer()))
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "the connected player is not a PlayerBase, so it has no action manager to deliver through");
+                return;
+            }
+        }
+        else
+        {
+            vector searchPos;
+            if (!ResolvePosition(args, searchPos))
+                return;
+
+            string subjectRadiusText = ArgOr(args, "radius", "0");
+            float subjectRadius = DZMCP_World.ClampRadius(subjectRadiusText.ToFloat());
+
+            array<Object> people;
+            DZMCP_World.Gather(subjectClass, searchPos, subjectRadius, people);
+            if (people.Count() == 0)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "no '" + subjectClass + "' found within " + subjectRadius + "m to act as -- spawn one first, or drop the subject argument to use the connected player");
+                return;
+            }
+            if (!Class.CastTo(subject, people.Get(0)))
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "'" + subjectClass + "' was found but is not a PlayerBase, so it has no action manager to deliver through");
+                return;
+            }
+
+            // A conjured entity never went through OnSelectPlayer, so its
+            // action manager was never constructed (measured: every delivery
+            // answered "no server action manager" without this). Construct it
+            // the way vanilla itself would have -- see DZMCP_PlayerGate.c.
+            string ensure = subject.DZMCP_EnsureServerActionManager();
+            if (ensure != "")
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "the subject cannot host an action manager: " + ensure);
+                return;
+            }
+        }
+
+        // The target: optional, resolved by class near the subject.
+        Object targetObject = null;
+        string targetClass = ArgOr(args, "target_class", "");
+        if (targetClass != "")
+        {
+            string radiusText = ArgOr(args, "radius", "0");
+            float radius = DZMCP_World.ClampRadius(radiusText.ToFloat());
+
+            array<Object> candidates;
+            DZMCP_World.Gather(targetClass, subject.GetPosition(), radius, candidates);
+            if (candidates.Count() == 0)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "no target of class '" + targetClass + "' within " + radius + "m of the subject");
+                return;
+            }
+            targetObject = candidates.Get(0);
+        }
+
+        ActionManagerServer manager;
+        if (!Class.CastTo(manager, subject.GetActionManager()))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the subject has no server action manager -- it may not be fully initialized yet");
+            return;
+        }
+
+        string outcome = manager.DZMCP_DeliverAction(actionName, targetObject);
+
+        if (outcome == "")
+        {
+            FinishCommand(DZMCP_STATUS_DONE, "the action ran and ended within its own delivery (instant)");
+            return;
+        }
+
+        if (outcome == "accepted" || outcome == "pending")
+        {
+            // Not success yet -- hold running and let AdvanceRunning watch the
+            // manager. "pending" is called out in the detail-to-be because for
+            // a server-delivered action the acknowledgment id is -1 and no
+            // client ever sent the request, so it can only end by deadline.
+            m_ActionManager = manager;
+            m_CmdInstant = false;
+            DZMCP_Log.Info("command " + m_State.command.id + " delivered action " + actionName + " -> " + outcome + "; watching the manager for completion");
+            return;
+        }
+
+        // A named refusal, classified before the engine was touched (or the
+        // engine's own target-lock rejection). The manager holds nothing.
+        FinishCommand(DZMCP_STATUS_FAILED, outcome);
+    }
+
     // An explicit pos, or the player's own, or a named refusal. Returns false
     // when it has already finished the command with that refusal.
     protected bool ResolvePosition(map<string, string> args, out vector pos)
@@ -1054,6 +1242,7 @@ class DZMCP_BridgeCore
             m_State.world.player_pos = "";
             m_State.world.player_health = -1;
             m_State.world.hands = "";
+            m_State.world.action_pending = -1;
             return;
         }
 
@@ -1066,6 +1255,19 @@ class DZMCP_BridgeCore
             m_State.world.hands = DZMCP_Text.Sanitize(held.GetType(), ID_LEN);
         else
             m_State.world.hands = "";
+
+        // The wedge indicator (see the protocol file): whether the player's
+        // action manager is holding action data right now.
+        m_State.world.action_pending = -1;
+        PlayerBase asPlayer;
+        ActionManagerServer manager;
+        if (Class.CastTo(asPlayer, player) && Class.CastTo(manager, asPlayer.GetActionManager()))
+        {
+            if (manager.DZMCP_HasPendingActionData())
+                m_State.world.action_pending = 1;
+            else
+                m_State.world.action_pending = 0;
+        }
     }
 
     protected void Publish()

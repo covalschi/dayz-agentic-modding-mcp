@@ -60,6 +60,7 @@ for _fn in (
     # first world command.
     tools.world_ready, tools.world_state,
     tools.world_spawn, tools.world_teleport, tools.world_set, tools.world_delete,
+    tools.world_action,
 ):
     mcp.tool()(_wrap(_fn))
 

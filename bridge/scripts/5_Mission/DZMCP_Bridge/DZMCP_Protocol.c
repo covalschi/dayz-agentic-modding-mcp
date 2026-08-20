@@ -125,6 +125,13 @@ class DZMCP_WorldSnapshot
     float query_radius;
     int query_count;
 
+    // Is the first player's action manager holding action data? 1/0, or -1
+    // when there is no player to ask. This is the wedge indicator: a manager
+    // that stays at 1 with no action running is a player who can never act
+    // again (brief R25/O10), and publishing it every tick is what lets the
+    // wedge check be read from outside without a command round trip.
+    int action_pending;
+
     void DZMCP_WorldSnapshot()
     {
         tick_time = 0;
@@ -141,6 +148,7 @@ class DZMCP_WorldSnapshot
         query_class = "";
         query_radius = 0;
         query_count = -1;
+        action_pending = -1;
     }
 }
 

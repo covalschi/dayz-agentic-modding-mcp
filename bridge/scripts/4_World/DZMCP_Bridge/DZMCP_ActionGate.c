@@ -16,11 +16,9 @@
 //   possible failure for a tool whose entire value proposition is "a refusal
 //   is a meaningful result".
 //
-//   The delivery itself is Task 7. What is here now is the ENTRY POINT SHAPE
-//   plus the two primitives 5_Mission provably cannot have: reading whether
-//   the manager is still holding action data, and clearing it. Both are
-//   load-bearing for Task 7 and both prove the tier claim above at compile
-//   time rather than on a six-minute boot.
+//   The delivery lives here (DZMCP_DeliverAction, Task 7) together with the
+//   two primitives 5_Mission provably cannot have: reading whether the manager
+//   is still holding action data, and clearing it.
 //
 // Everything here is inert unless this is a dedicated server (brief R2). This
 // tier compiles on clients too -- the bridge is only ever MEANT for
@@ -107,5 +105,94 @@ modded class ActionManagerServer
             return "player is sprinting";
 
         return "";
+    }
+
+    // Deliver one action through the engine's own gate, from inside the class
+    // whose protected member the engine actually reads.
+    //
+    // Returns one of:
+    //   ""              the action ran and ended within this call (instant)
+    //   "accepted"      the engine accepted it; the real start happens on the
+    //                   player's next command-handler frame, and the caller
+    //                   must keep watching DZMCP_HasPendingActionData()
+    //   "pending"       accepted, but parked awaiting a client acknowledgment
+    //                   -- see below; the caller must treat this as running
+    //                   with a deadline, because the acknowledgment id here is
+    //                   -1 and no client ever sent this request
+    //   "refused: ..."  a named refusal; the manager holds nothing afterwards
+    //
+    // The refusal classification happens BEFORE the engine is touched (brief
+    // R24), mirroring the gate at actionmanagerserver.c:142 term by term, so
+    // that "the player is sprinting" and "the mod's own Can() said no" come
+    // back as different sentences -- the second one being the meaningful
+    // negative result this tool exists to produce.
+    //
+    // R25, the most dangerous line of the phase: SetupAction assigns its out
+    // parameter (this manager's own m_CurrentActionData -- actionbase.c:164)
+    // BEFORE any early return, so a SetupAction that returns false leaves the
+    // manager holding data, and a manager holding data refuses every later
+    // action for the rest of the session. Every failure path below therefore
+    // releases the data before reporting. One null check on the data suffices:
+    // SetupAction assigns m_Action on the line after creating the data, before
+    // every early return, so held data always has its action.
+    string DZMCP_DeliverAction(string actionClassName, Object targetObject)
+    {
+        if (!GetGame() || !GetGame().IsDedicatedServer())
+            return "refused: the bridge action gate is inert outside a dedicated server";
+
+        // The player-state half of the gate, read before anything is created.
+        string block = DZMCP_DescribePlayerBlock();
+        if (block != "")
+            return "refused: " + block;
+
+        // ToType() answers a null typename for a name no loaded script declares
+        // (enstring.c:95); GetAction answers null for a class that is real but
+        // was never registered as an action. Both are "unknown action class",
+        // told apart in the text because the remedies differ.
+        typename actionType = actionClassName.ToType();
+        if (!actionType)
+            return "refused: unknown action class '" + actionClassName + "' -- no loaded script declares it";
+
+        ActionBase action = ActionManagerBase.GetAction(actionType);
+        if (!action)
+            return "refused: '" + actionClassName + "' is a script class but is not registered as an action";
+
+        ItemBase item = m_Player.GetItemInHands();
+        ActionTarget target = new ActionTarget(targetObject, null, -1, vector.Zero, 0);
+
+        // The mod's own applicability check -- the meaningful negative result.
+        // Checked before SetupAction so a plain "conditions did not hold" never
+        // creates action data at all.
+        if (!action.Can(m_Player, target, item))
+            return "refused: the action's own Can() said no -- its conditions did not hold for this player, target and item";
+
+        if (LogManager.IsActionLogEnable())
+            Debug.ActionLog("bridge delivery", action.ToString(), "n/a", "DZMCP_DeliverAction", m_Player.ToString());
+
+        if (!action.SetupAction(m_Player, target, item, m_CurrentActionData))
+        {
+            // R25: the out parameter was assigned before the early return.
+            DZMCP_ReleasePendingActionData();
+            return "refused: SetupAction declined after creating action data -- the data was released so the player can act again";
+        }
+
+        StartDeliveredAction();
+
+        // R26: the outcome is read, never assumed.
+        if (!m_CurrentActionData)
+            return "";
+
+        if (m_CurrentActionData.m_State == UA_AM_ACCEPTED)
+            return "accepted";
+
+        if (m_CurrentActionData.m_State == UA_AM_PENDING)
+            return "pending";
+
+        // Anything else means the gate inside StartDeliveredAction rejected it
+        // -- with our pre-checks passed, that is AddActionJuncture failing on
+        // the target lock (actionbase.c:1075-1099). The rejected branch does
+        // not clear the data (actionmanagerserver.c:166-181), so this must.
+        DZMCP_ReleasePendingActionData();
+        return "refused: the engine rejected the action at the target lock (the target is reserved by another action or player)";
     }
 }
