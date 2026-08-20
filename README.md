@@ -83,6 +83,14 @@ in its notes.
 | `bridge_build()` | pack the bridge mod, whose sources ship with this server (`bridge/`), not with your project; returns a job id. Built **unsigned** — see below |
 | `bridge_status(window)` | is the bridge inside the running game still ticking: reports the tick number and whether it advanced over `window` seconds. Succeeds only for a tick that actually moved, or for a stand that restarted mid-sample |
 | `bridge_clear(force, probe_window)` | discard the command stuck in the mailbox, naming what it threw away. Refuses while the bridge looks alive unless `force=True` |
+| `world_ready(timeout)` | wait until the bridge inside the game is actually claiming commands. Call it once after the boot job finishes, before the first world command — see "server ready is not bridge ready" below |
+| `world_state(class_name, radius, pos)` | snapshot of the world from the bridge's once-a-second publish: players, position, health, hands. Free with no arguments; with `class_name` it also counts objects of that class nearby (one command round trip) |
+| `world_spawn(class_name, where, pos, quantity)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, or in their inventory |
+| `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
+| `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
+| `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
+| `world_action(action_class, target_class, subject, radius, pos)` | run a mod's own action through the engine's gate — see below |
+| `world_exec(verb, args)` | the escape hatch: an arbitrary verb through the same transport, marked non-standard in every answer |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`
@@ -155,6 +163,68 @@ running, a command is wedged, the mod is not loaded, the state document is valid
 JSON with a named field wrong (it says which, and checks twice before saying it),
 the file never parses at all, or it parses but predates this server's protocol
 (rebuild it with `bridge_build`).
+
+### The world commands
+
+The world tools talk to the bridge over two JSON files in the server's
+`-profiles` directory: a command mailbox (written atomically from this side,
+deleted by the mod as its claim) and a state file the mod overwrites once a
+second. Enforce Script has no rename, so the mod cannot write atomically —
+the reader tolerates torn writes instead, and one failed read is never news.
+Four facts, all measured on a live stand, decide how to use them:
+
+**Server ready is not bridge ready.** The bridge starts claiming commands
+20–35 seconds *after* the server reports ready (the gap varies boot to boot).
+A command sent into that window is not rejected — it is claimed late and
+completes after the caller gave up. So: `server_start`, wait for the boot job,
+then **`world_ready()`**, then commands. Every world tool also refuses upfront
+if the tick is not moving, naming `world_ready` as the remedy.
+
+**Every argument value crosses the wire as a string.** The mod's parser is
+strict: a JSON number anywhere in `args` rejects the whole args block. The
+tools stringify numbers and booleans themselves and refuse values with no
+faithful string form (lists, dicts, None). Positions travel as one string,
+`"x y z"`.
+
+**A refusal is a result.** The mod's own sentence comes back verbatim as the
+error: "no player is on the server", "the class does not exist", "the action's
+own Can() said no". Nobody connected is the normal state of a headless stand,
+and every verb that needs a player says so instead of silently doing nothing.
+
+**The session id protects against yesterday's command.** Every command carries
+the session the bridge most recently published; the mod refuses any command
+addressed to another session (or none) without executing it. A command written
+while the stand was down can therefore never fire into a freshly booted world.
+The tools stamp the session automatically — it only matters if you write the
+mailbox by hand.
+
+### Actions, and why there is no verb dictionary
+
+A semantic verb like "hand in the sample" lies: in a real mod the same words
+mean different things depending on which device is near, the player's faction,
+and what is already unlocked. That context is not enumerable, so the bridge
+does not try. `world_action` takes an action's **class name**, a target and the
+held item, and asks the engine to run it through its own gate — the same one a
+key press goes through. Applicability is decided by the action's own `Can()`,
+and its refusal is a meaningful test result, not a tool failure. The
+distinguishable answers: manager busy, player already acting, player
+sprinting, unknown action class, and "the action's own `Can()` said no".
+"Accepted" is not success either — the command stays running until the engine
+actually releases the action, and every failure path releases the manager so
+the player can still act afterwards.
+
+### `world_exec` is the escape hatch
+
+Anything a mod exposes that is *not* an action — "how many points in the
+faction pool" — goes through `world_exec(verb, args)`: an arbitrary verb over
+the same transport. Every answer is marked `non_standard`: this server does
+not know the verb, does not validate it, and does not answer for what the mod
+does with it. A verb the bridge build does not know comes back listing the
+verbs it does. A project that needs its own verb edits **its own copy** of the
+bridge's dispatcher (the comment above `KnownVerbs()` in
+`bridge/scripts/5_Mission` says exactly where); there is no registration
+machinery on purpose — a verb this server typed and validated would be a verb
+this server answers for.
 
 ## Known limitations
 

@@ -393,3 +393,52 @@ def test_world_action_is_registered():
 
     names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert "world_action" in names
+
+
+# --------------------------------------------------------------- world_exec
+
+def test_world_exec_marks_every_answer_as_non_standard(live):
+    """The escape hatch's one hard obligation: the caller must be able to see,
+    without reading prose, that this server does not answer for the verb."""
+    live.answer = CommandState(id="x", status="done", detail="whatever the mod did",
+                               finished_at=5.0)
+
+    result = world.world_exec("zp_custom_probe", {"count": 3})
+
+    assert result.ok
+    assert result.data["non_standard"] is True
+    assert "does not answer" in result.data["note"]
+    # and the args crossed as strings like everywhere else
+    assert live.sent[-1].args == {"count": "3"}
+
+
+def test_world_exec_marks_failures_too(live):
+    """An unknown verb's refusal comes from the MOD (listing what it knows) and
+    is still marked -- the mark is about the verb's standing, not the outcome."""
+    live.answer = CommandState(id="x", status="failed",
+                               detail="unknown verb 'zzz'; this build knows: ping, ...",
+                               finished_at=6.0)
+
+    result = world.world_exec("zzz")
+
+    assert not result.ok
+    assert result.data["non_standard"] is True
+    assert "unknown verb" in result.error
+
+
+def test_world_exec_refuses_a_verb_outside_the_charset_before_sending(live):
+    """The mod recovers a failed command's id by a raw string search, and the
+    id embeds the verb -- a quote or non-ASCII there makes a failure
+    uncorrelatable, which is the silence this product exists to remove."""
+    for bad in ('has"quote', "Verb", "с_кириллицей", "has space", "", "a" * 60):
+        result = world.world_exec(bad)
+        assert not result.ok, bad
+        assert live.sent == [], f"{bad!r} was sent"
+        assert "lowercase ASCII" in result.error
+
+
+def test_world_exec_is_registered():
+    from dayz_mcp import server as mcp_server
+
+    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
+    assert "world_exec" in names

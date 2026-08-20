@@ -516,6 +516,15 @@ class DZMCP_BridgeCore
     // Dispatch
     // -----------------------------------------------------------------------
 
+    // HOW A PROJECT ADDS ITS OWN VERB (the world_exec contract): edit YOUR
+    // copy of this bridge -- add the name to KnownVerbs() and IsKnownVerb(),
+    // route it in Dispatch(), and write a Verb<Name>() handler that checks its
+    // own argument keys the way every handler here does. There is deliberately
+    // no registration machinery: the MCP server neither types nor validates
+    // project verbs, and marks every world_exec answer as non-standard,
+    // because a verb the server validated would be a verb the server answers
+    // for. Keep handler log lines free of the words the log verdict treats as
+    // failure -- see DZMCP_Log.
     protected string KnownVerbs()
     {
         return "ping, spawn, teleport, set, delete, query, action, probe_bloat, probe_stall, probe_fault";

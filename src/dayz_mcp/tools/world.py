@@ -40,6 +40,7 @@ Three facts, all MEASURED on a live stand during Task 5, shape everything below.
 """
 from __future__ import annotations
 
+import re
 import time
 
 from ..bridge.channel import Channel
@@ -70,6 +71,20 @@ READY_TIMEOUT_SECONDS = 90.0
 _MOVING = ("growing", "restarted")
 
 _POS_HELP = "a position is three numbers separated by spaces, like '7500 0 7500'"
+
+# The verb charset for world_exec, where the verb arrives from OUTSIDE. The
+# mod recovers a command's id by a plain string search over the raw mailbox
+# when the parse fails, and the id embeds the verb -- so a quote inside a verb
+# breaks that recovery, and a non-ASCII verb makes the id non-ASCII, which the
+# mod's sanitiser would mangle into an id nobody can correlate. One regex
+# removes the whole class. Lowercase to match how every built-in verb is
+# spelled and compared.
+_VERB_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+_NON_STANDARD_NOTE = (
+    "non-standard verb: this server passed it through without knowing it and does not "
+    "answer for its behaviour -- the mod decides what (if anything) it means"
+)
 
 
 def _to_wire(value: object) -> str:
@@ -440,3 +455,42 @@ def world_delete(class_name: str, radius: float = 30.0, pos: str = "",
     whatever the class filter says.
     """
     return _run("delete", {"class": class_name, "radius": radius, "pos": pos or None}, timeout)
+
+
+def world_exec(verb: str, args: dict | None = None,
+               timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Send an arbitrary verb through the bridge -- the debugging escape hatch,
+    not a testing path.
+
+    This server does not know the verb, does not validate its arguments beyond
+    stringifying them, and does not answer for what the mod does with it; every
+    answer is marked `non_standard` to say so. Anything a mod's behaviour can
+    express as an ACTION should go through `world_action` instead, where the
+    mod's own `Can()` gives the refusal meaning.
+
+    A verb this bridge build does not know comes back as a failure listing the
+    verbs it does -- that is the mod answering, not this tool guessing. A
+    project that needs its own verb adds it to ITS OWN copy of the bridge's
+    dispatcher (`IsKnownVerb`, the routing, and a handler); this server ships
+    no registration machinery on purpose, because a verb the server typed and
+    validated would be a verb the server answers for.
+
+    The verb must be lowercase ASCII (letters, digits, underscore, up to 41
+    chars): the mod recovers a command's id by a raw string search when a parse
+    fails, and the id embeds the verb -- characters outside that set can make a
+    failure impossible to correlate, which is the silence this product exists
+    to remove.
+    """
+    if not _VERB_RE.fullmatch(verb or ""):
+        return fail(
+            f"world_exec refuses the verb {verb!r}: verbs are lowercase ASCII -- a letter "
+            "followed by letters, digits or underscores, at most 41 characters",
+            hint="quotes, spaces, and non-ASCII in a verb can make a failed command "
+                 "impossible to correlate on the mod side; rename the verb",
+        )
+
+    result = _run(verb, dict(args or {}), timeout)
+    if isinstance(result.data, dict):
+        result.data["non_standard"] = True
+        result.data["note"] = _NON_STANDARD_NOTE
+    return result
