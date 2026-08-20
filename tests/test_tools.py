@@ -1683,3 +1683,92 @@ def test_udp_port_holders_parses_netstat_and_matches_the_whole_port(tmp_path, mo
     assert procs_udp_port_holders(2302) == [67688]
     assert procs_udp_port_holders(12302) == [999]
     assert procs_udp_port_holders(9999) == []
+
+
+# --- Extra launch arguments: an explicit one-run opt-in, like the bridge attach
+
+
+def _extra_args_project(tmp_path, monkeypatch):
+    """A boot that reaches "ready via expect.ready_line" -- the port must be
+    FREE before spawn (the preflight runs first; my first version handed it a
+    held port and tested the preflight instead) and the marker must appear, so
+    the job lands on a summary the extras note can be read from."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+    captured = {}
+
+    def fake_spawn(cmd, cwd):
+        captured["cmd"] = cmd
+        profiles = Path(next(a for a in cmd if a.startswith("-profiles=")).split("=", 1)[1])
+        (profiles / "script_now.log").write_text("[MyMod] loaded\n", encoding="utf-8")
+        return 123
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    return captured
+
+
+def test_server_start_appends_extra_args_after_the_fixed_ones(tmp_path, monkeypatch):
+    """The client-session runbook boots with -doScriptLogs=1 -logToFile=1 (the
+    engine's action log is gated by launch flags). Its only route used to be a
+    by-hand boot, which loses the preflight, the transport clearing and the
+    port-readiness work -- so the flags come through THIS tool, per call."""
+    captured = _extra_args_project(tmp_path, monkeypatch)
+
+    started = tools.server_start(timeout=10, extra_args=["-doScriptLogs=1", "-logToFile=1"])
+    assert started.ok, started.error
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+
+    # Appended AFTER everything the tool owns, so an extra can never displace
+    # or precede a fixed argument.
+    assert captured["cmd"][-2:] == ["-doScriptLogs=1", "-logToFile=1"]
+    fixed = [a for a in captured["cmd"] if a.split("=", 1)[0] in
+             ("-config", "-port", "-mod", "-profiles", "-serverMod")]
+    assert all(captured["cmd"].index(f) < captured["cmd"].index("-doScriptLogs=1") for f in fixed)
+    # A later reader must be able to see this boot was non-standard.
+    assert "-doScriptLogs=1 -logToFile=1" in waited.data["summary"]
+
+
+def test_server_start_without_extras_stays_exactly_as_before(tmp_path, monkeypatch):
+    captured = _extra_args_project(tmp_path, monkeypatch)
+
+    started = tools.server_start(timeout=10)
+    waited = tools.job_wait(started.data["job_id"], timeout=20)
+    assert captured["cmd"][-1].startswith(("-profiles=", "-serverMod="))
+    assert "extra args" not in waited.data["summary"]
+
+
+def test_server_start_refuses_extras_that_collide_with_owned_arguments(tmp_path, monkeypatch):
+    """-config, -profiles, -port, -mod and -serverMod are the tool's own: the
+    preflight, the log discipline and the mod split all assume they are what
+    the tool computed. An extra overriding one would silently invalidate every
+    guarantee built on them -- and the engine takes the LAST occurrence."""
+    captured = _extra_args_project(tmp_path, monkeypatch)
+
+    for arg in ("-config=C:/other.cfg", "-profiles=C:/elsewhere", "-port=9999",
+                "-mod=@Dep", "-serverMod=@Dep", "-PORT=9999", "-port"):
+        r = tools.server_start(timeout=3, extra_args=[arg])
+        assert not r.ok, f"{arg} was accepted"
+        assert arg.split("=", 1)[0].lower().lstrip("-") in r.error.lower(), arg
+        assert "profile" in r.hint, arg
+        assert "cmd" not in captured, f"{arg}: it spawned anyway"
+
+
+def test_server_start_refuses_a_single_string_rather_than_resplitting_it(tmp_path, monkeypatch):
+    """A string would have to be re-split, and quoting rules are exactly the
+    kind of thing two halves disagree about. A list of strings or nothing."""
+    captured = _extra_args_project(tmp_path, monkeypatch)
+
+    r = tools.server_start(timeout=3, extra_args="-doScriptLogs=1 -logToFile=1")
+    assert not r.ok
+    assert "list of strings" in r.error
+    assert "separately" in r.hint
+    assert "cmd" not in captured
+
+    also = tools.server_start(timeout=3, extra_args=[1, "-x"])
+    assert not also.ok
+    assert "cmd" not in captured

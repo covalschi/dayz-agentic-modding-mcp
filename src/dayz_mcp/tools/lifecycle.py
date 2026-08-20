@@ -27,6 +27,13 @@ SERVER_IMAGE = GAME_PROBE
 # test stand the server boots against.
 CLIENT_PROFILE_DIRNAME = "clientprofile"
 
+# Launch arguments server_start owns: it computes them, and its preflight, log
+# discipline and mod split all assume they are what it computed. The engine
+# honours the LAST occurrence of a repeated argument, so an extra repeating one
+# of these would silently override the tool's own -- refused instead, with the
+# profile named as the right place to change them.
+OWNED_LAUNCH_ARGS = ("-config", "-profiles", "-port", "-mod", "-serverMod")
+
 # How long the no-ready-line path waits for the game port to be bound before
 # giving up on that signal and answering honestly. Bounded on purpose and
 # deliberately NOT `timeout`: the defect this branch exists to fix was waiting
@@ -190,7 +197,7 @@ def clear_bridge_transport(profiles: Path) -> list[str]:
     return problems
 
 
-def server_start(timeout: float = 420) -> Result:
+def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> Result:
     """Start the test server and wait for it to be ready. Returns a job id.
 
     Two things worth knowing before calling, both observable:
@@ -213,6 +220,16 @@ def server_start(timeout: float = 420) -> Result:
     blocks a live run -- but this tool never auto-stops a process it did not
     start.
 
+    `extra_args` appends launch arguments after the fixed ones -- an explicit
+    one-run opt-in, the same pattern as attaching the bridge, not profile
+    surgery. A list of strings, never one string to re-split. Arguments the
+    tool itself owns (-config, -profiles, -port, -mod, -serverMod) are refused:
+    the profile is where those are decided. The extras are recorded in the boot
+    job's summary, so a later reader can see the boot was non-standard. The
+    known use is the engine's action log (`-doScriptLogs=1 -logToFile=1`),
+    which writes to scriptExt.log -- a file log_verdict never reads, so these
+    flags cannot poison a verdict.
+
     Readiness has two independent signals, and the summary always names which
     one answered. `expect.ready_line` appearing in a log written by THIS run
     says the MOD finished loading. The game port being bound by the pid we
@@ -227,6 +244,28 @@ def server_start(timeout: float = 420) -> Result:
     if guard:
         return guard
     prof = session.profile()
+
+    if extra_args:
+        # A single string would have to be re-split, and quoting rules are
+        # exactly the kind of thing two halves disagree about.
+        if isinstance(extra_args, str) or not all(isinstance(a, str) for a in extra_args):
+            return fail(
+                "extra_args must be a list of strings",
+                hint='pass each argument separately, e.g. ["-doScriptLogs=1", "-logToFile=1"] '
+                     "-- a single string would have to be re-split, and quoting rules are "
+                     "where that goes wrong",
+            )
+        for arg in extra_args:
+            head = arg.split("=", 1)[0].lower()
+            owned = next((o for o in OWNED_LAUNCH_ARGS if head == o.lower()), None)
+            if owned:
+                return fail(
+                    f"extra_args may not carry {owned}: this tool computes it, and the engine "
+                    "would honour the extra one instead of the tool's own",
+                    hint=f"{owned} is decided by the profile (dayz-mcp.toml / "
+                         "dayz-mcp.local.toml) -- change it there, where every check that "
+                         "depends on it will see the same value",
+                )
 
     # A second boot on top of a live one would fight the first for the same port
     # and the same profiles directory instead of failing loudly. Checked against
@@ -330,6 +369,11 @@ def server_start(timeout: float = 420) -> Result:
     ]
     if server_mods:
         cmd.append(f"-serverMod={server_mods}")
+    extras_note = ""
+    if extra_args:
+        # After every fixed argument, so an extra can never displace one.
+        cmd.extend(extra_args)
+        extras_note = f" | extra args: {' '.join(extra_args)}"
 
     def run() -> None:
         store.start(job.id)
@@ -388,7 +432,7 @@ def server_start(timeout: float = 420) -> Result:
                             summary=f"ready via port bind, pid {pid} holds udp/{port}; "
                                     "expect.ready_line is empty, so this says the server is up "
                                     "and listening, NOT that any mod finished loading"
-                                    f"{transport_note}",
+                                    f"{transport_note}{extras_note}",
                         )
                         return
                     if not is_alive(pid, image=SERVER_IMAGE):
@@ -405,7 +449,7 @@ def server_start(timeout: float = 420) -> Result:
                     job.id, 0,
                     summary=f"started, pid {pid}; expect.ready_line is empty and udp/{port} was "
                             f"never observed bound within {waited_for:g}s, so readiness cannot be "
-                            f"detected -- only errors will be judged{transport_note}",
+                            f"detected -- only errors will be judged{transport_note}{extras_note}",
                 )
                 return
             deadline = time.time() + timeout
@@ -430,7 +474,7 @@ def server_start(timeout: float = 420) -> Result:
                         store.finish(
                             job.id, 0,
                             summary=f"ready via expect.ready_line, pid {pid}{bound_note}"
-                                    f"{transport_note}",
+                                    f"{transport_note}{extras_note}",
                         )
                         return
                 time.sleep(2)
