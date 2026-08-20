@@ -174,7 +174,8 @@ the reader tolerates torn writes instead, and one failed read is never news.
 Four facts, all measured on a live stand, decide how to use them:
 
 **Server ready is not bridge ready.** The bridge starts claiming commands
-20–35 seconds *after* the server reports ready (the gap varies boot to boot).
+tens of seconds *after* the server reports ready — the spread observed so far
+is 18–38 seconds, and it varies boot to boot.
 A command sent into that window is not rejected — it is claimed late and
 completes after the caller gave up. So: `server_start`, wait for the boot job,
 then **`world_ready()`**, then commands. Every world tool also refuses upfront

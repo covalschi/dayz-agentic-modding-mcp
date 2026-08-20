@@ -183,7 +183,7 @@ modded class ActionManagerServer
         // Checked before SetupAction so a plain "conditions did not hold" never
         // creates action data at all.
         if (!action.Can(m_Player, target, item))
-            return "refused: the action's own Can() said no -- its conditions did not hold for this player, target and item";
+            return "refused: '" + actionClassName + "' -- the action's own Can() said no, its conditions did not hold for this player, target and item";
 
         if (LogManager.IsActionLogEnable())
             Debug.ActionLog("bridge delivery", action.ToString(), "n/a", "DZMCP_DeliverAction", m_Player.ToString());

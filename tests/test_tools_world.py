@@ -403,7 +403,7 @@ def test_world_exec_marks_every_answer_as_non_standard(live):
     live.answer = CommandState(id="x", status="done", detail="whatever the mod did",
                                finished_at=5.0)
 
-    result = world.world_exec("zp_custom_probe", {"count": 3})
+    result = world.world_exec("my_custom_probe", {"count": 3})
 
     assert result.ok
     assert result.data["non_standard"] is True
@@ -435,6 +435,19 @@ def test_world_exec_refuses_a_verb_outside_the_charset_before_sending(live):
         assert not result.ok, bad
         assert live.sent == [], f"{bad!r} was sent"
         assert "lowercase ASCII" in result.error
+
+
+def test_world_exec_refuses_a_null_argument_instead_of_dropping_it(live):
+    """A JSON null through the escape hatch must refuse, not vanish: the mod
+    cannot tell "absent" from "was null and got dropped", which is the same
+    silent-loss shape its own unknown-key check exists to prevent. (This
+    module's OWN builders still omit None-valued optionals -- that omission is
+    an explicit decision in _args, not a side effect of encoding.)"""
+    result = world.world_exec("my_probe", {"pool": None})
+
+    assert not result.ok
+    assert live.sent == [], "a command with a dropped null was sent"
+    assert "NoneType" in result.error
 
 
 def test_world_exec_is_registered():

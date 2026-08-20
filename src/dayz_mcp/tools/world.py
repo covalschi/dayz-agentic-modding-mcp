@@ -20,8 +20,9 @@ Three facts, all MEASURED on a live stand during Task 5, shape everything below.
    will reject. Pinned by tests -- this is the contract that was left open until
    the live run answered it.
 
-2. THE BRIDGE COMES UP ~35 SECONDS AFTER THE SERVER SAYS IT IS READY.
-   Measured twice. The mod publishes its first state during mission init, but
+2. THE BRIDGE COMES UP TENS OF SECONDS AFTER THE SERVER SAYS IT IS READY.
+   The spread observed so far is 18-38 s, and it varies boot to boot. The mod
+   publishes its first state during mission init, but
    the repeating call that reads the mailbox does not start firing until well
    after the ready line. A command sent into that window is claimed eventually
    and completes normally -- long after the caller has given up, with no
@@ -61,9 +62,9 @@ WORLD_TIMEOUT_SECONDS = 45.0
 # had a chance to move yet" are the same observation.
 MOVEMENT_PROBE_WINDOW = 1.2
 
-# How long `world_ready` will wait for the first tick. The measured gap is about
-# 35 s after the ready line; this leaves room for a slower machine without
-# turning into an unbounded wait.
+# How long `world_ready` will wait for the first tick. The gap observed so far
+# spreads 18-38 s after the ready line; this leaves room for a slower machine
+# without turning into an unbounded wait.
 READY_TIMEOUT_SECONDS = 90.0
 
 # The mod is moving under either of these -- "restarted" means a NEW world came
@@ -119,9 +120,25 @@ def _to_wire(value: object) -> str:
 
 
 def _wire_args(args: dict) -> dict:
-    """The whole args map, stringified. Keys are already strings by construction
-    (they are this module's own literals), values go through `_to_wire`."""
-    return {key: _to_wire(value) for key, value in args.items() if value is not None}
+    """The whole args map, stringified -- every value through `_to_wire`,
+    including None, which `_to_wire` refuses. An earlier version silently
+    DROPPED None-valued keys here, which was fine for this module's own
+    builders (omission is their deliberate signal) and wrong for `world_exec`,
+    where a JSON null argument vanished instead of refusing -- the same
+    silent-loss shape the mod's unknown-key check exists to prevent, and the
+    mod cannot tell "absent" from "was null and got dropped". Omission now
+    happens only in `_args`, where it is a decision this module makes
+    explicitly."""
+    return {key: _to_wire(value) for key, value in args.items()}
+
+
+def _args(**kw: object) -> dict:
+    """Build an args dict for this module's own tools, omitting keys the
+    caller left as None -- the deliberate "not sent at all" signal the mod's
+    unknown-key check depends on. Only this module's builders use it;
+    `world_exec` hands user args straight to `_wire_args`, so a null VALUE
+    from outside is refused rather than quietly disappearing."""
+    return {key: value for key, value in kw.items() if value is not None}
 
 
 def _live_server() -> tuple[int, bool]:
@@ -142,7 +159,7 @@ def _require_a_moving_bridge(channel: Channel) -> Result | None:
 
     Costs one probe window (about 1.2 s) per command, and buys the difference
     between a 45-second silent timeout and an immediate sentence naming the
-    cause. The bridge is unreachable for about 35 seconds after the server
+    cause. The bridge is unreachable for tens of seconds after the server
     reports ready (module docstring, rule 2), and during that window a command
     is not rejected -- it is accepted, sat on, and completed long after the
     caller stopped listening.
@@ -154,9 +171,10 @@ def _require_a_moving_bridge(channel: Channel) -> Result | None:
     return fail(
         f"the bridge is not ticking (heartbeat={detail.status!r}), so a command sent now "
         "would sit unclaimed and its result would arrive after this call had given up",
-        hint="call world_ready() -- the bridge starts ticking about 35 seconds AFTER the "
-             "server reports ready, so this is the ordinary state right after a boot, not "
-             "a fault. If world_ready also times out, check bridge_status and log_verdict",
+        hint="call world_ready() -- the bridge starts ticking tens of seconds AFTER the "
+             "server reports ready (18-38 s observed so far), so this is the ordinary state "
+             "right after a boot, not a fault. If world_ready also times out, check "
+             "bridge_status and log_verdict",
     )
 
 
@@ -250,8 +268,9 @@ def world_ready(timeout: float = READY_TIMEOUT_SECONDS) -> Result:
 
     Call this once after `server_start`'s boot job finishes and before the first
     world command. The bridge publishes its first state during mission init but
-    does not start reading commands until about 35 seconds AFTER the server
-    reports ready -- measured twice on this stand. A command sent in that window
+    does not start reading commands until tens of seconds AFTER the server
+    reports ready -- 18-38 s in the boots measured so far. A command sent in that
+    window
     is claimed eventually and completes normally, long after the caller gave up.
 
     Blocks, with a ceiling, because there is nothing else to do with the answer:
@@ -323,7 +342,7 @@ def world_state(class_name: str = "", radius: float = 30.0, pos: str = "",
     channel = Channel(server_profiles_dir())
 
     if class_name:
-        answered = _run("query", {"class": class_name, "radius": radius, "pos": pos or None},
+        answered = _run("query", _args(**{"class": class_name, "radius": radius, "pos": pos or None}),
                         timeout)
         if not answered.ok:
             return answered
@@ -373,12 +392,12 @@ def world_spawn(class_name: str, where: str = "ground", pos: str = "",
     flag is the mod's, not this tool's; it is named here because it is the
     reason a spawned item can be trusted to still be there a minute later.
     """
-    return _run("spawn", {
+    return _run("spawn", _args(**{
         "class": class_name,
         "where": where,
         "pos": pos or None,
         "quantity": quantity,
-    }, timeout)
+    }), timeout)
 
 
 def world_teleport(pos: str, timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
@@ -404,7 +423,7 @@ def world_set(what: str, value: float, target: str = "",
     both would make one of the two combinations a trap (a player has no
     quantity, and empty hands have no health).
     """
-    return _run("set", {"what": what, "value": value, "target": target or None}, timeout)
+    return _run("set", _args(what=what, value=value, target=target or None), timeout)
 
 
 def world_action(action_class: str, target_class: str = "", subject: str = "",
@@ -436,13 +455,13 @@ def world_action(action_class: str, target_class: str = "", subject: str = "",
     a stuck action fails by the mod's own 20s watchdog, with the release noted
     in the detail.
     """
-    return _run("action", {
-        "action": action_class,
-        "target_class": target_class or None,
-        "subject": subject or None,
-        "radius": radius,
-        "pos": pos or None,
-    }, timeout)
+    return _run("action", _args(
+        action=action_class,
+        target_class=target_class or None,
+        subject=subject or None,
+        radius=radius,
+        pos=pos or None,
+    ), timeout)
 
 
 def world_delete(class_name: str, radius: float = 30.0, pos: str = "",
@@ -454,7 +473,7 @@ def world_delete(class_name: str, radius: float = 30.0, pos: str = "",
     of class, and the radius is clamped on its side. Players are never deleted,
     whatever the class filter says.
     """
-    return _run("delete", {"class": class_name, "radius": radius, "pos": pos or None}, timeout)
+    return _run("delete", _args(**{"class": class_name, "radius": radius, "pos": pos or None}), timeout)
 
 
 def world_exec(verb: str, args: dict | None = None,
