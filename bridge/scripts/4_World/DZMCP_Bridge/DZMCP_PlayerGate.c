@@ -42,6 +42,17 @@ modded class PlayerBase
             return "instance type " + instanceType + " does not host a server action manager";
 
         m_ActionManager = new ActionManagerServer(this);
+
+        // The OTHER thing vanilla's server branch constructs alongside the
+        // manager (playerbase.c:6086). Not optional: construction-class
+        // actions dereference m_ConstructionActionData unguarded inside their
+        // condition chain (actionbuildpart.c:46-47), so a conjured subject
+        // without it would turn any delivered construction action into an
+        // aborted tick and a poisoned verdict. Mirroring both lines keeps the
+        // conjured subject shaped the way vanilla shapes a real one.
+        if (!m_ConstructionActionData)
+            m_ConstructionActionData = new ConstructionActionData();
+
         return "";
     }
 }

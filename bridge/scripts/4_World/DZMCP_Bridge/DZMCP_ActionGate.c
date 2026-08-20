@@ -54,14 +54,16 @@ modded class ActionManagerServer
     // m_CurrentActionData (actionmanagerbase.c:311-324) -- assigning null
     // directly would skip ActionCleanup and ClearActionJuncture.
     //
-    // The null check here is NOT redundant, and this is the one place in the
-    // whole mod where a missing guard would crash the server. With the engine
-    // action log enabled (which this mod enables at init, brief R28),
-    // ActionManagerBase.OnActionEnd's second Debug.ActionLog call dereferences
-    // m_CurrentActionData.m_Player from OUTSIDE the `if (m_CurrentActionData)`
-    // that guards the first one. Vanilla never trips it because
-    // ActionManagerServer's own override guards the super call; anything that
-    // calls OnActionEnd directly must guard it itself.
+    // The null check here protects the RETURN VALUE (true only when something
+    // was actually released), not the call: OnActionEnd dispatches to
+    // ActionManagerServer's own override, whose first line is the same
+    // `if (m_CurrentActionData)` guard, so a null-data call through THIS path
+    // is a safe no-op. The real hazard lives one level down and is unreachable
+    // from here: the BASE class's OnActionEnd dereferences
+    // m_CurrentActionData.m_Player outside its own guard on its second
+    // Debug.ActionLog line (actionmanagerbase.c:317, only with the action log
+    // enabled, which R28 enables) -- anything that ever calls the base method
+    // directly, or overrides the server one without the guard, inherits it.
     //
     // Returns true when something was actually released.
     bool DZMCP_ReleasePendingActionData()
@@ -95,6 +97,18 @@ modded class ActionManagerServer
         if (m_CurrentActionData)
             return "manager busy -- a previous action is still owned";
 
+        // A client's own action request that has arrived but not yet been
+        // handled by the manager's next Update (actionmanagerserver.c:40-64
+        // stores it; the Update at :202 consumes it). In that sub-frame window
+        // m_CurrentActionData is still null, so without this check a delivery
+        // would pass as "idle" -- and SetupAction reads the pending RECEIVE
+        // data (actionbase.c:176-179), splicing the human's item and target
+        // into the delivered action while their own request gets refused.
+        // Only reachable by aiming a delivery at a human mid-request, but the
+        // cost of that collision is a corrupted action on a real player.
+        if (m_PendingAction || m_PendingActionReciveData)
+            return "manager busy -- the player's own action request is mid-flight";
+
         if (!m_Player)
             return "no player is attached to this action manager";
 
@@ -115,10 +129,15 @@ modded class ActionManagerServer
     //   "accepted"      the engine accepted it; the real start happens on the
     //                   player's next command-handler frame, and the caller
     //                   must keep watching DZMCP_HasPendingActionData()
-    //   "pending"       accepted, but parked awaiting a client acknowledgment
-    //                   -- see below; the caller must treat this as running
-    //                   with a deadline, because the acknowledgment id here is
-    //                   -1 and no client ever sent this request
+    //   "pending"       accepted, parked in the acknowledgment state. NOT
+    //                   necessarily parked forever: the server processes its
+    //                   own ack juncture, and the delivered action's ack id
+    //                   (-1) matches the manager's own pending id (-1)
+    //                   (actionmanagerbase.c:161-164), so "pending" can
+    //                   un-park into a real start on a later frame. The caller
+    //                   must therefore watch the MANAGER, not this state --
+    //                   completion is the manager releasing the data, and the
+    //                   deadline is the bound either way
     //   "refused: ..."  a named refusal; the manager holds nothing afterwards
     //
     // The refusal classification happens BEFORE the engine is touched (brief

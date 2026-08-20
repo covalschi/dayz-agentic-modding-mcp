@@ -324,9 +324,10 @@ class DZMCP_BridgeCore
                 FinishCommand(DZMCP_STATUS_DONE, "the action started and has ended -- the manager released it");
                 return;
             }
-            // Still held: fall through to the two deadlines below. When one of
-            // them fires, FinishActionByDeadline releases the manager too --
-            // without that, this player could never act again (R25/R27).
+            // Still held: fall through to the two deadlines below. When one
+            // of them fires, FinishCommand's release block frees the manager
+            // too -- without that, this player could never act again
+            // (R25/R27).
         }
 
         float elapsed = now - m_CmdStartedAt;
@@ -1101,10 +1102,13 @@ class DZMCP_BridgeCore
 
         if (outcome == "accepted" || outcome == "pending")
         {
-            // Not success yet -- hold running and let AdvanceRunning watch the
-            // manager. "pending" is called out in the detail-to-be because for
-            // a server-delivered action the acknowledgment id is -1 and no
-            // client ever sent the request, so it can only end by deadline.
+            // Not success yet -- hold running and let AdvanceRunning watch
+            // the manager. That watch is why both outcomes are safe to treat
+            // identically: "pending" can un-park into a real start (the server
+            // processes its own ack juncture and -1 matches its own pending
+            // id -- see the gate's own comment), and "accepted" can be dropped
+            // a frame later; in either case the truth is whether the manager
+            // is still holding data, which is exactly what the watch reads.
             m_ActionManager = manager;
             m_CmdInstant = false;
             DZMCP_Log.Info("command " + m_State.command.id + " delivered action " + actionName + " -> " + outcome + "; watching the manager for completion");
