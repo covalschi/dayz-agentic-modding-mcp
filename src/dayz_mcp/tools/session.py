@@ -1,24 +1,38 @@
 """One open project per server process, held here so every tool sees the same one."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from ..jobs import JobStore
+from ..knowledge.store import KnowledgeStore
 from ..procs import is_alive
 from ..profile import Profile
 
 _state: dict = {
     "profile": None, "jobs": None, "game": None, "tools": None,
     "server_pid": 0, "server_image": "", "known_pids": set(), "stores": {},
-    "client_pid": 0, "client_image": "",
+    "client_pid": 0, "client_image": "", "indexes": {},
 }
+
+#: Guards the lazy creation of a project's knowledge index -- see `knowledge`.
+_index_lock = threading.Lock()
 
 
 def reset() -> None:
+    # The knowledge indexes hold an open SQLite connection each, so they are
+    # closed rather than dropped: a connection left open keeps a handle on the
+    # database file, and on Windows that is enough to stop the directory it
+    # lives in from being removed.
+    for store in _state["indexes"].values():
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 - a reset must not raise
+            pass
     _state.update({
         "profile": None, "jobs": None, "game": None, "tools": None,
         "server_pid": 0, "server_image": "", "known_pids": set(), "stores": {},
-        "client_pid": 0, "client_image": "",
+        "client_pid": 0, "client_image": "", "indexes": {},
     })
 
 
@@ -109,6 +123,42 @@ def profile() -> Profile | None:
 
 def jobs() -> JobStore | None:
     return _state["jobs"]
+
+
+def knowledge() -> KnowledgeStore | None:
+    """The knowledge index of the open project, opened on first use.
+
+    Kept per resolved project root for the same reason the job stores are: one
+    SQLite connection per index file, reused by every tool and every worker
+    thread. A second connection to the same file would carry its own
+    transaction and its own view of it, so a build running in one and a search
+    running in the other could disagree about what is in the index.
+
+    Opened lazily rather than in `set_project`, because opening it creates the
+    file: a project that never asks a knowledge question should not find a
+    database in its working directory.
+
+    Lazy AND shared means two threads can arrive at an unopened index together,
+    so the creation is locked. Without the lock this is not a harmless double
+    open: the second connection cannot take the exclusive lock that switching
+    to WAL needs, the store reads that failure as "this file is not a usable
+    index", and its recovery path DELETES the database. Measured, not
+    theorised -- it happened on the first run of a build whose worker thread
+    and whose answer both reached for the index at once.
+    """
+    prof = _state["profile"]
+    if prof is None:
+        return None
+    key = str(Path(prof.root).resolve())
+    store = _state["indexes"].get(key)
+    if store is not None:
+        return store
+    with _index_lock:
+        store = _state["indexes"].get(key)
+        if store is None:
+            store = KnowledgeStore.for_project(prof.root)
+            _state["indexes"][key] = store
+        return store
 
 
 def game() -> str | None:

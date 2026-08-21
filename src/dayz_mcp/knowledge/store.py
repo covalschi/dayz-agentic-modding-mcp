@@ -78,6 +78,13 @@ SCHEMA_VERSION = 1
 #: Every search has a ceiling. Callers may lower it, never remove it.
 DEFAULT_LIMIT = 200
 
+#: How many SQLite virtual-machine steps pass between two checks of the search
+#: deadline. Small enough that a runaway query notices its ceiling promptly,
+#: large enough that the callback is noise next to the query itself -- measured
+#: on the vanilla corpus, an exact lookup runs in 0.07 ms with the handler
+#: installed and 0.07 ms without.
+_PROGRESS_STEPS = 1000
+
 #: Upper bound for a prefix range scan. The largest code point there is, so
 #: every name starting with the prefix sorts below it under SQLite's default
 #: (byte-wise) collation.
@@ -146,6 +153,16 @@ CREATE INDEX IF NOT EXISTS idx_decl_source ON decl (source_id);
 
 class KnowledgeStoreError(Exception):
     """Something the store refuses to do quietly."""
+
+
+class SearchTimeout(KnowledgeStoreError):
+    """A search was still running when its ceiling ran out.
+
+    Every search in this server has one. The predecessor project's two search
+    tools hang forever -- their open bug #51 -- because the client behind them
+    was created without a timeout, and an answer that never arrives is the one
+    failure a calling agent cannot diagnose, retry or route around.
+    """
 
 
 class DuplicateDeclaration(KnowledgeStoreError):
@@ -393,6 +410,43 @@ class KnowledgeStore:
                 raise
             self._conn.execute("COMMIT")
 
+    @contextmanager
+    def time_limit(self, seconds: float) -> Iterator[None]:
+        """Stop any query run inside this block once `seconds` have passed.
+
+        SQLite cannot be handed a timeout, so this is a progress handler that
+        aborts the statement once the deadline is behind it -- the only
+        mechanism that interrupts a query already running, rather than
+        declining to start one.
+
+        Holds the store's lock for the whole block. The handler belongs to the
+        connection, not to a statement, so two searches overlapping on one
+        connection would each be running under the other's deadline; the lock
+        is re-entrant, so `find` and `overrides` nest inside this without
+        noticing.
+
+        The handler is removed on the way out either way. A deadline left
+        installed would have expired by the next search, and every later query
+        on this connection would abort instantly.
+        """
+        with self._lock:
+            deadline = time.monotonic() + max(0.0, float(seconds))
+
+            def expired() -> int:
+                return 1 if time.monotonic() > deadline else 0
+
+            self._conn.set_progress_handler(expired, _PROGRESS_STEPS)
+            try:
+                yield
+            except sqlite3.OperationalError as exc:
+                if "interrupt" not in str(exc).lower():
+                    raise
+                raise SearchTimeout(
+                    f"the search was still running after {seconds:g}s and was stopped"
+                ) from exc
+            finally:
+                self._conn.set_progress_handler(None, 0)
+
     # ---------------------------------------------------------------- writing
 
     def put_source(
@@ -554,13 +608,30 @@ class KnowledgeStore:
             declarations=int(agg["decls"]),
         )
 
-    def sources(self, layer: str) -> list[SourceState]:
+    def sources(self, layer: str, paths: Iterable[str | Path] | None = None) -> list[SourceState]:
+        """What this layer has indexed, all of it or only the paths named.
+
+        `paths` exists for the caller that already knows which sources it cares
+        about. A layer with 2810 sources costs a full table read per staleness
+        check otherwise -- which is fine when the answer is "what changed
+        anywhere" and pure waste when the question is "what was this one file
+        when I indexed it".
+        """
+        sql = "SELECT path, size, mtime, indexed, declarations FROM source WHERE layer = ?"
+        rows: list[sqlite3.Row] = []
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT path, size, mtime, indexed, declarations FROM source"
-                " WHERE layer = ? ORDER BY path",
-                (layer,),
-            ).fetchall()
+            if paths is None:
+                rows = list(self._conn.execute(sql + " ORDER BY path", (layer,)).fetchall())
+            else:
+                wanted = [str(p) for p in paths]
+                # Chunked: SQLite's parameter limit is finite and a caller with
+                # a thousand paths must not turn into a silent failure.
+                for start in range(0, len(wanted), 400):
+                    chunk = wanted[start:start + 400]
+                    marks = ",".join("?" * len(chunk))
+                    rows += self._conn.execute(
+                        f"{sql} AND path IN ({marks}) ORDER BY path", (layer, *chunk)
+                    ).fetchall()
         return [
             SourceState(
                 path=row["path"],
@@ -571,6 +642,25 @@ class KnowledgeStore:
             )
             for row in rows
         ]
+
+    def empty_sources(self, layer: str) -> int:
+        """How many of this layer's sources were read and yielded nothing.
+
+        An archive nobody could read is recorded exactly like a file that
+        genuinely declares nothing -- both were seen, both gave zero -- so this
+        is the number that stops "sources" from overstating coverage. Which of
+        the two a particular source is belongs to the build that read it.
+
+        Counted in SQL rather than by listing the sources: an answer that
+        reports this on every search was materialising 2927 rows into Python
+        objects to add up a column, which cost twenty times the search itself.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM source WHERE layer = ? AND declarations = 0",
+                (layer,),
+            ).fetchone()
+        return int(row[0])
 
     def count(self, layer: str | None = None) -> int:
         with self._lock:
@@ -694,7 +784,7 @@ class KnowledgeStore:
             where.append("decl.owner_lower = ?")
             params.append(owner.lower())
         if layer:
-            where.append("decl.layer = ?")
+            where.append(_layer_term(bool(where)))
             params.append(layer)
         params.append(_ceiling(limit))
         return _SELECT + _where(where) + _ORDER, params
@@ -759,7 +849,9 @@ class KnowledgeStore:
             extra.append("decl.owner_lower = ?")
             extra_params.append(owner.lower())
         if layer:
-            extra.append("decl.layer = ?")
+            # Always the suppressed form here: every one of the three queries
+            # below leads with an indexed, selective term of its own.
+            extra.append(_layer_term(True))
             extra_params.append(layer)
 
         queries = [
@@ -810,6 +902,30 @@ _SELECT = (
 #: and sorting it. Measured on the vanilla corpus: prefix "On" took 8.4 ms
 #: ordered by layer first and 0.44 ms this way.
 _ORDER = " ORDER BY decl.name_lower, decl.layer_rank, decl.file, decl.line LIMIT ?"
+
+
+def _layer_term(has_other_terms: bool) -> str:
+    """The layer filter, written so it does not steal the query plan.
+
+    `layer` is the first column of `idx_decl_key`, and that index is UNIQUE --
+    so with no statistics on the table SQLite estimates a `layer = ?` lookup as
+    far more selective than it is, picks that index, and scans every row of the
+    layer. Measured on the real game's index (131 697 rows in `core`):
+
+        owner + layer   167 ms  ->  0.27 ms
+        kind  + layer    28 ms  ->  0.40 ms
+
+    The leading `+` is SQLite's documented way to say "this is a filter, not a
+    lookup": it makes the term unusable as an index driver without changing
+    what it matches. Applied only when some OTHER indexed term can drive the
+    query -- with `layer` alone there is nothing better, and suppressing it
+    would turn an index scan into a full table scan.
+
+    ANALYZE would fix the estimate instead, but it would have to be re-run
+    after every build to stay true, and a stale sqlite_stat1 misleads the
+    planner exactly as much as no statistics do.
+    """
+    return "+decl.layer = ?" if has_other_terms else "decl.layer = ?"
 
 
 def _where(clauses: Sequence[str]) -> str:

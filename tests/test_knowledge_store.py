@@ -520,6 +520,40 @@ def test_owner_search_uses_the_owner_index(store, tmp_path):
     assert "idx_decl_owner" in plan, plan
 
 
+def test_narrowing_by_layer_does_not_steal_the_query_plan(store, tmp_path):
+    """`layer` is the first column of the UNIQUE record-key index, and with no
+    statistics SQLite estimates a lookup on it as far more selective than it
+    is: it picks that index and walks every row of the layer. Measured on the
+    real game's index (131 697 rows in core), owner+layer took 167 ms and
+    kind+layer 28 ms -- against 0.27 ms and 0.40 ms once the layer term is
+    written so it cannot drive the query.
+
+    Behaviour cannot show this. Both plans return exactly the same rows; the
+    only difference is how many the engine had to look at, which is invisible
+    until the index is real."""
+    put_text(store, CORE, tmp_path, "a.c", "class Alpha { void Init(); }\n")
+    owner_plan = store.explain_find("", owner="Alpha", layer=CORE)
+    assert "idx_decl_owner" in owner_plan, owner_plan
+    assert "idx_decl_key" not in owner_plan, owner_plan
+    kind_plan = store.explain_find("", kind=CLASS, layer=CORE)
+    assert "idx_decl_kind" in kind_plan, kind_plan
+    assert "idx_decl_key" not in kind_plan, kind_plan
+    name_plan = store.explain_find("Alpha", layer=CORE)
+    assert "idx_decl_name" in name_plan, name_plan
+    # Narrowing still narrows -- the term is a filter, not decoration.
+    assert store.find("Alpha", layer=CORE)
+    assert store.find("Alpha", layer=PROJECT) == []
+
+
+def test_a_layer_on_its_own_still_uses_an_index(store, tmp_path):
+    """The one shape where the layer term has to drive the query: with nothing
+    else to search on, suppressing it would turn an index scan into a full
+    table scan -- the opposite of the fix above."""
+    put_text(store, CORE, tmp_path, "a.c", "class Alpha {}\n")
+    plan = store.explain_find("", layer=CORE).upper()
+    assert "SCAN" not in plan, plan
+
+
 # ----------------------------------------------------------------- overrides
 
 

@@ -488,8 +488,17 @@ def _rebuild(
 
 def _sync(
     store: KnowledgeStore, layer: str, root: str, sources: Sequence[_Source],
-    *, full: bool, on_duplicate: str, build: _Build,
+    *, full: bool, on_duplicate: str, build: _Build, only: frozenset[str] | None = None,
 ) -> LayerReport:
+    """`only` narrows the build to a named set of sources.
+
+    Without it the walk IS the layer's file set, so anything recorded and not
+    walked has been deleted. With it, the caller looked at a handful of paths
+    and nothing else -- so the sweep for vanished sources is confined to those
+    same paths, and the rest of the layer is left exactly where it was. Getting
+    that wrong would turn "reindex the file I just saved" into "throw the layer
+    away and keep one file", which still answers, and answers confidently.
+    """
     started = time.perf_counter()
     try:
         known = store.layer(layer) is not None
@@ -500,7 +509,10 @@ def _sync(
             indexed = _rebuild(store, layer, root, sources, on_duplicate, build)
             unchanged = 0
         else:
-            recorded = {s.path: s for s in store.sources(layer)}
+            # Reading the whole source table is the price of knowing what
+            # disappeared. A caller that named its sources already answered
+            # that question, so it pays for its own rows and no others.
+            recorded = {s.path: s for s in store.sources(layer, only)}
             todo = [
                 s for s in sources
                 if s.key not in recorded
@@ -689,6 +701,66 @@ def _resolve_convert(
 # ------------------------------------------------------------ the three layers
 
 
+def _indexable(path: Path, root: Path, suffixes: Sequence[str]) -> str:
+    """Why this named path is not a source of this layer, or "" if it is.
+
+    The same three rules the walk applies, spelled once so a path reached by
+    name can never enter the index by a route the walk would have refused --
+    a built mod under `@...` holds the packed copy of the very files being
+    indexed, and indexing both makes every declaration answer twice.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return "outside the project root"
+    if any(_skip_dir(part) for part in relative.parts[:-1]):
+        return (
+            "inside a directory the project layer never walks (a built mod folder, "
+            "a dot-directory)"
+        )
+    if not path.name.lower().endswith(tuple(s.lower() for s in suffixes)):
+        return f"not one of the indexed source kinds ({', '.join(suffixes)})"
+    return ""
+
+
+def _named_sources(
+    only: Iterable[str | Path], root: Path, suffixes: Sequence[str], build: _Build
+) -> tuple[frozenset[str], list[_Source]]:
+    """The sources the caller named, and the keys the build is allowed to touch.
+
+    A path that cannot be indexed is skipped and NAMED -- an agent that thinks
+    it reindexed a file it did not is one silent step from a confident wrong
+    answer, which is the whole failure this phase is built against.
+
+    A named path that no longer exists stays in the key set on purpose: `only`
+    means "these changed", and a delete is a change. It ends up in the key set
+    without a source, which is exactly how `_sync` comes to drop it.
+    """
+    keys: set[str] = set()
+    sources: list[_Source] = []
+    for raw in only:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            path = Path(os.path.normpath(str(candidate))).resolve()
+        except OSError:  # pragma: no cover - a path the OS will not even parse
+            build.note(f"{raw}: not a usable path, left alone")
+            continue
+        refusal = _indexable(path, root, suffixes)
+        if refusal:
+            build.note(f"{raw}: {refusal}, left alone")
+            continue
+        keys.add(str(path))
+        try:
+            stat = path.stat()
+        except OSError:
+            # Gone. Named, so it is dropped from the index below.
+            continue
+        sources.append(_file_source(FileStat(str(path), stat.st_size, stat.st_mtime), root))
+    return frozenset(keys), sources
+
+
 def build_project(
     store: KnowledgeStore,
     root: str | Path,
@@ -696,6 +768,7 @@ def build_project(
     configs: bool = True,
     full: bool = False,
     on_duplicate: str = REPORT,
+    only: Iterable[str | Path] | None = None,
 ) -> LayerReport:
     """The layer that goes stale between one agent turn and the next.
 
@@ -703,13 +776,37 @@ def build_project(
     build output would index yesterday's copy of today's file. One edited file
     costs one re-read; that ratio is the reason this phase is incremental at
     all.
+
+    `only` is the route for a caller that already knows what moved. The walk
+    exists to discover which of the layer's files changed; an agent that just
+    saved one does not need discovering, and skipping the walk is the
+    difference between a rebuild that costs the tree and one that costs the
+    file. What it gives up is stated rather than hidden: nothing outside the
+    named paths is looked at, so a file created or deleted elsewhere goes
+    unnoticed until the next ordinary build.
     """
     root = Path(root).resolve()
     suffixes = SCRIPT_SUFFIXES + (CONFIG_SUFFIXES if configs else ())
-    sources = [_file_source(f, root) for f in scan_tree(root, suffixes=suffixes)]
+    build = _Build()
+    if only is None:
+        limit: frozenset[str] | None = None
+        sources = [_file_source(f, root) for f in scan_tree(root, suffixes=suffixes)]
+    else:
+        if full:
+            raise LayerBuildError(
+                "only= re-reads the sources it names and full= re-reads every source "
+                "there is; asking for both says nothing about which was meant"
+            )
+        if store.layer(PROJECT) is None:
+            raise LayerBuildError(
+                "the project layer has never been built, so there is no layer to update "
+                "one file of -- an index holding only the named files would look like a "
+                "whole project and answer like one"
+            )
+        limit, sources = _named_sources(only, root, suffixes, build)
     return _sync(
         store, PROJECT, str(root), sources,
-        full=full, on_duplicate=on_duplicate, build=_Build(),
+        full=full, on_duplicate=on_duplicate, build=build, only=limit,
     )
 
 

@@ -22,6 +22,7 @@ from dayz_mcp.knowledge.parse import (
     ENUM,
     METHOD,
     Declaration,
+    parse_config,
     parse_file,
     parse_source,
     strip_source,
@@ -107,6 +108,34 @@ def test_strip_blanks_preprocessor_directives_but_remembers_them():
     assert sorted(st.directives.values()) == [("endif", ""), ("ifdef", "DIAG_DEVELOPER")]
     # The signature view carries no sentinel: it is sliced into user-facing text.
     assert BOUNDARY not in st.text
+
+
+def test_a_byte_order_mark_does_not_swallow_the_first_declaration():
+    """Found by a name-by-name parity sweep over this machine's modpack: one
+    config in 1458 opens with a BOM, and the parser lost its outer class --
+    the index then said the mod had no CfgPatches and filed everything nested
+    inside it at file scope.
+
+    In Enforce Script the same bug is worse, because the first declaration is
+    usually the class: the whole file parsed to nothing. Both readers feeding
+    this parser decode as plain utf-8 (`read_text(encoding="utf-8")` and
+    `bytes.decode("utf-8")`), and neither of those drops the mark -- so it has
+    to be handled here rather than assumed away upstream."""
+    bom = "﻿"
+    script = parse_source(bom + "class Foo\n{\n\tvoid Bar();\n}\n")
+    assert [(d.name, d.kind, d.line) for d in script] == [
+        ("Foo", CLASS, 1), ("Bar", METHOD, 3)
+    ]
+    config = parse_config(bom + "class CfgPatches\n{\n\tclass A {};\n};\n")
+    assert [(d.name, d.owner, d.line) for d in config] == [
+        ("CfgPatches", "", 1), ("A", "CfgPatches", 3)
+    ]
+    # The stripper's own contract: both views stay exactly as long as the
+    # source, or every offset after the mark points one character wrong.
+    src = bom + "class Foo {}\n"
+    st = strip_source(src)
+    assert len(st.code) == len(src)
+    assert len(st.text) == len(src)
 
 
 # ------------------------------------------------------------------ classes

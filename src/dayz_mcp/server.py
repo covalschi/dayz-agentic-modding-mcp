@@ -71,6 +71,12 @@ for _fn in (
     tools.client_move, tools.client_look, tools.client_press,
     tools.client_chat, tools.client_type,
     tools.client_verdict,
+    # The index. Build first, then ask -- and knowledge_status stands between
+    # them because it is the one that says whether an answer can be trusted
+    # yet. find/show/overrides are ordered the way a question narrows: what
+    # exists, what it looks like in full, who changes it.
+    tools.knowledge_build, tools.knowledge_status,
+    tools.knowledge_find, tools.knowledge_show, tools.knowledge_overrides,
 ):
     mcp.tool()(_wrap(_fn))
 

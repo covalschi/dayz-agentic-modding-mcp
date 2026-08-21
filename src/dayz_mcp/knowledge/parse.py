@@ -210,11 +210,35 @@ def _blank(chars: list[str], start: int, end: int) -> None:
             chars[k] = " "
 
 
+#: A byte-order mark, as it arrives once the bytes have been decoded. Windows
+#: editors write one; `encoding="utf-8"` and `bytes.decode("utf-8")` both keep
+#: it, unlike `utf-8-sig`, and every reader feeding this parser uses one of
+#: those two.
+_BOM = "﻿"
+
+
 def strip_source(source: str) -> Stripped:
     """Blank out everything that is not code, without moving a single offset."""
     n = len(source)
     code = list(source)
     text = list(source)
+    if _BOM in source:
+        # A file that opens with a byte-order mark used to lose its FIRST
+        # declaration -- and in Enforce Script that is usually the class, so
+        # the whole file went with it: `﻿class Foo { void Bar(); }` parsed
+        # to nothing at all. In a config the loss is quieter and worse: the
+        # outer class vanishes and everything nested inside it is recorded at
+        # file scope, so the index answers that the mod has no CfgPatches and
+        # that its classes belong to nobody. Found by a name-by-name parity
+        # sweep over this machine's modpack: one archive in 1458 config files,
+        # and it is not the kind of thing that gets noticed by reading.
+        #
+        # Replaced with a space rather than removed, because every offset in
+        # both views has to keep pointing at the same character of the source.
+        for index, char in enumerate(source):
+            if char == _BOM:
+                code[index] = " "
+                text[index] = " "
     i = 0
     while i < n:
         c = source[i]
