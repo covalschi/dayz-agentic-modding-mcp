@@ -222,6 +222,9 @@ if IS_WINDOWS:  # pragma: no cover - the import itself is the platform guard
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.SetActiveWindow.restype = wintypes.HWND
+    user32.SetActiveWindow.argtypes = [wintypes.HWND]
     user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
     user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -404,10 +407,22 @@ def focus(pid: int, settle: float = FOCUS_SETTLE_SECONDS) -> bool:
     open. That happened here once; it is why every input path in this module
     refuses on False instead of proceeding.
 
-    `AttachThreadInput` is the documented way to ask on the target's behalf. It
-    is detached again on every path, including the failing one: a thread left
-    attached to the game's input queue makes this process share the game's
-    input state.
+    `AttachThreadInput` is what makes the request permissible at all, and the
+    partner thread must be THE ONE THAT OWNS THE CURRENT FOREGROUND WINDOW --
+    not the target's. Windows grants `SetForegroundWindow` to a caller that
+    shares an input queue with the process currently holding the foreground;
+    sharing one with the window being raised grants nothing, because that
+    process has no such right to lend. Measured on this machine from a process
+    holding no foreground, against a live game client (2026-08-21):
+
+        attach to the TARGET's thread      -> foreground NOT taken
+        attach to the FOREGROUND's thread  -> foreground taken
+
+    The first is what this function did until that measurement, so `focus`
+    always returned False against another process's window and the one tool
+    that needs the foreground could never work. It is detached again on every
+    path, including the failing one: a thread left attached to another
+    process's input queue makes this process share that process's input state.
     """
     if not IS_WINDOWS:
         return False
@@ -417,16 +432,23 @@ def focus(pid: int, settle: float = FOCUS_SETTLE_SECONDS) -> bool:
     if foreground_pid() == pid:
         return True
     user32.ShowWindow(hwnd, SW_RESTORE)
-    target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+    holder = user32.GetForegroundWindow()
+    holder_thread = int(user32.GetWindowThreadProcessId(holder, None)) if holder else 0
     mine = int(kernel32.GetCurrentThreadId())
     attached = False
-    if target_thread and target_thread != mine:
-        attached = bool(user32.AttachThreadInput(mine, target_thread, True))
+    if holder_thread and holder_thread != mine:
+        attached = bool(user32.AttachThreadInput(mine, holder_thread, True))
     try:
         user32.SetForegroundWindow(hwnd)
+        # Only meaningful while attached -- both are gated by the same
+        # foreground rules, and SetActiveWindow acts within the calling
+        # thread's input queue, which is the shared one for as long as the
+        # attachment lasts.
+        user32.BringWindowToTop(hwnd)
+        user32.SetActiveWindow(hwnd)
     finally:
         if attached:
-            user32.AttachThreadInput(mine, target_thread, False)
+            user32.AttachThreadInput(mine, holder_thread, False)
     time.sleep(max(0.0, settle))
     # By pid, not by handle: the question this guard answers is "will keystrokes
     # reach the client process", and a client that put up a second window of its

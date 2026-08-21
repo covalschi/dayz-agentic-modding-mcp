@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .. import gamepad, winui
@@ -138,6 +139,31 @@ CHAT_VERB_MISSING_HINT = (
     "new pbo. There is no keyboard path to chat in this tool set -- client_type "
     "fills an input field that is already open, and it costs the foreground."
 )
+
+# When the stand on the port was not started by this session. Every other
+# client tool works against such a stand on purpose -- client_start says so and
+# joins it anyway -- but chat is delivered server-side, so it goes through the
+# same channel as the world tools and inherits their rule. Without this the
+# caller gets world.py's generic refusal, whose hint says "start one with
+# server_start" -- and server_start would refuse the held port. Measured live:
+# a client joined a neighbouring stand happily and then client_chat failed with
+# advice that could not be followed.
+def _foreign_stand_hint(stand: dict) -> str:
+    holders = ", ".join(str(h) for h in stand.get("port_holders") or [])
+    whose = (
+        f"The stand on udp/{stand.get('port')} is held by pid(s) {holders}, which this "
+        "session did not start, so server_start would refuse that port until it is stopped. "
+        if holders
+        else ""
+    )
+    return (
+        "chat is delivered server-side, through the same channel as the world tools, so it "
+        "needs a stand THIS session started -- unlike client_start, client_shot and the "
+        f"gamepad, which work against whatever stand is on the port. {whose}Either restart "
+        "the stand through this session (server_stop, then server_start) or send the line "
+        "from the session that owns it. There is no keyboard path to chat here: client_type "
+        "fills an input field that is already open, and it costs the foreground."
+    )
 
 # The guard against two client starts at once, and PROCESS-global on purpose:
 # what it protects is that there is one client profile directory and one
@@ -758,6 +784,13 @@ def client_chat(text: str, color: str = "", timeout: float = WORLD_TIMEOUT_SECON
         # Only the hint is replaced, because the generic one would send the
         # reader looking at their own project's mod rather than at the bridge.
         return Result(False, result.data, result.error, CHAT_VERB_MISSING_HINT)
+    if not result.ok and "no server started by this session" in (result.error or ""):
+        # Same treatment, same reason: the words are true, the generic hint is
+        # not actionable here. See _foreign_stand_hint.
+        return Result(
+            False, result.data, result.error,
+            _foreign_stand_hint(_stand_view(session.profile().machine.port)),
+        )
     return result
 
 
@@ -789,15 +822,25 @@ def client_type(text: str, submit: bool = False) -> Result:
     at fault.
 
     `submit` presses Enter afterwards, so filling a field and confirming it does
-    not need a second tool that takes the foreground all over again.
+    not need a second tool that takes the foreground all over again. With
+    `submit=True` and EMPTY text it sends Enter and nothing else, which is the
+    only way anything in this tool set can confirm or open something. Measured
+    on a live client: the game binds its chat line to Enter alone, and the
+    virtual gamepad's A button -- the obvious candidate for a confirm -- moved
+    nothing in the pause menu at 0.1 s or 0.5 s, while B (back) dismissed it at
+    the default. So dismissing is a gamepad job and confirming is this one.
+    Empty text WITHOUT submit is still refused: it would take the foreground to
+    do nothing at all.
     """
     pid, refusal = _require_live_client()
     if refusal:
         return refusal
-    if not text:
+    if not text and not submit:
         return fail(
             "client_type needs something to type",
-            hint="pass the text for the field; use submit=True to press Enter afterwards",
+            hint="pass the text for the field; submit=True presses Enter afterwards, and "
+                 "submit=True with no text presses Enter alone -- which is how the client's "
+                 "own chat line is opened, since the gamepad has no confirm",
         )
 
     # Checked HERE, ahead of the focus grab, even though type_text checks it
@@ -821,11 +864,14 @@ def client_type(text: str, submit: bool = False) -> Result:
             hint=FOREGROUND_REFUSED_HINT,
         )
 
-    typed = winui.type_text(pid, text)
-    if not typed.ok:
-        return typed
+    if text:
+        typed = winui.type_text(pid, text)
+        if not typed.ok:
+            return typed
+        data = dict(typed.data)
+    else:
+        data = {"typed": "", "characters": 0}
 
-    data = dict(typed.data)
     data["foreground_taken"] = True
     data["side_effect"] = FOREGROUND_NOTICE
     data["submitted"] = False
@@ -882,13 +928,45 @@ def client_verdict(since: float | None = None) -> Result:
                      "again with the same since",
             )
     lines = report.read_text(encoding="utf-8", errors="replace").splitlines()
-    data = build_verdict(lines, session.profile().expect)
+
+    # The project's [expect] block describes the SERVER's log, and three of its
+    # keys name things only a server produces: the ready line and its counters
+    # come from the mod's server-side init, and max_warnings is a budget counted
+    # over that same log. Judging a client .RPT by them turns a perfectly
+    # healthy client into a failure -- measured on the first live client this
+    # tool ever saw: verdict "fail", 0 errors, 0 crashes, and nine reasons, all
+    # of them the absence of server-side facts from a client log. The rest of
+    # [expect] is about the TEXT of a log line (forbidden patterns, extra error
+    # patterns, project noise) and applies to any log this product reads, so it
+    # is kept. `not_applied` says which keys were dropped, because a verdict
+    # that silently ignores part of a declaration is its own trap.
+    expect = session.profile().expect
+    dropped = [
+        name for name, declared in (
+            ("expect.ready_line", bool(expect.ready_line)),
+            ("expect.counters", bool(expect.counters)),
+            ("expect.max_warnings", expect.max_warnings is not None),
+        ) if declared
+    ]
+    data = build_verdict(
+        lines, replace(expect, ready_line="", counters={}, max_warnings=None)
+    )
     data["log"] = str(report)
     data["source"] = "client .RPT"
+    data["not_applied"] = dropped
     data["note"] = (
         "judged from the client's .RPT, not from a script log: the Steam DIAG build has "
         "the script log receivers compiled out, so a client writes no script_*.log at "
         "all. Anything the mod printed to the RPT is judged here; anything it logged only "
-        "to the script log is not missing, it was never written"
+        "to the script log is not missing, it was never written. This is an ERRORS-AND-"
+        "CRASHES verdict: "
+        + (
+            "the declared " + ", ".join(dropped) + " describe the server's log and were "
+            "not applied -- a client never prints the mod's server-side ready line or its "
+            "counters, so applying them would fail every healthy client"
+            if dropped
+            else "the project declares no server-side ready line or counters, so there was "
+                 "nothing to leave out"
+        )
     )
     return ok(data)

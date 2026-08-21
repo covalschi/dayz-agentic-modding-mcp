@@ -617,3 +617,109 @@ def test_focus_is_true_only_because_the_check_after_the_grab_said_so(monkeypatch
 
     assert winui.focus(os.getpid(), settle=0.0) is True
     assert len(reads) == 2, "the foreground was read once, so nothing was verified"
+
+
+FOREIGN_FOREGROUND_HWND = 0x4242
+FOREGROUND_THREAD = 0x111111
+TARGET_THREAD = 0x222222
+
+
+def _thread_ids(monkeypatch):
+    """Make thread lookups answer differently for the foreground window and for
+    the target, while leaving the by-reference form (which is how `find_window`
+    and `foreground_pid` ask for a PID) on the real API."""
+    real = winui.user32.GetWindowThreadProcessId
+
+    def lookup(hwnd, out):
+        if out is None:
+            return (
+                FOREGROUND_THREAD if int(hwnd or 0) == FOREIGN_FOREGROUND_HWND
+                else TARGET_THREAD
+            )
+        return real(hwnd, out)
+
+    monkeypatch.setattr(winui.user32, "GetWindowThreadProcessId", lookup)
+
+
+@WINDOWS_ONLY
+def test_focus_attaches_to_the_thread_holding_the_foreground_not_the_targets(
+    monkeypatch, own_window
+):
+    """Which thread `AttachThreadInput` partners with is the whole of whether
+    `focus` can work at all, and the first version partnered with the wrong one.
+
+    Windows grants `SetForegroundWindow` to a caller that shares an input queue
+    with the process CURRENTLY HOLDING the foreground. Sharing one with the
+    window being raised grants nothing -- that process has no such right to
+    lend. Measured from a process holding no foreground, against a live game
+    client: attaching to the target's thread left the foreground where it was;
+    attaching to the foreground holder's thread moved it. Until then `focus`
+    returned False against every window it did not own, so `client_type` -- the
+    one tool in the phase that needs the foreground -- could never run.
+
+    Nothing real is grabbed here: the API calls are stubs, so the suite still
+    cannot take the screen from whoever is at the machine.
+    """
+    attachments = []
+    _thread_ids(monkeypatch)
+    monkeypatch.setattr(winui.user32, "GetForegroundWindow", lambda: FOREIGN_FOREGROUND_HWND)
+    monkeypatch.setattr(
+        winui.user32, "AttachThreadInput",
+        lambda mine, other, on: attachments.append((other, bool(on))) or 1,
+    )
+    monkeypatch.setattr(winui.user32, "SetForegroundWindow", lambda hwnd: 1)
+    monkeypatch.setattr(winui.user32, "BringWindowToTop", lambda hwnd: 1)
+    monkeypatch.setattr(winui.user32, "SetActiveWindow", lambda hwnd: 0)
+    reads = []
+
+    def foreground_pid():
+        reads.append(1)
+        return os.getpid() if len(reads) > 1 else os.getpid() + 1
+
+    monkeypatch.setattr(winui, "foreground_pid", foreground_pid)
+
+    assert winui.focus(os.getpid(), settle=0.0) is True
+
+    partners = {thread for thread, _on in attachments}
+    assert FOREGROUND_THREAD in partners, (
+        "focus did not attach to the thread that owns the foreground, so Windows "
+        f"would refuse the grab: attached to {partners!r}"
+    )
+    assert TARGET_THREAD not in partners, (
+        "focus attached to the TARGET's thread -- the partner that grants nothing"
+    )
+    assert (FOREGROUND_THREAD, False) in attachments, (
+        "the attachment was never undone: a thread left sharing another process's "
+        "input queue shares that process's input state"
+    )
+
+
+@WINDOWS_ONLY
+def test_focus_still_asks_when_there_is_no_foreground_window_to_attach_to(
+    monkeypatch, own_window
+):
+    """With no foreground window at all there is nobody to borrow the right
+    from -- and nobody holding it either, which is one of the cases Windows
+    permits outright. So the grab must still be attempted, not skipped."""
+    _thread_ids(monkeypatch)
+    monkeypatch.setattr(winui.user32, "GetForegroundWindow", lambda: 0)
+    attachments = []
+    monkeypatch.setattr(
+        winui.user32, "AttachThreadInput",
+        lambda mine, other, on: attachments.append((other, bool(on))) or 1,
+    )
+    grabs = []
+    monkeypatch.setattr(winui.user32, "SetForegroundWindow", lambda hwnd: grabs.append(hwnd) or 1)
+    monkeypatch.setattr(winui.user32, "BringWindowToTop", lambda hwnd: 1)
+    monkeypatch.setattr(winui.user32, "SetActiveWindow", lambda hwnd: 0)
+    reads = []
+
+    def foreground_pid():
+        reads.append(1)
+        return os.getpid() if len(reads) > 1 else os.getpid() + 1
+
+    monkeypatch.setattr(winui, "foreground_pid", foreground_pid)
+
+    assert winui.focus(os.getpid(), settle=0.0) is True
+    assert grabs, "no foreground window is not a reason to skip the grab"
+    assert attachments == [], "there was no foreground thread to attach to"

@@ -572,6 +572,40 @@ def test_client_chat_explains_a_bridge_build_that_has_no_chat_verb(tmp_path, mon
     assert "bridge_build" in result.hint
 
 
+def test_client_chat_explains_a_stand_this_session_did_not_start(tmp_path, monkeypatch):
+    """The hint the live run caught being un-followable.
+
+    client_start deliberately JOINS a stand it did not start, and says so.
+    client_chat then goes through the world channel, which acts only on a
+    server this session started, and inherited its generic refusal -- whose
+    hint says "start one with server_start". server_start would refuse, because
+    the port is held by the very stand the client is connected to. So the
+    advice pointed at a door that cannot open, and the real situation (the
+    stand belongs to someone else) went unnamed.
+    """
+    make_project(tmp_path)
+    monkeypatch.setattr(client, "udp_port_holders", lambda port: [68044])
+    monkeypatch.setattr(client, "is_alive", lambda pid, image="": False)
+    monkeypatch.setattr(
+        client, "_world_command",
+        lambda v, a, t: Result(
+            False, None,
+            "no server started by this session is running, so there is nothing to act on",
+            "start one with server_start, wait for the boot job to finish, then call "
+            "world_ready before the first command",
+        ),
+    )
+
+    result = client.client_chat("hello")
+
+    assert result.ok is False
+    # The mod-independent truth is kept; only the unfollowable advice is replaced.
+    assert "no server started by this session" in result.error
+    assert "68044" in result.hint, result.hint
+    assert "server_stop" in result.hint
+    assert "client_start" in result.hint
+
+
 def test_client_chat_refuses_empty_text(tmp_path, monkeypatch):
     make_project(tmp_path)
     monkeypatch.setattr(client, "_world_command", lambda v, a, t: ok({}))
@@ -631,6 +665,53 @@ def test_client_type_can_submit_the_field(tmp_path, monkeypatch):
     assert result.ok is True
     assert keys == ["enter"]
     assert result.data["submitted"] is True
+
+
+def test_client_type_can_press_enter_with_nothing_to_type(tmp_path, monkeypatch):
+    """The only confirm anything in this tool set has.
+
+    Measured on a live client: the game binds its chat line to Enter and
+    nothing else, and the gamepad's A -- the obvious candidate for a confirm --
+    changed nothing in the pause menu at 0.1 s or at 0.5 s, while B dismissed
+    it at the default hold. So "open the field" and "confirm it" are reachable
+    only through Enter, and Enter was reachable only after something had been
+    typed first.
+    """
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+    started = client.client_start(timeout=5)
+    wait_for_job(started.data["job_id"])
+    monkeypatch.setattr(winui, "focus", lambda pid, **kw: True)
+    typed = []
+    monkeypatch.setattr(winui, "type_text", lambda pid, text: typed.append(text) or ok({}))
+    keys = []
+    monkeypatch.setattr(winui, "press_key", lambda pid, name: keys.append(name) or ok({"key": name}))
+
+    result = client.client_type("", submit=True)
+
+    assert result.ok is True
+    assert keys == ["enter"]
+    assert result.data["submitted"] is True
+    assert result.data["foreground_taken"] is True
+    # Enter ALONE: the typing path must not run at all for an empty string.
+    assert typed == []
+    assert result.data["characters"] == 0
+
+
+def test_client_type_with_neither_text_nor_submit_still_refuses(tmp_path, monkeypatch):
+    """Empty and not submitting has nothing to do, and doing nothing is not
+    worth the foreground -- so it must refuse BEFORE the grab, not become a
+    no-op that costs the owner their screen."""
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+    started = client.client_start(timeout=5)
+    wait_for_job(started.data["job_id"])
+    focused = []
+    monkeypatch.setattr(winui, "focus", lambda pid, **kw: focused.append(pid) or True)
+
+    result = client.client_type("")
+
+    assert result.ok is False
+    assert focused == []
+    assert "submit" in result.hint
 
 
 def test_client_type_refuses_untypeable_text_before_stealing_the_screen(tmp_path, monkeypatch):
@@ -799,6 +880,94 @@ def test_client_verdict_says_it_reads_the_rpt_not_the_script_log(tmp_path):
 
     assert "RPT" in result.data["source"]
     assert "script" in result.data["note"].lower()
+
+
+CLIENT_VERDICT_PROFILE = """
+[project]
+name = "my-mod"
+
+[build]
+mods = ["MyMod"]
+
+[expect]
+ready_line = "[MyMod] configs loaded"
+max_warnings = 0
+forbid = ["Bad type"]
+
+[expect.counters]
+factions = 7
+rules = 43
+"""
+
+
+def _project_with_server_expectations(tmp_path: Path) -> Path:
+    """A project whose [expect] declares the things only a SERVER prints."""
+    root = tmp_path / "project"
+    root.mkdir(parents=True)
+    (root / "dayz-mcp.toml").write_text(textwrap.dedent(CLIENT_VERDICT_PROFILE), encoding="utf-8")
+    (root / "MyMod").mkdir()
+    (root / "MyMod" / "config.cpp").write_text("", encoding="utf-8")
+    stand = tmp_path / "stand"
+    (stand / "profiles").mkdir(parents=True)
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "DayZDiag_x64.exe").write_bytes(b"")
+    (root / "dayz-mcp.local.toml").write_text(
+        "[machine]\n"
+        f'stand_root = "{stand.as_posix()}"\n'
+        f'game = "{game.as_posix()}"\n'
+        "port = 2302\n",
+        encoding="utf-8",
+    )
+    opened = tools.project_open(str(root))
+    assert opened.ok, opened.error
+    return stand
+
+
+def test_client_verdict_does_not_judge_a_client_by_the_servers_ready_line(tmp_path):
+    """The defect the first live client ever run through this tool exposed.
+
+    [expect] describes the SERVER's log. Its ready line and counters are
+    printed by the mod's server-side init, and max_warnings is a budget counted
+    over that same log -- a client .RPT contains none of it, by construction.
+    Applying them anyway made a healthy client come back `fail` with nine
+    reasons, every one of them the absence of a server-side fact, alongside
+    `errors_total: 0` and `crashes_total: 0`.
+    """
+    stand = _project_with_server_expectations(tmp_path)
+    profiles = stand / "clientprofile"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "DayZDiag_x64_2026.RPT").write_text(
+        "starting\nSomething harmless\nWarning Message: nothing important\n", encoding="utf-8"
+    )
+
+    result = client.client_verdict()
+
+    assert result.ok is True
+    assert result.data["verdict"] == "pass", result.data["reasons"]
+    assert result.data["reasons"] == []
+    assert result.data["counters_unexpected"] == {}
+    assert set(result.data["not_applied"]) == {
+        "expect.ready_line", "expect.counters", "expect.max_warnings"
+    }
+    assert "server" in result.data["note"].lower()
+
+
+def test_client_verdict_still_fails_on_what_a_client_log_really_can_say(tmp_path):
+    """The other half: dropping the server-only keys must not disarm the
+    verdict. A forbidden pattern is about the TEXT of a line and applies to any
+    log this product reads."""
+    stand = _project_with_server_expectations(tmp_path)
+    profiles = stand / "clientprofile"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "DayZDiag_x64_2026.RPT").write_text(
+        "starting\nBad type in something\n", encoding="utf-8"
+    )
+
+    result = client.client_verdict()
+
+    assert result.data["verdict"] == "fail"
+    assert result.data["errors_total"] >= 1
 
 
 def test_client_verdict_without_a_run_names_client_start(tmp_path):
