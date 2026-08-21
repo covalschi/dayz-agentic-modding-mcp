@@ -8,6 +8,12 @@ dependencies = ["mcp==1.29.0", "anyio>=4.5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The virtual gamepad (src/dayz_mcp/gamepad.py). Optional on purpose: it is the
+# only part of this server that depends on a kernel driver being installed
+# (ViGEmBus, a machine-owner act), and it is imported lazily so a machine
+# without it still runs every other tool -- and still gets a refusal with
+# installation instructions instead of a traceback.
+client = ["vgamepad>=0.1.0; sys_platform == 'win32'"]
 
 [project.scripts]
 dayz-mcp = "dayz_mcp.server:main"
