@@ -22,6 +22,7 @@ about a script class must not have to wade through them -- and a caller asking
 "is there an item class with this name in the game" must be able to ask exactly
 that.
 """
+import os
 import re
 import textwrap
 import threading
@@ -355,6 +356,52 @@ def test_status_measures_staleness_rather_than_guessing_it(tmp_path):
     assert "knowledge_build" in result.hint
 
 
+def test_the_live_staleness_path_catches_a_size_move_and_a_time_move(tmp_path):
+    """Both halves of `size != size or mtime != mtime`, on the path that is
+    actually taken.
+
+    `_measure` uses `layers.staleness_of` whenever the walk can be
+    reconstructed, which is the normal case for all three layers;
+    `store.staleness` is the fallback, and it was the only one covered.
+    Reducing the disjunction in `staleness_of` to EITHER half alone passed all
+    773 tests, twice. The shipped code was right on both paths -- this is the
+    coverage that stops the next edit from removing one silently.
+
+    A file's modification time is restored to the nanosecond rather than
+    approximated, so "only the size moved" is exactly true; the preconditions
+    are asserted, because a platform that cannot round-trip the timestamp would
+    otherwise make this pass while testing the other half twice.
+    """
+    root = tmp_path / "proj"
+    open_project(root)
+    build_project_layer()
+    edited = root / "MyMod" / "scripts" / "4_World" / "thing.c"
+    original = edited.read_bytes()
+    indexed = edited.stat()
+
+    # Size moves; the time is put back to what was indexed.
+    edited.write_bytes(original + b"// a longer file, same timestamp\n")
+    os.utime(edited, ns=(indexed.st_atime_ns, indexed.st_mtime_ns))
+    assert edited.stat().st_mtime == indexed.st_mtime
+    assert edited.stat().st_size != indexed.st_size
+    by_size = tools.knowledge_find("ProjectThing")
+    assert by_size.data["stale"] is True, "a file that grew with its clock held still"
+
+    # Time moves; the size stays exactly where it was.
+    build_project_layer()
+    indexed = edited.stat()
+    edited.write_bytes(edited.read_bytes())
+    os.utime(edited, ns=(indexed.st_atime_ns, indexed.st_mtime_ns + 120_000_000_000))
+    assert edited.stat().st_size == indexed.st_size
+    assert edited.stat().st_mtime != indexed.st_mtime
+    by_time = tools.knowledge_find("ProjectThing")
+    assert by_time.data["stale"] is True, "a file rewritten to the same length"
+
+    # And the layer is not simply always stale: rebuilt, it is quiet again.
+    build_project_layer()
+    assert tools.knowledge_find("ProjectThing").data["stale"] is False
+
+
 def test_status_sees_a_source_the_index_has_never_met(tmp_path):
     root = tmp_path / "proj"
     open_project(root)
@@ -542,6 +589,53 @@ def test_a_stale_project_layer_says_so_on_a_successful_answer(tmp_path):
     project = {view["layer"]: view for view in result.data["layers"]}[PROJECT]
     assert project["stale"] is True
     assert "knowledge_build" in result.hint
+
+
+def test_the_project_layer_is_measured_even_when_it_answered_nothing(tmp_path):
+    """PROPERTY 1, the half the module docstring calls "the one that matters",
+    and it had no test at all.
+
+    `_freshness` reports the project layer on EVERY answer, contributed or not.
+    Mutating `if layer == PROJECT or layer in used:` down to `if layer in used:`
+    passed all 773 tests -- because the test that looks like it covers this
+    searches a name that IS in the project layer, so `layer in used` already
+    holds and the mutation is invisible.
+
+    What the mutation costs, measured: the answer goes from
+    `layers=['project','core'], stale=True` with the honest hint to
+    `layers=['core'], stale=False` and an EMPTY hint. That is the silent
+    confident answer about code that no longer exists -- the exact failure this
+    phase was built to prevent.
+
+    So the name searched here is deliberately one the project layer does NOT
+    hold, while a project file has been edited since the layer was built.
+    """
+    root = tmp_path / "proj"
+    open_project(root)
+    build_project_layer()
+    seed(CORE, "core.c", [decl("CoreOnlyThing")])
+    edited = root / "MyMod" / "scripts" / "4_World" / "thing.c"
+    edited.write_text("class ProjectThing extends House {}\n// edited\n", encoding="utf-8")
+
+    result = tools.knowledge_find("CoreOnlyThing")
+    assert result.ok, result.error
+    assert [r["layer"] for r in result.data["results"]] == [CORE]
+
+    layers = {view["layer"]: view for view in result.data["layers"]}
+    assert PROJECT in layers, "the layer that did not answer is the one that goes stale"
+    assert layers[PROJECT]["measured"] is True
+    assert layers[PROJECT]["stale"] is True
+    assert any("thing.c" in path for path in layers[PROJECT]["changed"])
+    assert result.data["stale"] is True
+    assert "knowledge_build" in result.hint
+
+    # The same for the other two answer shapes, so the property cannot be lost
+    # in one of them while the third keeps the test green.
+    for answer in (tools.knowledge_show("CoreOnlyThing"),
+                   tools.knowledge_overrides("CoreOnlyThing")):
+        by_layer = {view["layer"]: view for view in answer.data["layers"]}
+        assert by_layer[PROJECT]["stale"] is True, answer
+        assert answer.data["stale"] is True
 
 
 def test_an_empty_answer_from_an_incomplete_index_is_a_refusal(tmp_path):
@@ -861,3 +955,83 @@ def test_reopening_the_same_project_keeps_one_index(tmp_path):
     first = session.knowledge()
     tools.project_open(str(root))
     assert session.knowledge() is first
+
+
+def test_an_index_that_cannot_be_opened_is_an_answer_and_not_a_raise(tmp_path, monkeypatch):
+    """The other half of the same failure. `server._wrap` does not catch, so an
+    exception out of the lazy open reaches the caller as a raised tool call
+    rather than `{ok, data, error, hint}` -- the one shape this server never
+    breaks. Every one of the five goes through the same door, so none of them
+    can be the one that still throws."""
+    open_project(tmp_path / "proj")
+
+    def refuse():
+        raise OSError("the index file is not writable")
+
+    monkeypatch.setattr(session, "knowledge", refuse)
+    for call in (
+        lambda: tools.knowledge_build(),
+        lambda: tools.knowledge_status(),
+        lambda: tools.knowledge_find("Thing"),
+        lambda: tools.knowledge_show("Thing"),
+        lambda: tools.knowledge_overrides("Thing"),
+    ):
+        result = call()
+        assert not result.ok
+        assert "not writable" in result.error
+        assert "knowledge_build" in result.hint
+
+
+def test_threads_reaching_an_unopened_index_together_do_not_destroy_it(tmp_path):
+    """The race that DELETES the database, pinned.
+
+    The index is opened lazily and shared, so a build's worker thread and the
+    answering call can arrive at an unopened one together. Without the lock the
+    second connection cannot take the exclusive lock that switching to WAL
+    needs, the store reads that as "not a usable index", and its recovery path
+    unlinks the file. Removing `session._index_lock` passed the whole suite;
+    six threads on a barrier reproduced the destruction in 27 of 30 rounds.
+
+    The window is bounded, and that bound is worth knowing rather than
+    guessing: WAL is recorded in the file header, so an index that ALREADY
+    exists is opened by both racers without a fight (20 of 20 rounds survived).
+    Only first creation can destroy anything -- which is exactly what this
+    covers.
+    """
+    rounds, racers = 8, 6
+    for attempt in range(rounds):
+        root = tmp_path / f"race{attempt}"
+        open_project(root)
+        # The precondition the race needs, and the wiring proof for this test:
+        # opening a project must NOT create the index, or there is nothing to
+        # race over and this passes for the wrong reason.
+        assert not (root / ".dayz-mcp" / "knowledge.db").exists()
+
+        gate = threading.Barrier(racers)
+        reached, failures = [], []
+
+        def reach():
+            try:
+                gate.wait(timeout=10)
+                reached.append(session.knowledge())
+            except BaseException as exc:  # noqa: BLE001 - a thread must report, not die
+                failures.append(f"{type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=reach) for _ in range(racers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert not failures, failures
+        assert len(reached) == racers
+        assert len({id(store) for store in reached}) == 1, (
+            f"round {attempt}: {len({id(s) for s in reached})} stores were built for "
+            "one project -- the loser's recovery path deletes the database"
+        )
+        # And the survivor is a working index on disk, not a handle to a file
+        # that was unlinked underneath it.
+        store = reached[0]
+        store.put_source(PROJECT, "raced.c", [decl("RacedThing")], size=1, mtime=1.0)
+        assert store.path.is_file()
+        assert [r.name for r in store.find("RacedThing")] == ["RacedThing"]

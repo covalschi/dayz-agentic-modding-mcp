@@ -123,6 +123,37 @@ _SOURCE_SUFFIXES: tuple[str, ...] = SCRIPT_SUFFIXES + CONFIG_SUFFIXES
 # --------------------------------------------------------------- layer basics
 
 
+def _index() -> tuple[KnowledgeStore | None, Result | None]:
+    """The open project's index, or a refusal shaped like every other answer.
+
+    Opening it is the one step in these tools that can fail outside their own
+    logic: the file is created on first use, and a file that cannot be opened
+    at all raises out of SQLite rather than returning anything. `server._wrap`
+    does not catch, so an escaping exception reaches the caller as a raised
+    tool call instead of `{ok, data, error, hint}` -- the one shape this server
+    never breaks. Broad on purpose: a narrow catch that misses one exception
+    type leaves exactly the hole this exists to close.
+
+    Call it after `require_project`, which is what makes `None` here mean "the
+    index could not be opened" rather than "no project".
+    """
+    try:
+        store = session.knowledge()
+    except Exception as exc:  # noqa: BLE001 - an escaping raise answers nobody
+        return None, fail(
+            f"the knowledge index could not be opened: {type(exc).__name__}: {exc}",
+            hint="the index lives in the project's .dayz-mcp/ and is derived data -- "
+                 "check that the directory is writable, or delete knowledge.db and "
+                 "rebuild with knowledge_build()",
+        )
+    if store is None:  # pragma: no cover - require_project already refused
+        return None, fail(
+            "no project is open, so there is no knowledge index",
+            hint="open one with project_open(path)",
+        )
+    return store, None
+
+
 def _inapplicable(profile, game: str | None) -> dict[str, str]:
     """Why each layer does not apply to this project, empty where it does.
 
@@ -528,8 +559,12 @@ def knowledge_build(layer: str = ALL, full: bool = False, only: list[str] | None
     # Resolved here, in the calling thread, so the worker below can never open
     # a second connection to the same index file -- two of those race over the
     # exclusive lock that switching to WAL needs, and the loser's recovery path
-    # deletes the database.
-    index = session.knowledge()
+    # deletes the database. The window is bounded: WAL lives in the file
+    # header, so an index that already exists is opened by both without a
+    # fight, and only FIRST CREATION can destroy anything.
+    index, failure = _index()
+    if failure:
+        return failure
 
     wanted = (layer or "").strip().lower()
     if wanted not in (ALL, PROJECT, DEPS, CORE):
@@ -694,7 +729,9 @@ def knowledge_status() -> Result:
     guard = require_project()
     if guard:
         return guard
-    store = session.knowledge()
+    store, failure = _index()
+    if failure:
+        return failure
     profile = session.profile()
     game = session.game()
 
@@ -964,7 +1001,9 @@ def knowledge_find(
     guard = require_project()
     if guard:
         return guard
-    store = session.knowledge()
+    store, failure = _index()
+    if failure:
+        return failure
     profile = session.profile()
     game = session.game()
 
@@ -1065,6 +1104,15 @@ def _ancestors(store: KnowledgeStore, record: Record) -> list[str]:
     Walked rather than stored, so it is capped and cycle-guarded: a chain that
     loops is something somebody wrote, and answering it with an endless walk is
     the worst possible way to report that.
+
+    Each step takes ONE declaration of the parent -- whichever the store's own
+    order puts first, which is nearest-layer-first. A name declared twice (a
+    mod reopening a game class, or the two branches of an `#ifdef`) therefore
+    picks a branch rather than reporting both. It has not misreported on real
+    data, and it cannot go far wrong: only the first link can have a second
+    declaration worth choosing between, because above it the chain is whatever
+    that one declaration says. `knowledge_find` on the parent shows every
+    declaration of it when the choice matters.
     """
     chain: list[str] = []
     seen = {record.name.lower()}
@@ -1202,7 +1250,9 @@ def knowledge_show(
     guard = require_project()
     if guard:
         return guard
-    store = session.knowledge()
+    store, failure = _index()
+    if failure:
+        return failure
     profile = session.profile()
     game = session.game()
 
@@ -1292,7 +1342,9 @@ def knowledge_overrides(
     guard = require_project()
     if guard:
         return guard
-    store = session.knowledge()
+    store, failure = _index()
+    if failure:
+        return failure
     profile = session.profile()
     game = session.game()
 

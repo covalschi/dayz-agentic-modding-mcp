@@ -36,7 +36,12 @@ the same tree is compiled for a server, a client and a diag build, and this
 server drives all of them. Resolving against a chosen set would make the index
 answer "no such method" for a method that exists in the build actually
 running. So every declaration is indexed and carries the conjunction of the
-conditions it is written under, and callers that know their build can filter.
+conditions it is written under. That conjunction travels with the record and
+is visible in every answer, but no tool filters by it: which defines are in
+force is a property of a build nobody here has run, and a query axis that
+guessed would be the resolving this deliberately does not do. A branch that
+cannot be stated faithfully is recorded as unknown rather than approximated --
+see `UNKNOWN_GUARD`.
 
 The approach -- an API index over unpacked sources -- follows
 `quantumloader/dayz-api-mcp-server` (MIT), re-implemented here rather than
@@ -200,6 +205,23 @@ _DIRECTIVE_RE = re.compile(r"#(\w+)[ \t]*(.*)")
 
 #: Directives that open a conditional branch, and how the condition reads.
 _OPENERS = {"ifdef": "{}", "ifndef": "!{}", "if": "{}"}
+
+#: A branch this parser cannot state faithfully: an `#if` over an expression
+#: rather than a bare symbol, or any `#elif`. Recorded as "guarded, condition
+#: not represented" instead of a condition that is WRONG -- `#elif B` after
+#: `#if A` means "B and not A", and `#if defined(X) && !defined(Y)` truncated
+#: to its first token claims a broader branch than the one that exists.
+#:
+#: Dead on both real corpora, and measured rather than assumed: zero `#if` and
+#: zero `#elif` across the game's 2810 script files and every mod installed on
+#: this machine. It is kept because this is the one place the index could
+#: record a fact that is wrong rather than merely absent, and a named unknown
+#: is the shape this server uses everywhere else for exactly that.
+#:
+#: Representing them properly needs an expression to carry through `#else`
+#: negation as well, which is machinery for a construct neither corpus
+#: contains.
+UNKNOWN_GUARD = "?"
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -437,6 +459,9 @@ def _is_statement_word(token: str) -> bool:
 
 
 def _negate(condition: str) -> str:
+    # The negation of "I could not state this branch" is still that.
+    if condition == UNKNOWN_GUARD:
+        return condition
     return condition[1:] if condition.startswith("!") else "!" + condition
 
 
@@ -463,14 +488,29 @@ class _Parser:
         keyword, argument = self.directives.get(pos, ("", ""))
         shape = _OPENERS.get(keyword)
         if shape is not None:
-            symbol = argument.split()[0] if argument else "?"
-            self.guards.append(shape.format(symbol))
+            words = argument.split()
+            # `#ifdef`/`#ifndef` take a symbol, so the first word IS the
+            # condition (comments are already blanked). `#if` takes an
+            # expression: one bare symbol is stateable, anything else is not --
+            # see UNKNOWN_GUARD.
+            if len(words) == 1:
+                symbol = words[0]
+            elif keyword != "if" and words:
+                symbol = words[0]
+            else:
+                symbol = UNKNOWN_GUARD
+            self.guards.append(
+                symbol if symbol == UNKNOWN_GUARD else shape.format(symbol)
+            )
         elif keyword == "else":
             if self.guards:
                 self.guards[-1] = _negate(self.guards[-1])
         elif keyword == "elif":
+            # "B and not A", and this stack holds one string per open branch.
+            # Naming it unknown beats recording B alone, which claims a branch
+            # wider than the one that exists.
             if self.guards:
-                self.guards[-1] = argument.split()[0] if argument else "?"
+                self.guards[-1] = UNKNOWN_GUARD
         elif keyword == "endif":
             if self.guards:
                 self.guards.pop()

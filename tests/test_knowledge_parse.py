@@ -21,6 +21,7 @@ from dayz_mcp.knowledge.parse import (
     CONSTANT,
     ENUM,
     METHOD,
+    UNKNOWN_GUARD,
     Declaration,
     parse_config,
     parse_file,
@@ -577,6 +578,50 @@ def test_ifndef_records_a_negated_guard_and_else_flips_it():
     decls = parse_source(src)
     assert one(decls, "ClientSide", CLASS).guard == ("!SERVER",)
     assert one(decls, "ServerSide", CLASS).guard == ("SERVER",)
+    assert one(decls, "Always", CLASS).guard == ()
+
+
+def test_a_branch_that_cannot_be_stated_is_named_unknown_rather_than_guessed():
+    """The one place this parser could record a fact that is WRONG rather than
+    merely absent.
+
+    `#elif B` after `#if A` means "B and not A", and an `#if` over an
+    expression is not its first token: recording either as written claims a
+    branch wider than the one that exists, and a declaration under it would be
+    reported as guarded by a condition it is not guarded by.
+
+    Both are dead on real data -- zero `#if` and zero `#elif` across the game's
+    2810 script files and every mod installed on this machine -- which is
+    exactly why the shape is pinned here instead of being left to the corpus to
+    catch.
+    """
+    expression = (
+        "#if defined(SERVER) && !defined(DIAG_DEVELOPER)\n"
+        "class Narrow {}\n"
+        "#endif\n"
+    )
+    assert one(parse_source(expression), "Narrow", CLASS).guard == (UNKNOWN_GUARD,)
+
+    # A single bare symbol IS stateable, and stays stated.
+    plain = "#if SERVER\nclass Plain {}\n#endif\n"
+    assert one(parse_source(plain), "Plain", CLASS).guard == ("SERVER",)
+
+    chain = (
+        "#ifdef PLATFORM_CONSOLE\n"
+        "class First {}\n"
+        "#elif PLATFORM_WINDOWS\n"
+        "class Second {}\n"
+        "#else\n"
+        "class Third {}\n"
+        "#endif\n"
+        "class Always {}\n"
+    )
+    decls = parse_source(chain)
+    assert one(decls, "First", CLASS).guard == ("PLATFORM_CONSOLE",)
+    assert one(decls, "Second", CLASS).guard == (UNKNOWN_GUARD,)
+    # Negating "I could not state this" leaves it unstated, not "!?".
+    assert one(decls, "Third", CLASS).guard == (UNKNOWN_GUARD,)
+    # And the stack still unwinds: what follows #endif is unguarded.
     assert one(decls, "Always", CLASS).guard == ()
 
 
