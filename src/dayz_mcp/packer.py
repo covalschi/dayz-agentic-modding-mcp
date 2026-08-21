@@ -91,6 +91,32 @@ def config_syntax_cmd(cfgconvert: Path, cfg: Path, out: Path) -> list[str]:
     return [str(cfgconvert), "-bin", "-dst", str(out), str(cfg)]
 
 
+def config_text_cmd(cfgconvert: Path, cfg: Path, out: Path) -> list[str]:
+    """The other direction: a binarised config back into readable text.
+
+    `config.bin` is what most published mods actually ship, and it is where
+    the answer to "is there a class with this name" lives. Nothing but
+    CfgConvert reads it, so the knowledge index calls this and parses the
+    result. Unlike `config_syntax_cmd` this needs no particular working
+    directory: a binarised config has no unresolved #includes left in it.
+    """
+    return [str(cfgconvert), "-txt", "-dst", str(out), str(cfg)]
+
+
+def bankrev_cmd(bankrev: Path, pbo: Path, out_dir: Path) -> list[str]:
+    """Unpack a pbo. BankRev creates `out_dir/<pbo stem>/` and puts the
+    contents there -- it is NOT `out_dir` itself, and a caller that assumes
+    otherwise finds an empty directory and concludes the archive was empty.
+    See `bankrev_output` for the one place that formula lives.
+    """
+    return [str(bankrev), "-f", str(out_dir), str(pbo)]
+
+
+def bankrev_output(pbo: Path, out_dir: Path) -> Path:
+    """Where `bankrev_cmd` actually puts the contents of `pbo`."""
+    return Path(out_dir) / Path(pbo).stem
+
+
 def name_matches(name: str, patterns: Sequence[str]) -> bool:
     """Whether a single file or directory NAME matches one of `patterns`.
 

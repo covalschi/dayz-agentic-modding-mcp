@@ -158,6 +158,27 @@ class DuplicateDeclaration(KnowledgeStoreError):
     """
 
 
+def record_key(layer: str, declaration: Declaration) -> tuple:
+    """THE record key, as a value.
+
+    Must stay term-for-term identical to `idx_decl_key` in the schema above.
+    It is exported because the layer builder has to know when two declarations
+    would claim the same row *before* the constraint says so -- a third-party
+    archive is allowed to be odd in ways vanilla never is, and the answer to
+    that has to be a counted, named loss rather than a dead layer. Two
+    spellings of this formula is how a deduplication quietly stops matching
+    the constraint it exists to satisfy, so there is one.
+    """
+    return (
+        layer,
+        declaration.name,
+        declaration.kind,
+        declaration.owner,
+        declaration.file,
+        declaration.line,
+    )
+
+
 @dataclass(frozen=True)
 class Record:
     """One declaration as the index holds it: everything the parser produced,

@@ -406,6 +406,34 @@ def test_config_syntax_command_shape():
     assert cmd[-1].endswith("config.cpp")
 
 
+def test_config_text_command_shape():
+    """The other direction, used by the knowledge index: a binarised config
+    back into readable text. `-txt`, not `-bin` -- the two flags look alike
+    and mean opposite things."""
+    from dayz_mcp.packer import config_text_cmd
+
+    cmd = config_text_cmd(
+        Path("C:/T/CfgConvert.exe"), Path("C:/r/config.bin"), Path("C:/tmp/out.cpp")
+    )
+    assert cmd[0].endswith("CfgConvert.exe")
+    assert "-txt" in cmd and "-bin" not in cmd
+    assert cmd[cmd.index("-dst") + 1].endswith("out.cpp")
+    assert cmd[-1].endswith("config.bin")
+
+
+def test_bankrev_command_and_where_it_puts_things():
+    """BankRev unpacks into `<out>/<pbo stem>`, not into `<out>`. A caller
+    that reads `<out>` finds an empty directory and concludes the archive was
+    empty -- which is why the formula has one owner."""
+    from dayz_mcp.packer import bankrev_cmd, bankrev_output
+
+    cmd = bankrev_cmd(Path("C:/T/BankRev.exe"), Path("C:/g/dta/scripts.pbo"), Path("C:/tmp"))
+    assert cmd[0].endswith("BankRev.exe")
+    assert "-f" in cmd
+    assert cmd[-1].endswith("scripts.pbo")
+    assert bankrev_output(Path("C:/g/dta/scripts.pbo"), Path("C:/tmp")) == Path("C:/tmp/scripts")
+
+
 def _make_cfgconvert_stub(tools: Path) -> Path:
     cfgconvert_dir = tools / "Bin" / "CfgConvert"
     cfgconvert_dir.mkdir(parents=True, exist_ok=True)

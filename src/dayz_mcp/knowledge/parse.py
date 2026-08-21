@@ -53,6 +53,13 @@ CLASS = "class"
 METHOD = "method"
 CONSTANT = "constant"
 ENUM = "enum"
+#: A class declared in a config (`config.cpp`, or a `config.bin` run through
+#: CfgConvert), which is a different namespace from an Enforce class and is
+#: kept apart from one. They answer different questions -- "is there an item
+#: with this name in the game" against "is there a script class" -- and on the
+#: real modpack the config classes outnumber the script ones several times
+#: over, so folding them together would bury every script answer under them.
+CONFIG = "config"
 
 #: Flags a declaration can carry. `proto native` and `proto` are exclusive:
 #: `proto` alone still means "implemented by the engine, no script body", and
@@ -633,6 +640,92 @@ def _parse_declaration(
     # them -- simply end at the line break, and reading past one swallows the
     # class declared underneath it.
     return min(_find_stop(code, i), _find_line_end(code, i)), pending
+
+
+_CONFIG_CLASS_RE = re.compile(
+    r"^\s*class\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?:\s*:\s*(?P<parent>[A-Za-z_]\w*))?\s*$",
+    re.S,
+)
+
+
+def parse_config(source: str, file: str = "") -> list[Declaration]:
+    """Class definitions in a DayZ config, with what each one inherits from.
+
+    This is the half of the index that answers "is there a class with this
+    name in the game" -- a question that came up twice in one session of
+    ordinary work, and one the scripts cannot answer, because items live in
+    `config.cpp` and never in Enforce Script.
+
+    Config syntax is close enough to the script's to share the lexer (comments
+    and string contents are removed first, for the same reasons) and far
+    enough to need its own scanner. The one distinction that matters:
+
+        class Base;            <- a forward declaration, indexed nowhere
+        class Thing: Base {};  <- a definition, indexed here
+
+    Every mod's config opens by naming the vanilla classes it extends. Reading
+    those as declarations would have each mod claim to declare half the game,
+    which is precisely the confident wrongness this phase exists to remove.
+
+    Values are not declarations either: `magazines[] = {...}` opens a brace
+    like a class body does, and is skipped by shape rather than by a list of
+    known property names.
+
+    `#include` is a boundary, not a door: included files are indexed as
+    sources in their own right, so nothing is lost by not following them --
+    and nothing is invented by guessing where they resolve to.
+    """
+    stripped = strip_source(source)
+    code, text = stripped.code, stripped.text
+    starts = _line_starts(source)
+    out: list[Declaration] = []
+    scopes: list[str] = []
+    pending: str | None = None
+    i = 0
+    n = len(code)
+    while i < n:
+        c = code[i]
+        if c.isspace() or c == BOUNDARY:
+            i += 1
+            continue
+        if c == "{":
+            scopes.append(pending or "")
+            pending = None
+            i += 1
+            continue
+        if c == "}":
+            if scopes:
+                scopes.pop()
+            pending = None
+            i += 1
+            continue
+        if c == ";":
+            pending = None
+            i += 1
+            continue
+
+        stop = _find_stop(code, i)
+        m = _CONFIG_CLASS_RE.match(code[i:stop])
+        # A body must follow. Anything else -- `;`, end of file -- is a
+        # forward declaration or a truncated file, and neither declares
+        # anything.
+        if m and code[stop : stop + 1] == "{":
+            end = i + len(code[i:stop].rstrip())
+            out.append(
+                Declaration(
+                    name=m.group("name"),
+                    kind=CONFIG,
+                    owner=next((s for s in reversed(scopes) if s), ""),
+                    signature=_collapse(text[i:end]),
+                    file=file,
+                    line=bisect_right(starts, i),
+                    parent=m.group("parent") or "",
+                )
+            )
+            pending = m.group("name")
+        i = _advance(i, stop)
+    return out
 
 
 def parse_file(path: str | Path, file: str | None = None) -> list[Declaration]:
