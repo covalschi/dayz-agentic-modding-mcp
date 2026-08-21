@@ -69,6 +69,33 @@ class DZMCP_Text
         return buf;
     }
 
+    // How many bytes of `raw` Sanitize would replace with a space -- everything
+    // outside printable ASCII. The two characters Sanitize FOLDS rather than
+    // drops (the double quote and the backslash) are printable and are not
+    // counted: they survive the trip in a recognisable shape.
+    //
+    // This is not a tidiness check. The chat verb hands the ENGINE its text
+    // exactly as it arrived -- a different sink from the state document, and a
+    // Ukrainian mod putting a Ukrainian line in chat is the entire point --
+    // while the echo of that line in `detail` goes through Sanitize like
+    // everything else that reaches the state file. That leaves a real gap
+    // between what the player sees and what the caller is shown, and this count
+    // is how the verb NAMES the gap instead of letting a caller conclude their
+    // line was eaten.
+    static int NonAsciiCount(string raw)
+    {
+        int len = raw.Length();
+        int count = 0;
+        for (int i = 0; i < len; i++)
+        {
+            string ch = raw.Get(i);
+            int code = ch.ToAscii();
+            if (code < 32 || code > 126)
+                count++;
+        }
+        return count;
+    }
+
     // Break the two words the log verdict treats as a failure, so a line that
     // quotes outside text cannot fail a boot that succeeded. Case-insensitive,
     // because the verdict's own match is.

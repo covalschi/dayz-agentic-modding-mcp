@@ -74,6 +74,28 @@ class DZMCP_BridgeCore
     // Upper bound on the deliberate padding the probe_bloat verb can request.
     static const int PAD_MAX = 16384;
 
+    // ---- the chat verb's own limits ---------------------------------------
+    //
+    // CHAT_TEXT_MAX is a refusal threshold, not a truncation point: the mailbox
+    // read cap is a megabyte, and a megabyte handed to the engine's chat call
+    // would be a stand-wide experiment nobody asked for. 256 bytes is longer
+    // than any line worth putting in chat and the refusal names the length, so
+    // an over-long line is a sentence the caller can act on rather than a
+    // silently shortened message they would have to notice on screen.
+    //
+    // CHAT_NAME_LEN bounds each recipient name echoed back. A player name is
+    // outside text of the worst kind -- chosen by a human, frequently not ASCII
+    // at all -- and the detail it lands in is capped at DETAIL_LEN for the whole
+    // document's sake.
+    //
+    // The colour classes are the four the CLIENT actually understands; see
+    // VerbChat for where that list was read and why an unknown one is refused
+    // rather than passed on.
+    static const int    CHAT_TEXT_MAX      = 256;
+    static const int    CHAT_NAME_LEN      = 32;
+    static const string CHAT_COLOR_DEFAULT = "colorStatusChannel";
+    static const string CHAT_COLORS        = "colorStatusChannel, colorAction, colorFriendly, colorImportant";
+
     // How many CONSECUTIVE failures of one file operation it takes before the
     // bridge stops calling it bad luck and starts calling it broken.
     //
@@ -528,7 +550,7 @@ class DZMCP_BridgeCore
     // failure -- see DZMCP_Log.
     protected string KnownVerbs()
     {
-        return "ping, spawn, teleport, set, delete, query, action, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, teleport, set, delete, query, action, chat, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
@@ -539,7 +561,10 @@ class DZMCP_BridgeCore
         if (verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query")
             return true;
 
-        return verb == "action";
+        if (verb == "action")
+            return true;
+
+        return verb == "chat";
     }
 
     protected void Dispatch(string verb, string raw)
@@ -603,6 +628,11 @@ class DZMCP_BridgeCore
         if (verb == "action")
         {
             VerbAction(args);
+            return;
+        }
+        if (verb == "chat")
+        {
+            VerbChat(args);
             return;
         }
         if (verb == "probe_bloat")
@@ -1142,6 +1172,185 @@ class DZMCP_BridgeCore
 
         pos = DZMCP_World.FirstPlayer().GetPosition();
         return true;
+    }
+
+    // chat: put a line in the connected players' chat, from the server.
+    //
+    //   text   the line to say (required, non-empty)
+    //   color  which of the client's four colour classes to use (optional)
+    //
+    // WHY THIS IS A VERB AT ALL. Chat is a SERVER-SIDE MESSAGE: the engine
+    // hands the mod a call that delivers text to a player, so the bridge sends
+    // it as data. No keyboard, no window, no foreground, nothing taken away
+    // from whoever is sitting at the machine -- and the delivery is confirmed
+    // against a command id instead of "typed it and hoped". A mod's OWN input
+    // field (a PDA, a terminal, a form) exists only on the client and this verb
+    // is no substitute for filling one.
+    //
+    // The engine call, read in the unpacked game sources rather than
+    // remembered:
+    //   CGame.ChatMP(Man recipient, string text, string colorClass)
+    //       3_game/global/game.c:1036
+    // Vanilla reaches it from the SERVER branch of PlayerBase.Message(text,
+    // style) at 4_world/entities/manbase/playerbase.c:6596. Its client-side
+    // twin ChatPlayer(text) -- what a human's typed line goes through, at
+    // 5_mission/gui/chat/chatinputmenu.c:39 -- is deliberately NOT used here:
+    // this bridge lives in MissionServer.
+    //
+    // WHO GETS IT, and why this verb does not just take the first player.
+    // ChatMP names ONE recipient, so a verb holding a player list has to
+    // decide. This one delivers to EVERY connected player and says how many got
+    // it and who they were. Taking players.Get(0) the way the world verbs do
+    // would be the silent wrong answer this whole tool exists to abolish: on a
+    // two-client stand the line would land on one screen and be missing from
+    // the screen the caller was watching, with nothing anywhere to explain the
+    // difference. Nobody connected is a refusal in words -- the same one every
+    // verb that needs a player gives.
+    //
+    // THE COLOUR CLASS IS NOT FREE-FORM, and getting it wrong is silent. The
+    // client turns the string into a colour in ChatLine.ColorNameToColor
+    // (5_mission/gui/chat/chatline.c): colorStatusChannel blue, colorAction
+    // yellow, colorFriendly green, colorImportant red -- and every other value,
+    // a typo included, falls out of that switch into plain white without a word
+    // said. A caller would get a delivered line in a colour it never asked for
+    // and could not tell from the default, so this verb checks the value itself
+    // and names the four. The default is colorStatusChannel because that is
+    // what vanilla's own MessageStatus uses for the game telling a player
+    // something about itself, which is exactly what a line from a test harness
+    // is.
+    //
+    // WHAT SUCCESS HERE DOES AND DOES NOT PROMISE. It promises the engine
+    // accepted the call for each named recipient. It cannot promise the line
+    // appeared: the client drops whole chat channels according to the player's
+    // own profile options (Chat.Add, 5_mission/gui/chat/chat.c) and the channel
+    // ChatMP posts to is decided in native code this bridge cannot read. If a
+    // delivered line is invisible on screen, that setting is the first place to
+    // look and not a fault in the bridge.
+    protected void VerbChat(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|text|color|", "text, color"))
+            return;
+
+        // Presence asked as presence, never inferred from an empty value: an
+        // absent key and a key set to "" are indistinguishable through the
+        // value alone, and they deserve different sentences.
+        if (!HasArg(args, "text"))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "chat needs a text argument carrying the line to say");
+            return;
+        }
+
+        string text = args.Get("text");
+        if (text == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "chat was given a text argument with nothing in it, so there is nothing to say");
+            return;
+        }
+
+        int textLen = text.Length();
+        if (textLen > CHAT_TEXT_MAX)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "chat text is " + textLen + " bytes, past this bridge's limit of " + CHAT_TEXT_MAX + " -- send a shorter line rather than have the bridge cut it somewhere the caller cannot see");
+            return;
+        }
+
+        string color = ArgOr(args, "color", CHAT_COLOR_DEFAULT);
+        if (!IsChatColorClass(color))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "chat: color must be one of " + CHAT_COLORS + ", not '" + color + "' -- the client turns a class it does not know into plain white and says nothing, so this verb will not pass one on");
+            return;
+        }
+
+        // Deliberately NOT NoPlayerRefusal(). Its sentence ends "or use a verb
+        // that takes an explicit position", which is a real alternative for the
+        // world verbs and meaningless here: no position stands in for a
+        // recipient. Same opening words -- the shape a caller already knows --
+        // with an ending that is true of this verb.
+        if (DZMCP_World.PlayerCount() == 0)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "no player is on the server, so there is nobody to say it to -- connect a client and try again; a chat line is delivered to a recipient and there is no recipient-free way to say one");
+            return;
+        }
+
+        array<Man> players = new array<Man>;
+        GetGame().GetPlayers(players);
+
+        int sent = 0;
+        string names = "";
+        for (int i = 0; i < players.Count(); i++)
+        {
+            Man recipient = players.Get(i);
+            if (!recipient)
+                continue;
+
+            GetGame().ChatMP(recipient, text, color);
+            sent++;
+
+            if (names != "")
+                names = names + ", ";
+            names = names + RecipientName(recipient);
+        }
+
+        // Reachable even though the count above was not zero: that count came
+        // from one walk of the player list and this delivery from another, and
+        // a null entry between them is a list caught mid-connect or
+        // mid-disconnect. Say so rather than report a delivery to nobody as
+        // done.
+        if (sent == 0)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the player list held " + players.Count() + " entr(ies) but none of them was a usable recipient, so nothing was said -- the list was most likely caught mid-connect; try again");
+            return;
+        }
+
+        // The gap between the two sinks, named rather than left to be
+        // discovered. The engine got the line byte for byte; the echo below
+        // went through Sanitize on its way into the state document, which the
+        // Python side reads as strict UTF-8 and rejects WHOLE on one bad byte.
+        string note = "";
+        int exotic = DZMCP_Text.NonAsciiCount(text);
+        if (exotic > 0)
+            note = "; " + exotic + " byte(s) of it are outside printable ASCII -- the engine got them exactly as they arrived, but each one shows as a space in the echo below, because this detail has to stay ASCII";
+
+        // Facts first, echo last, because the detail is capped at DETAIL_LEN:
+        // whatever the cap eats should be the copy of the line the caller
+        // already has, not the count of who received it.
+        FinishCommand(DZMCP_STATUS_DONE, "said it to " + sent + " player(s) (" + names + ") in " + color + note + "; the line was: " + text);
+    }
+
+    // The four classes the client's own switch recognises. Anything else is
+    // white, silently -- see VerbChat.
+    protected bool IsChatColorClass(string value)
+    {
+        if (value == "colorStatusChannel" || value == "colorAction")
+            return true;
+
+        return value == "colorFriendly" || value == "colorImportant";
+    }
+
+    // A recipient's name, short and safe to echo.
+    //
+    // A player name is outside text of the worst kind: chosen by a human and
+    // routinely not ASCII at all. It is capped and sanitized HERE rather than
+    // relying on the sanitize FinishCommand does over the whole detail, so that
+    // one long name cannot push the counts out of a capped string.
+    protected string RecipientName(Man recipient)
+    {
+        PlayerIdentity identity = recipient.GetIdentity();
+        if (!identity)
+            return "(no identity)";
+
+        string name = identity.GetName();
+        if (name == "")
+            return "(unnamed)";
+
+        // A nick made entirely of characters Sanitize cannot keep -- a
+        // Ukrainian one, on this project's own server, is the ordinary case --
+        // would come back as a run of spaces, which reads as a bug in the
+        // bridge rather than as somebody's name.
+        if (DZMCP_Text.NonAsciiCount(name) == name.Length())
+            return "(name is not ASCII)";
+
+        return DZMCP_Text.Sanitize(name, CHAT_NAME_LEN);
     }
 
     // Makes the next published document long, then lets it snap back to its
