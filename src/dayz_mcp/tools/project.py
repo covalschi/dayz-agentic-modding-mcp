@@ -40,6 +40,11 @@ def project_open(path: str) -> Result:
     # rather than silently dropped, so the caller knows something else is up.
     if switch["orphaned_server_pid"]:
         data["orphaned_server_pid"] = switch["orphaned_server_pid"]
+    # Same story for a game client left running by the previous project: it is
+    # no longer tracked, so client_stop can no longer reach it, and saying so
+    # here is the only chance the caller gets to hear about it.
+    if switch["orphaned_client_pid"]:
+        data["orphaned_client_pid"] = switch["orphaned_client_pid"]
     return ok(data)
 
 

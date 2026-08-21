@@ -1,5 +1,9 @@
 from .bridge import bridge_build, bridge_clear, bridge_status
 from .build import mod_build
+from .client import (
+    client_chat, client_look, client_move, client_press, client_shot,
+    client_start, client_status, client_stop, client_type, client_verdict,
+)
 from .jobs_api import job_artifacts, job_status, job_wait
 from .lifecycle import client_compile_check, server_start, server_status, server_stop
 from .logs import log_tail, log_verdict
@@ -16,4 +20,7 @@ __all__ = [
     "bridge_build", "bridge_status", "bridge_clear",
     "world_ready", "world_state", "world_spawn", "world_teleport",
     "world_set", "world_delete", "world_action", "world_exec",
+    "client_start", "client_stop", "client_status", "client_shot",
+    "client_move", "client_look", "client_press",
+    "client_chat", "client_type", "client_verdict",
 ]

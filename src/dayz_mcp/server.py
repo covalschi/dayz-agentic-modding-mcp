@@ -61,6 +61,16 @@ for _fn in (
     tools.world_ready, tools.world_state,
     tools.world_spawn, tools.world_teleport, tools.world_set, tools.world_delete,
     tools.world_action, tools.world_exec,
+    # The client: its lifecycle, then its eyes, then its hands. client_type is
+    # last of the input tools and stands apart on purpose -- it is the ONLY
+    # tool in this whole set that takes the foreground away from whoever is at
+    # the machine, and its own description says so. Everything above it works
+    # with the client sitting in the background, chat included.
+    tools.client_start, tools.client_status, tools.client_stop,
+    tools.client_shot,
+    tools.client_move, tools.client_look, tools.client_press,
+    tools.client_chat, tools.client_type,
+    tools.client_verdict,
 ):
     mcp.tool()(_wrap(_fn))
 

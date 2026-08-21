@@ -10,6 +10,7 @@ from ..profile import Profile
 _state: dict = {
     "profile": None, "jobs": None, "game": None, "tools": None,
     "server_pid": 0, "server_image": "", "known_pids": set(), "stores": {},
+    "client_pid": 0, "client_image": "",
 }
 
 
@@ -17,6 +18,7 @@ def reset() -> None:
     _state.update({
         "profile": None, "jobs": None, "game": None, "tools": None,
         "server_pid": 0, "server_image": "", "known_pids": set(), "stores": {},
+        "client_pid": 0, "client_image": "",
     })
 
 
@@ -60,9 +62,11 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
     """
     prev_profile = _state["profile"]
     prev_pid = int(_state["server_pid"] or 0)
+    prev_client = int(_state["client_pid"] or 0)
     same_project = prev_profile is not None and Path(prev_profile.root).resolve() == Path(profile.root).resolve()
 
     orphaned_server_pid = 0
+    orphaned_client_pid = 0
     if not same_project:
         # Pass the recorded image name (may be "", meaning "not known" -- then
         # this degrades to the old pid-only check): a dead server's pid can be
@@ -71,6 +75,16 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
         if prev_pid and is_alive(prev_pid, image=_state["server_image"]):
             orphaned_server_pid = prev_pid
         _state["server_pid"] = 0
+        # The game client this session started follows exactly the same rule,
+        # and for the same reasons: carried into an unrelated project,
+        # client_start would refuse as "already running" and client_stop would
+        # kill whatever process now holds that pid. It is NOT added to
+        # known_pids -- that set gates server_stop(pid=...), and the client
+        # runs the SAME executable as the server, so the image check that
+        # normally protects a recycled pid would not tell them apart.
+        if prev_client and is_alive(prev_client, image=_state["client_image"]):
+            orphaned_client_pid = prev_client
+        _state["client_pid"] = 0
 
     key = str(Path(profile.root).resolve())
     store = _state["stores"].get(key)
@@ -83,7 +97,10 @@ def set_project(profile: Profile, game: str | None, tools_root: str | None) -> d
     _state["profile"] = profile
     _state["game"] = game
     _state["tools"] = tools_root
-    return {"orphaned_server_pid": orphaned_server_pid}
+    return {
+        "orphaned_server_pid": orphaned_server_pid,
+        "orphaned_client_pid": orphaned_client_pid,
+    }
 
 
 def profile() -> Profile | None:
@@ -125,6 +142,28 @@ def set_server_pid(pid: int, image: str = "") -> None:
 
 def server_image() -> str:
     return str(_state["server_image"] or "")
+
+
+def client_pid() -> int:
+    return int(_state["client_pid"] or 0)
+
+
+def set_client_pid(pid: int, image: str = "") -> None:
+    """Record the pid of the game client this session started.
+
+    Deliberately NOT recorded in `known_pids`: that set exists to let
+    server_stop reach a pid, and the client runs the same executable as the
+    server (DayZDiag_x64.exe), so the image check that guards a recycled pid
+    cannot tell one from the other. Keeping them in separate slots means
+    client_stop can only ever stop a client and server_stop only ever a server.
+    """
+    _state["client_pid"] = pid
+    if image:
+        _state["client_image"] = image
+
+
+def client_image() -> str:
+    return str(_state["client_image"] or "")
 
 
 def known_pid(pid: int) -> bool:
