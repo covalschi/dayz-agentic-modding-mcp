@@ -39,6 +39,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
+from ..packer import name_matches
 from .p3d import (
     MLOD,
     ODOL,
@@ -701,10 +702,24 @@ def c4_materials_were_inlined(artifact: Artifact) -> Finding:
     return Finding("C4", title, PASS, f"all {len(markers)} inlined-material markers are present")
 
 
+def _dropped_by_the_packer(relative: PurePosixPath, patterns: Sequence[str]) -> str:
+    """The first path component the packer's exclude list removes, or "".
+
+    Matched by NAME at any depth, and a matched directory takes everything
+    under it -- `packer.name_matches` itself, not a second spelling of it, so
+    this prediction and the packing it predicts cannot drift apart.
+    """
+    for part in relative.parts:
+        if name_matches(part, patterns):
+            return part
+    return ""
+
+
 def c5_references_land_inside_the_pbo(
     artifact: Artifact,
     roots: Mapping[str, str | os.PathLike[str]],
     also_allow: Sequence[str] = VANILLA_PREFIXES,
+    exclude: Sequence[str] = (),
 ) -> Finding:
     """C5 -- every `.paa` and `.rvmat` it names is a file that will be packed.
 
@@ -712,6 +727,13 @@ def c5_references_land_inside_the_pbo(
     untextured in game. Warns rather than refuses: a texture can be delivered
     by a dependency, or built by a later step in the same run, and refusing
     would make those workflows impossible.
+
+    "On the disk" and "inside the pbo" are two different questions, and only
+    the second one is this check's. The packer drops everything matching the
+    project's `build.exclude` before FileBank ever sees the tree, so a file
+    sitting in an excluded folder is exactly as absent in game as one that was
+    never built -- and it looks perfectly fine to a check that only calls
+    `exists()`. Pass the project's list to be told the difference.
     """
     title = "references land inside the pbo"
     vanilla = {p.lower() for p in also_allow}
@@ -720,6 +742,8 @@ def c5_references_land_inside_the_pbo(
         return Finding("C5", title, SKIP, "no source root was declared for any prefix")
 
     missing: list[str] = []
+    dropped: list[str] = []
+    reasons: set[str] = set()
     checked = unknown = shipped_with_the_game = 0
     for ref in references(artifact):
         first = _first_segment(ref)
@@ -737,15 +761,31 @@ def c5_references_land_inside_the_pbo(
         checked += 1
         if not (root / PurePosixPath(rest)).exists():
             missing.append(ref)
+            continue
+        cut = _dropped_by_the_packer(PurePosixPath(rest), exclude) if exclude else ""
+        if cut:
+            dropped.append(ref)
+            reasons.add(cut)
 
-    if missing:
+    if missing or dropped:
+        parts: list[str] = []
+        actions: list[str] = []
+        if missing:
+            parts.append(f"{len(missing)} of {checked} reference(s) have no file behind them: "
+                         f"{_quote(missing)}")
+            actions.append("copy or build those files into the mod before packing; the engine "
+                           "renders the surfaces that use them untextured and logs nothing")
+        if dropped:
+            parts.append(
+                f"{len(dropped)} reference(s) resolve to a file build.exclude keeps out of the "
+                f"pbo ({_quote(sorted(reasons))}): {_quote(dropped)}"
+            )
+            actions.append("move those files where the packer will ship them, or drop the "
+                           "pattern from build.exclude -- a file that is on the disk but not in "
+                           "the pbo is exactly as missing in game as one that was never built")
         return Finding(
-            "C5", title, WARN,
-            f"{len(missing)} of {checked} reference(s) have no file behind them: "
-            f"{_quote(missing)}",
-            action="copy or build those files into the mod before packing; the engine renders "
-                   "the surfaces that use them untextured and logs nothing",
-            evidence=_cap(missing),
+            "C5", title, WARN, "; ".join(parts), action=" ".join(actions),
+            evidence=_cap(missing + dropped),
         )
     if not checked:
         if unknown:
@@ -1173,6 +1213,7 @@ def check_model(
     hidden_selections: Sequence[str] = (),
     recorded: Fingerprint | None = None,
     also_allow: Sequence[str] = VANILLA_PREFIXES,
+    exclude: Sequence[str] = (),
 ) -> Report:
     """Every model check, in one report, with exactly one finding per check.
 
@@ -1197,7 +1238,7 @@ def check_model(
         "C2": c2_artifact_is_newer_than_its_inputs(path, inputs),
         "C3": c3_references_stay_inside_the_mod(artifact, prefix, also_allow),
         "C4": c4_materials_were_inlined(artifact),
-        "C5": c5_references_land_inside_the_pbo(artifact, roots, also_allow),
+        "C5": c5_references_land_inside_the_pbo(artifact, roots, also_allow, exclude),
         "C6": _check_materials(artifact, roots, prefix, also_allow),
         "C12": c12_fingerprint_matches_the_recorded_one(artifact, recorded),
     }

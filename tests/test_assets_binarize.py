@@ -385,6 +385,40 @@ def test_a_nonzero_code_with_a_good_artifact_is_reported_but_not_believed(tmp_pa
     assert any("3" in n for n in result.notes)
 
 
+def test_the_caller_can_own_the_verdict_and_it_is_the_only_one(tmp_path):
+    """One verdict per model. The default asks what this module can answer on
+    its own -- references against the BUILD root -- and a caller that knows
+    which directory ends up in the pbo, what the packer drops and where the
+    other model.cfg lives asks a strictly better question. Judging twice would
+    produce two answers, and a build refused by one pass and allowed by the
+    other is not a decision."""
+    from dayz_mcp.assets.checks import Finding, Report
+
+    exe, root, src, out = stand(tmp_path)
+    waiter = Waiter(writes={str(out / "thing.p3d"): GOOD_ODOL})
+    asked: list[tuple[str, str]] = []
+
+    def judge(built, source):
+        asked.append((Path(built).name, Path(source).name))
+        return Report((Finding("CX", "the caller's own question", REFUSE, "not shippable",
+                               action="do this instead"),))
+
+    result = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, judge=judge)
+    assert asked == [("thing.p3d", "thing.p3d")]
+    assert not result.ok
+    assert [f.check for f in result.refusals] == ["CX"]
+    assert result.hint == "do this instead"
+
+
+def test_without_a_judge_the_default_still_answers(tmp_path):
+    """The seam must not become a way to build with no verdict at all."""
+    exe, root, src, out = stand(tmp_path)
+    waiter = Waiter(writes={str(out / "thing.p3d"): UNRESOLVED_ODOL})
+    result = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out)
+    assert not result.ok
+    assert [f.check for f in result.refusals] == ["C4"]
+
+
 # ------------------------------------------------------------------- the log noise
 
 

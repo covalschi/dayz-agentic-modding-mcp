@@ -1,3 +1,4 @@
+from .assets import asset_build, asset_check, asset_convert
 from .bridge import bridge_build, bridge_clear, bridge_status
 from .build import mod_build
 from .client import (
@@ -28,4 +29,5 @@ __all__ = [
     "client_chat", "client_type", "client_verdict",
     "knowledge_build", "knowledge_status", "knowledge_find",
     "knowledge_show", "knowledge_overrides",
+    "asset_build", "asset_check", "asset_convert",
 ]

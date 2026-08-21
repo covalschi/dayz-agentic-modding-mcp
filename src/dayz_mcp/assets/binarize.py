@@ -273,6 +273,7 @@ def binarize_models(
     timeout: float = BINARIZE_TIMEOUT,
     binpath: str = "",
     run=run_blocking,
+    judge=None,
 ) -> BinarizeResult:
     """Build every model in one directory, from the declared project root.
 
@@ -289,6 +290,15 @@ def binarize_models(
     expiry; nothing here may replace it with a wait on end-of-stream, because
     the FileServer grandchild `binarize` spawns keeps the stream open after the
     tool itself is gone.
+
+    `judge(built, source) -> Report` decides what each output IS, and there is
+    exactly one verdict per model on purpose. The default asks the questions
+    this module can answer on its own: references resolved against the build
+    root, and the model.cfg sitting beside the source. A caller who knows more
+    -- which directory ends up in the pbo, what the packer drops, where the
+    OTHER copy of the model.cfg lives -- passes its own, and that one answer
+    then gates `ok`. Two passes over one artifact would mean two verdicts, and
+    a build refused by one and allowed by the other is not a decision.
     """
     attempt = _Attempt(
         root=Path(root) if root else Path(),
@@ -432,6 +442,17 @@ def binarize_models(
     missing: list[str] = []
     model_cfg = attempt.source / "model.cfg"
     prefix_dir = root_resolved / relative.parts[0] if relative.parts else root_resolved
+
+    def default_judge(built: Path, source: Path) -> Report:
+        return check_model(
+            built,
+            prefix=prefix,
+            roots={prefix: prefix_dir} if prefix else {},
+            inputs=[source],
+            model_cfg=model_cfg if model_cfg.is_file() else None,
+        )
+
+    verdict = judge or default_judge
     for src, dst in expected.items():
         if not dst.exists():
             missing.append(dst.name)
@@ -440,13 +461,7 @@ def binarize_models(
             source=str(src.resolve()),
             output=str(dst.resolve()),
             size=dst.stat().st_size,
-            report=check_model(
-                dst,
-                prefix=prefix,
-                roots={prefix: prefix_dir} if prefix else {},
-                inputs=[src],
-                model_cfg=model_cfg if model_cfg.is_file() else None,
-            ),
+            report=verdict(dst, src),
         ))
 
     outcome = replace(outcome, builds=tuple(builds), notes=tuple(attempt.notes))

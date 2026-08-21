@@ -358,6 +358,54 @@ def test_c5_skips_when_no_root_is_declared_at_all(tmp_path):
     assert c5_references_land_inside_the_pbo(art, {}).status == SKIP
 
 
+def test_c5_warns_about_a_file_the_packer_will_leave_out(tmp_path):
+    """"On the disk" and "inside the pbo" are not the same question, and only
+    the second one is C5's. The packer drops everything matching the project's
+    exclude list before FileBank ever sees it, so a texture sitting in an
+    excluded folder is exactly as dangling in game as one that was never built
+    -- and it looks perfectly fine to a check that only calls `exists()`."""
+    root = tmp_path / "somemod"
+    write(root / "source" / "x_co.paa", b"\x01\xff")
+    art = read_artifact(write(tmp_path / "a.p3d", odol(tail=named(r"somemod\source\x_co.paa"))))
+    assert c5_references_land_inside_the_pbo(art, {"somemod": root}).status == PASS
+
+    finding = c5_references_land_inside_the_pbo(art, {"somemod": root}, exclude=["source"])
+    assert finding.status == WARN
+    assert "x_co.paa" in finding.detail
+    assert "source" in finding.detail or "source" in finding.action
+    assert finding.action
+
+
+def test_c5_excludes_by_name_at_any_depth_like_the_packer_does(tmp_path):
+    """Same rule as `packer.find_excluded`, imported rather than re-spelled: a
+    pattern matches a NAME anywhere in the tree, and a matched directory takes
+    everything under it. Two spellings of one rule is how a check and the thing
+    it predicts drift apart."""
+    root = tmp_path / "somemod"
+    write(root / "data" / "wip" / "deep" / "x_co.paa", b"\x01\xff")
+    write(root / "data" / "textures" / "kept_co.paa", b"\x01\xff")
+    art = read_artifact(write(tmp_path / "a.p3d", odol(tail=named(
+        r"somemod\data\wip\deep\x_co.paa", r"somemod\data\textures\kept_co.paa"))))
+    finding = c5_references_land_inside_the_pbo(art, {"somemod": root}, exclude=["wip"])
+    assert finding.status == WARN
+    assert "x_co.paa" in finding.detail
+    assert "kept_co.paa" not in finding.detail
+
+
+def test_check_model_hands_c5_the_projects_exclude_list(tmp_path):
+    """The wiring, not the rule: a report that had the list and did not pass it
+    on would answer the easier question and look identical."""
+    root = tmp_path / "somemod"
+    write(root / "source" / "x_co.paa", b"\x01\xff")
+    artifact = write(tmp_path / "a.p3d", odol(
+        tail=named(r"somemod\data\textures\thing.rvmat", r"somemod\source\x_co.paa") + RESOLVED))
+    report = check_model(artifact, prefix="somemod", roots={"somemod": root},
+                         exclude=["source"])
+    c5 = one(report, "C5")
+    assert c5.status == WARN
+    assert "x_co.paa" in c5.detail
+
+
 # -------------------------------------------------------------------- C6 rvmat
 
 
