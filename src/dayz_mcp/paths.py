@@ -18,6 +18,7 @@ FILEBANK_REL = "Bin/PboUtils/FileBank.exe"
 SIGNER_REL = "Bin/DsUtils/DSSignFile.exe"
 CFGCONVERT_REL = "Bin/CfgConvert/CfgConvert.exe"
 BANKREV_REL = "Bin/PboUtils/BankRev.exe"
+IMAGETOPAA_REL = "Bin/ImageToPAA/ImageToPAA.exe"
 TOOLS_PROBE = FILEBANK_REL
 
 
