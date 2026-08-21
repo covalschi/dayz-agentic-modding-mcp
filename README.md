@@ -101,6 +101,11 @@ in its notes.
 | `client_chat(text, color)` | put a line in chat — delivered **server-side by the bridge**, so no keyboard, no window, no focus |
 | `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
 | `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |
+| `knowledge_build(layer, full, only)` | build or refresh a layer of the API index; returns a job id. `only=[path]` re-reads exactly the files you name |
+| `knowledge_status()` | what each layer holds, how old it is, and whether it still matches what is on disk |
+| `knowledge_find(name, kind, owner, layer, prefix, limit)` | find a class, method, constant, enum or config class by name |
+| `knowledge_show(name, ..., body)` | one declaration in full: signature, members, inheritance chain, and the source itself — read straight out of an archive if that is where it lives |
+| `knowledge_overrides(name, owner, layer)` | who overrides this class or method |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`
@@ -312,6 +317,114 @@ tried here once and cost the machine's owner all keyboard and mouse input until
 it was unwound by hand. None of that is a promise about anticheat on a live
 server, and nothing in this phase makes one.
 
+## The knowledge index
+
+An agent writing a mod keeps asking the game the same questions: is there such
+an API, what is it called, where is it declared, who overrides it. Answering
+them meant unpacking `scripts.pbo` and sweeping the text — and every session
+paid again. `knowledge_*` turns that work into a question.
+
+It is a plain SQLite file in the project's own `.dayz-mcp/`, built by this
+server out of the game, the mods a project declares and the project's own
+sources. No embeddings, no external service, no key.
+
+### Three layers, and why their rhythms differ
+
+| Layer | Source | Goes stale when |
+|---|---|---|
+| `core` | the game: `dta/scripts.pbo` for the API, `Addons/*.pbo` for the item classes | the game updates |
+| `deps` | the archives of the mods the profile declares, read **without unpacking them** | a dependency is updated, or the declared set changes |
+| `project` | the mod's own sources, read where they lie | **every edit** |
+
+One index built in one go would be wrong within a minute of being right: the
+game moves a few times a year, a dependency a few times a month, and the
+project between one agent turn and the next. So each layer is built, aged and
+measured on its own, and every build is incremental — unchanged sources are
+skipped by size and modification time, and `only=[path]` skips even the walk
+that discovers them.
+
+### An answer carries the age of the layer it came from
+
+Staleness is measured, not guessed: a layer records the size and modification
+time of every source it read, and that is compared against the files as they
+are now.
+
+* Every answer names the layers it used and how old each one is. An answer with
+  **no** results names every layer it *searched* — "not found" is worth exactly
+  as much as the layers behind it are current.
+* The project layer's freshness is measured on **every** search, whether or not
+  it contributed. That is the dangerous case: an agent adds a class, asks about
+  it, and a layer built a minute ago says "not found" — a confident statement
+  about code that exists.
+* A search over a layer that was never built is **refused**, and the refusal
+  names the call that builds it. "Not found" and "not looked" are different
+  facts, and only one of them is safe to act on.
+* Narrowing carries the same trap one level down, so an empty narrowed answer
+  reports where the name *does* exist: asking `kind='class'` about a name the
+  game declares only in a config gets a true "no" that reads as "the game has no
+  such class".
+
+Config classes live under `kind='config'`, not `kind='class'`. Counted in this
+machine's own index of the game: 88 102 config classes against 43 595 script
+declarations of every kind put together, so mixed into one kind they bury every
+script answer. Separated, "does the game have an item class called X" is a
+question you can ask exactly.
+
+### What it does not answer
+
+The index answers **what exists**: class, method, signature, where declared, who
+overrides. It does not answer **what is right** — that `modded class X extends
+X` compiles and silently fails to apply, that `_co` costs the alpha channel,
+that `binarize` takes directories rather than files. None of that is derivable
+from the sources; it was learned the hard way and lives in the modding skill and
+in the mod itself. The index does not try to replace either, and it does not try
+to understand what a field means or why a class is there.
+
+### Semantic search is deliberately not here
+
+The decision was made by measurement, not caution: every lookup that shaped this
+server's earlier phases was a lookup **by name**. And an embedding index would
+break the rule the rest of this server keeps — install it and it works, with no
+external service and no key. The predecessor project this one deliberately did
+not build on documents its knowledge layer as local and free while its code
+imports a paid embedding client, fails without a key and carries hard-coded
+prices. Its two search tools also hang forever, because the client behind them
+was created without a timeout; hence the ceiling every search here runs under.
+If exact search turns out not to be enough, semantic search is a separate phase
+with one condition: the model ships **inside** the delivery.
+
+### The measured numbers
+
+On this machine — the game with 2810 script files, 35 installed mods, one real
+project of 41 sources — through the tools, not their internals:
+
+| Build | Result | Time |
+|---|---|---|
+| `core` | 2927 sources, 131 697 declarations (41 gave nothing) | 70.2 s |
+| `deps`, four declared mods | 8 archives, 10 925 declarations | 0.9 s |
+| `deps`, every mod installed here | 523 archives, 204 768 declarations, 3 archives unreadable and named | 139–147 s |
+| `project` | 41 sources, 1196 declarations | 0.12 s |
+
+The index on disk: 74.7 MB for a real project's three layers; 110 MB for the
+523 dependency archives on their own. Those archives are 92 GB, and none of
+them is unpacked.
+
+| Answer | Time |
+|---|---|
+| `knowledge_find`, exact name | 4.2 ms end to end, of which 3.0 ms is the project walk |
+| `knowledge_find`, prefix, limit 500 | 3.2 ms of query |
+| `knowledge_overrides` | 4.2 ms |
+| `knowledge_show`, a class with 400 members and its ancestry | 6.8 ms |
+| `knowledge_status`, all three layers measured | 41 ms (110 ms on the first call after a build) |
+
+Incrementality, on the real project: a full rebuild 136 ms; one edited file
+found by the walk 8.8 ms (**15×**); the same file named through `only=` 5.8 ms
+(**23×**). On a 2810-file tree the walk dominates and `only=` is worth far more
+— but on a project of this size, 15× is what an ordinary rebuild actually buys.
+
+The ceiling bites for real: a query measured at 77 ms, run under a 19.3 ms
+ceiling, was stopped at 19.9 ms, and the connection went on answering.
+
 ## Known limitations
 
 * **Stale-pbo detection is mtime-based, not content-based.** `mod_build`
@@ -374,6 +487,43 @@ server, and nothing in this phase makes one.
   free) or real keystrokes (`client_type`, costs the foreground).
   `client_type("", submit=True)` sends Enter alone, which is how the chat line
   is opened — and, on the evidence above, the only confirm the tool set has.
+* **Every knowledge search pays a walk of the project tree.** That walk is how
+  the project layer's staleness is measured on every answer, which is the one
+  property the index exists for. It costs 3.0 ms on a real 41-source mod (whose
+  tree holds about 1800 entries) and 21 ms on a tree of 2810 files. Caching it
+  for a second or two would remove the cost and restore exactly the window of
+  silence the design refuses; if it ever becomes too expensive, that trade has
+  to be made deliberately, not by accident.
+* **A build always goes through a job, and the job costs more than a small
+  build does.** Turnaround measured at 70–95 ms against a 6 ms project rebuild:
+  `job_wait` polls at 100 ms. The single shape is deliberate — a caller must
+  not have to know which build blocks — and nothing forces you to wait, because
+  the next search measures the layer itself.
+* **The dependency layer is measured against the profile as it is now.** Add a
+  mod to `mods.required` and its archives arrive as `added`; remove one and its
+  archives read as `missing`. That is the requirement (the declared set is part
+  of what the layer is built from) but it looks like the index went stale when
+  what actually changed was the profile.
+* **`core` always includes the game's configs, and that is most of its cost.**
+  70 s with them against about 4 s for the scripts alone. There is no switch:
+  without the configs "is there an item class called X" cannot be answered, and
+  a second axis would make the staleness measurement ambiguous — the walk would
+  not know whether to expect the `Addons` archives.
+* **`knowledge_show` answers nearest-layer-first.** For a class a dependency
+  reopens with `modded class`, the mod's declaration comes before the game's.
+  That is the right order and a surprising one; pass `layer='core'` for the
+  game's own.
+* **Conditional compilation is indexed, not resolved.** 4.9% of the game's
+  script lines sit inside `#ifdef`, including about a hundred class
+  declarations. This server drives server, client and diagnostic builds, so
+  there is no single correct set of defines: everything is indexed and the
+  guard is recorded on the declaration. A name can therefore be reported that a
+  particular build excludes — the alternative, filtering by one guess at the
+  defines, would deny the existence of methods that are in the running build.
+* **A binarised config has no body to show.** `knowledge_show(body=True)` reads
+  a declaration back out of the file or archive it was indexed from, but a
+  `config.bin` holds the binary form while the index holds what `CfgConvert`
+  made of it. The answer says so instead of returning nothing.
 
 ## Install
 

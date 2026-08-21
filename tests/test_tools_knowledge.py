@@ -16,8 +16,8 @@ could otherwise lie to the agent that trusts it:
    3.9 s, the game with its configs 69 s, the dependency archives 150 s.
 
 The fifth thing under test is the separation of `kind="config"` from
-`kind="class"`. There are three times as many config classes as script
-declarations (131 697 against 43 579 in the game alone), so a caller asking
+`kind="class"`. The game's own index holds 88 102 config classes against
+43 595 script declarations of every kind put together, so a caller asking
 about a script class must not have to wade through them -- and a caller asking
 "is there an item class with this name in the game" must be able to ask exactly
 that.
@@ -31,6 +31,7 @@ import pytest
 
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
+from dayz_mcp.knowledge import layers
 from dayz_mcp.knowledge.parse import CLASS, CONFIG, CONSTANT, METHOD, Declaration
 from dayz_mcp.knowledge.store import CORE, DEPS, PROJECT, KnowledgeStore, SearchTimeout
 from dayz_mcp.tools import knowledge, session
@@ -393,6 +394,107 @@ def test_status_carries_the_last_builds_skipped_sources(tmp_path):
     assert project["last_build"] is not None
     assert project["last_build"]["layer"] == PROJECT
     assert "skipped" in project["last_build"]
+    assert "outstanding" in project["last_build"]
+
+
+def _refuse_one_file(monkeypatch, name: str) -> None:
+    """Make one source unreadable, the way a padded archive is on real data.
+
+    Through the parser rather than the filesystem: three of this machine's 523
+    archives fail exactly here, and a file whose read fails is not something a
+    test can arrange portably.
+    """
+    real = layers._parse_text
+
+    def refuse(text, source_name, label):
+        if source_name == name:
+            raise ValueError("this source cannot be read")
+        return real(text, source_name, label)
+
+    monkeypatch.setattr(layers, "_parse_text", refuse)
+
+
+def test_a_skipped_source_survives_the_incremental_builds_that_never_saw_it(
+    tmp_path, monkeypatch
+):
+    """`skipped` is a record of ONE build, and after an incremental build that
+    re-read nothing it is correctly empty -- which is how the reason for a
+    layer's empty sources disappeared.
+
+    Measured live: a full dependency build named three unreadable archives, the
+    very next idle rebuild (0 sources re-read, 25 ms) reported `skipped: []`,
+    and `empty_sources` still stood at six. Two true statements, one false
+    story: the reader is told six sources gave nothing and that nothing was
+    skipped.
+    """
+    root = tmp_path / "proj"
+    open_project(root)
+    bad = root / "MyMod" / "scripts" / "4_World" / "bad.c"
+    bad.write_text("class BadThing {}\n", encoding="utf-8")
+    _refuse_one_file(monkeypatch, "bad.c")
+
+    build_project_layer()
+    project = {v["layer"]: v for v in tools.knowledge_status().data["layers"]}[PROJECT]
+    assert [s["path"] for s in project["last_build"]["skipped"]] == [str(bad)]
+    assert [s["path"] for s in project["last_build"]["outstanding"]] == [str(bad)]
+    assert project["empty_sources"] == 1
+
+    # An incremental build that re-reads nothing. It skipped nothing, truly --
+    # and the layer's one unreadable source is still unreadable.
+    build_project_layer()
+    project = {v["layer"]: v for v in tools.knowledge_status().data["layers"]}[PROJECT]
+    assert project["last_build"]["unchanged"] >= 2
+    assert project["last_build"]["skipped"] == []
+    assert [s["path"] for s in project["last_build"]["outstanding"]] == [str(bad)]
+    assert project["last_build"]["outstanding"][0]["carried"] is True
+    assert project["empty_sources"] == 1
+
+    # And it cleans itself: the source becomes readable, one build later the
+    # record is gone. Nobody decides that -- it follows from the layer.
+    monkeypatch.undo()
+    bad.write_text("class BadThing {}\n// readable now\n", encoding="utf-8")
+    build_project_layer()
+    project = {v["layer"]: v for v in tools.knowledge_status().data["layers"]}[PROJECT]
+    assert project["last_build"]["outstanding"] == []
+    assert project["empty_sources"] == 0
+
+
+def test_a_skipped_source_that_leaves_the_layer_is_not_carried(tmp_path, monkeypatch):
+    """The other half of self-cleaning. A file that was deleted is nobody's
+    problem, and a record of it would outlive everything that could clear it."""
+    root = tmp_path / "proj"
+    open_project(root)
+    bad = root / "MyMod" / "scripts" / "4_World" / "bad.c"
+    bad.write_text("class BadThing {}\n", encoding="utf-8")
+    _refuse_one_file(monkeypatch, "bad.c")
+    build_project_layer()
+
+    bad.unlink()
+    build_project_layer()
+    project = {v["layer"]: v for v in tools.knowledge_status().data["layers"]}[PROJECT]
+    assert project["last_build"]["outstanding"] == []
+
+
+def test_a_full_rebuild_does_not_inherit_the_previous_generations_problems(
+    tmp_path, monkeypatch
+):
+    """A full rebuild stamps a new layer generation, and the problems of the
+    layer it replaced are not this layer's problems -- the same rule that
+    already hides a `last_build` belonging to an index somebody else rebuilt."""
+    root = tmp_path / "proj"
+    open_project(root)
+    bad = root / "MyMod" / "scripts" / "4_World" / "bad.c"
+    bad.write_text("class BadThing {}\n", encoding="utf-8")
+    _refuse_one_file(monkeypatch, "bad.c")
+    build_project_layer()
+
+    monkeypatch.undo()
+    started = tools.knowledge_build(layer=PROJECT, full=True)
+    assert started.ok, started.error
+    assert tools.job_wait(started.data["job_id"], timeout=60).ok
+    project = {v["layer"]: v for v in tools.knowledge_status().data["layers"]}[PROJECT]
+    assert project["last_build"]["outstanding"] == []
+    assert project["empty_sources"] == 0
 
 
 # ---------------------------------------------------------------------- find
@@ -466,6 +568,82 @@ def test_an_empty_answer_from_a_complete_index_is_a_real_answer(tmp_path):
     assert result.ok, result.error
     assert result.data["count"] == 0
     assert result.data["unbuilt"] == []
+
+
+def test_an_empty_answer_names_the_layers_it_searched(tmp_path):
+    """PROPERTY 1 where it is worth most, and where it was missing.
+
+    A record carries its own layer, so an answer WITH results names itself. An
+    answer with none named only the project layer -- and "not found" is exactly
+    the answer whose worth depends on how old the layers behind it are: a core
+    layer indexed before the game updated says "no such method" in the same
+    confident voice as one indexed a minute ago.
+
+    Found live, on the real index: `knowledge_find('X', layer='core')` with
+    nothing to find reported the age of the PROJECT layer and never mentioned
+    core at all.
+    """
+    open_project(tmp_path / "proj")
+    build_project_layer()
+    seed(CORE, "core.c", [decl("ItemBase")])
+    seed(DEPS, "dep.pbo", [decl("DepThing")])
+
+    result = tools.knowledge_find("NoSuchNameAnywhere")
+    assert result.ok, result.error
+    named = {view["layer"]: view for view in result.data["layers"]}
+    assert set(named) == {PROJECT, DEPS, CORE}
+    assert all(view["age_seconds"] is not None for view in named.values())
+    # And the hint says out loud what the ages mean for a "not found".
+    assert CORE in result.hint and "not there" in result.hint
+
+    # A search restricted to one layer searched exactly that one, and says so.
+    restricted = tools.knowledge_find("NoSuchNameAnywhere", layer=CORE)
+    assert restricted.ok, restricted.error
+    assert {view["layer"] for view in restricted.data["layers"]} == {CORE, PROJECT}
+
+    # A search that DID find something still names only what answered, plus the
+    # project layer -- the age of a layer that contributed nothing to a real
+    # answer is noise.
+    found = tools.knowledge_find("ItemBase")
+    assert {view["layer"] for view in found.data["layers"]} == {CORE, PROJECT}
+
+    # The same discipline in the other two tools.
+    for empty in (tools.knowledge_show("NoSuchNameAnywhere"),
+                  tools.knowledge_overrides("NoSuchNameAnywhere")):
+        assert {view["layer"] for view in empty.data["layers"]} == {PROJECT, DEPS, CORE}
+
+
+def test_a_narrowed_search_that_finds_nothing_says_where_the_name_does_exist(tmp_path):
+    """"Not found" and "not looked" again, one level down.
+
+    `kind='class'` over a name the game declares only in a config is a true
+    answer that reads as a false one: the caller asked "is there a class called
+    X", got "no", and the game has one -- in the other namespace. Same for a
+    name that exists only in another layer. The probe costs a query only when
+    the answer was empty anyway.
+    """
+    open_project(tmp_path / "proj")
+    build_project_layer()
+    seed(CORE, "Addons/gear.pbo", [decl("Barrel_ColorBase", CONFIG)])
+    seed(DEPS, "dep.pbo", [decl("DepThing")])
+
+    narrowed = tools.knowledge_find("Barrel_ColorBase", kind=CLASS)
+    assert narrowed.ok, narrowed.error
+    assert narrowed.data["count"] == 0
+    assert [r["kind"] for r in narrowed.data["elsewhere"]] == [CONFIG]
+    assert CONFIG in narrowed.hint
+
+    by_layer = tools.knowledge_find("DepThing", layer=CORE)
+    assert by_layer.data["count"] == 0
+    assert [r["layer"] for r in by_layer.data["elsewhere"]] == [DEPS]
+
+    # A name that really is nowhere gets no second opinion, and an answer that
+    # found something never pays for one.
+    assert tools.knowledge_find("NoSuchNameAnywhere", kind=CLASS).data["elsewhere"] == []
+    assert tools.knowledge_find("Barrel_ColorBase", kind=CONFIG).data["elsewhere"] == []
+    # Unnarrowed, there is nothing to widen to, so the probe is not even run.
+    assert tools.knowledge_find("NoSuchNameAnywhere").data["elsewhere"] == []
+    assert tools.knowledge_show("Barrel_ColorBase", kind=CLASS).data["elsewhere"]
 
 
 def test_find_separates_script_classes_from_config_classes(tmp_path):

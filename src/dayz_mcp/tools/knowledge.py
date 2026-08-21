@@ -30,9 +30,9 @@ for every build means a caller never has to know which of them blocks.
 
 One design decision a caller cannot guess, so it is stated in every relevant
 description: **config classes are indexed under `kind="config"`, not
-`kind="class"`.** There are three times more of them than there are script
-declarations (131 697 against 43 579 in the game alone), and mixed into one
-kind they would bury every script answer. Separated, "does the game have an
+`kind="class"`.** Counted in the game's own index: 88 102 config classes
+against 43 595 script declarations of every kind put together, so mixed into
+one kind they would bury every script answer. Separated, "does the game have an
 item class with this name" becomes a question you can ask exactly.
 
 What this index does NOT answer is the other half of the job, and it is not a
@@ -399,6 +399,15 @@ def _write_sidecar(store: KnowledgeStore, reports: dict) -> None:
         # being shown rather than describing a build that no longer happened.
         entry["built"] = info.built if info else 0.0
         entry["at"] = time.time()
+        # Only what belongs to THIS generation is carried: a full rebuild
+        # stamps a new `built`, and the problems of the layer it replaced are
+        # not this layer's problems.
+        previous = data.get(layer)
+        if not isinstance(previous, dict) or abs(
+            float(previous.get("built", -1.0)) - entry["built"]
+        ) > 1e-6:
+            previous = None
+        entry["outstanding"] = _outstanding(store, layer, report, previous)
         data[layer] = entry
     try:
         _sidecar(store).write_text(
@@ -421,6 +430,45 @@ def _last_build(
     if abs(float(entry.get("built", -1.0)) - info.built) > 1e-6:
         return None
     return entry
+
+
+def _outstanding(store: KnowledgeStore, layer: str, report, previous: dict | None) -> list[dict]:
+    """Sources this layer still holds nothing from, across builds -- not just
+    the last one.
+
+    `skipped` is a record of one build, and after an incremental build that
+    re-read nothing it is correctly empty. Measured on this machine: a full
+    dependency build named three unreadable archives, and the very next idle
+    rebuild (0 sources re-read) replaced that list with an empty one -- while
+    `empty_sources` still counted six. The reader was then told the layer has
+    six sources that gave nothing and that nothing was skipped, which is two
+    true statements adding up to a false story.
+
+    So the explanation is accumulated instead, and it cleans itself: an entry
+    survives only while its path is still a source of this layer AND still
+    holds no declarations. A source that has since been read successfully, or
+    that has left the layer, drops out on the next build without anyone
+    deciding it should.
+
+    Only entries for sources that gave nothing at all are carried. A source
+    that WAS indexed but lost some declarations to a key collision (`lost > 0`)
+    stays with the build that saw it: it has declarations, so this list's
+    self-cleaning rule cannot tell whether a later build fixed it.
+    """
+    entries: dict[str, dict] = {}
+    for old in (previous or {}).get("outstanding") or []:
+        if isinstance(old, dict) and old.get("path"):
+            entries[str(old["path"])] = {**old, "carried": True}
+    for problem in report.skipped:
+        if not problem.lost:
+            entries[problem.path] = {**problem.to_dict(), "carried": False}
+    if not entries:
+        return []
+    still = {state.path: state.declarations for state in store.sources(layer, list(entries))}
+    return [
+        entry for path, entry in sorted(entries.items())
+        if path in still and not still[path]
+    ]
 
 
 def _build_one(store: KnowledgeStore, layer: str, profile, game: str | None,
@@ -636,8 +684,12 @@ def knowledge_status() -> Result:
     Two counts that must not be confused, and both are here: `sources` is
     everything the build walked, and `empty_sources` is how many of those gave
     no declarations at all -- an archive that could not be read, or a file that
-    genuinely declares nothing. The last build's own report says which, per
-    source and with the reason.
+    genuinely declares nothing. Which of the two is in `last_build`: `skipped`
+    is what the LAST build could not read, and `outstanding` is every source
+    the layer still holds nothing from, including ones an earlier build found.
+    The second exists because the first is correctly empty after an incremental
+    build that re-read nothing, which left `empty_sources` standing with no
+    explanation at all.
     """
     guard = require_project()
     if guard:
@@ -752,12 +804,28 @@ def _timeout_refusal(exc: SearchTimeout) -> Result:
     )
 
 
+def _searched(store: KnowledgeStore, layer: str) -> set[str]:
+    """Which layers a query actually looked in.
+
+    What an answer with no results has to report. A record carries its own
+    layer, so a non-empty answer names itself; an empty one names nothing at
+    all unless this says what was consulted -- and "not found" is precisely the
+    answer whose worth depends on how old the layers behind it are. A `core`
+    layer indexed before the last game update answers "no such method" exactly
+    like a layer indexed a minute ago.
+    """
+    if layer:
+        return {layer}
+    return {name for name in LAYERS if store.layer(name) is not None}
+
+
 def _answer(
-    store: KnowledgeStore, records: list[Record], limit: int, profile, game: str | None
+    store: KnowledgeStore, records: list[Record], limit: int, profile, game: str | None,
+    *, layer: str = "",
 ) -> tuple[list[Record], bool, list[dict], list[dict]]:
     truncated = len(records) > limit
     page = records[:limit]
-    used = {record.layer for record in page}
+    used = {record.layer for record in page} if page else _searched(store, layer)
     return (
         page, truncated,
         _freshness(store, used, profile, game),
@@ -769,7 +837,46 @@ def _stale_layers(views: list[dict]) -> list[str]:
     return [view["layer"] for view in views if view.get("stale")]
 
 
-def _search_hint(views: list[dict], missing: list[dict], truncated: bool, empty: bool) -> str:
+def _elsewhere(store: KnowledgeStore, name: str, kind: str, owner: str, layer: str) -> list[Record]:
+    """The same name, without the narrowing that found nothing.
+
+    A search narrowed by `kind=`, `owner=` or `layer=` answers about that slice
+    and nothing else, so its "not found" is true and misleading in the same
+    breath: `kind='class'` over a name the game declares only in a config says
+    nothing about the config, and the caller reads it as "the game has no such
+    class". The same "not found is not not looked" the empty index gets, one
+    level down -- and it costs a query only when the answer was empty anyway.
+    """
+    if not name or not (kind or owner or layer):
+        return []
+    try:
+        with store.time_limit(SEARCH_SECONDS):
+            return store.find(name, limit=SHOW_LIMIT)
+    except SearchTimeout:
+        # The narrowed search already answered; a slow second opinion is worth
+        # nothing and must never turn a good answer into a failure.
+        return []
+
+
+def _describe_elsewhere(records: list[Record]) -> str:
+    seen: list[str] = []
+    for record in records:
+        where = f"kind='{record.kind}' in layer '{record.layer}'"
+        if where not in seen:
+            seen.append(where)
+    return ", ".join(seen)
+
+
+def _ages(views: list[dict]) -> str:
+    return ", ".join(
+        f"{view['layer']} {view['age']}" for view in views if view.get("built")
+    )
+
+
+def _search_hint(
+    views: list[dict], missing: list[dict], truncated: bool, empty: bool,
+    elsewhere: list[Record] | None = None,
+) -> str:
     parts = []
     stale = _stale_layers(views)
     if stale:
@@ -788,6 +895,20 @@ def _search_hint(views: list[dict], missing: list[dict], truncated: bool, empty:
             "not searched, because it was never built: "
             + "; ".join(entry["how"] for entry in missing)
         )
+    if empty and elsewhere:
+        parts.append(
+            f"the name IS indexed outside what was asked for -- {len(elsewhere)} "
+            f"declaration(s): {_describe_elsewhere(elsewhere)}. Drop kind=/owner=/"
+            "layer= to see them"
+        )
+    elif empty and not missing:
+        ages = _ages(views)
+        if ages:
+            parts.append(
+                f"nothing matched, and every layer that could hold it was searched "
+                f"-- as each was last indexed ({ages}), so this is 'not there' as of "
+                "then, not as of now"
+            )
     if truncated:
         parts.append(
             "there are more matches than the limit -- raise limit=, or narrow with "
@@ -818,16 +939,24 @@ def knowledge_find(
       'constant' / 'enum'   what flags like ECE_* are found through
       'config'   a class declared in a config.cpp or a binarised config.bin --
                  this is how you ask "does the game have an item class called
-                 X". Kept apart because there are three times more of them than
-                 script declarations, and mixed together they bury every script
-                 answer.
+                 X". Kept apart because the game alone holds 88 102 of them
+                 against 43 595 script declarations, and mixed together they
+                 bury every script answer.
 
-    Every answer names the layers it used and how old each one is, and the
-    project layer's staleness is measured on every call -- so an answer taken
-    from an index built before your last edit says so instead of describing
-    code that no longer exists. A search that finds nothing while a layer that
-    could have held it was never built is refused, not answered: "not found"
-    and "not looked" are different facts.
+    Every answer names the layers it used and how old each one is -- and an
+    answer with no results names every layer it *searched*, because "not found"
+    is worth exactly as much as the layers behind it are current. The project
+    layer's staleness is measured on every call, so an answer taken from an
+    index built before your last edit says so instead of describing code that
+    no longer exists. A search that finds nothing while a layer that could have
+    held it was never built is refused, not answered: "not found" and "not
+    looked" are different facts.
+
+    Narrowing has the same trap one level down, so an empty narrowed answer
+    checks whether the name exists outside the narrowing and says where in
+    `elsewhere` -- asking for `kind='class'` about a name the game declares
+    only in a config gets a true "no" that reads as "the game has no such
+    class".
 
     Every search runs under a hard time ceiling and a result limit; neither can
     be removed.
@@ -871,7 +1000,9 @@ def knowledge_find(
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
 
-    page, truncated, views, missing = _answer(store, records, limit, profile, game)
+    page, truncated, views, missing = _answer(
+        store, records, limit, profile, game, layer=layer
+    )
     by_kind: dict[str, int] = {}
     by_layer: dict[str, int] = {}
     for record in page:
@@ -892,7 +1023,9 @@ def knowledge_find(
         "unbuilt": [entry["layer"] for entry in missing],
         "stale": bool(_stale_layers(views)),
     }
-    hint = _search_hint(views, missing, truncated, empty=not page)
+    elsewhere = [] if page else _elsewhere(store, name, kind, owner, layer)
+    data["elsewhere"] = [record.to_dict() for record in elsewhere]
+    hint = _search_hint(views, missing, truncated, empty=not page, elsewhere=elsewhere)
     if not page and missing:
         return Result(
             False,
@@ -1058,8 +1191,13 @@ def knowledge_show(
     unpacked. A binarised config has no readable source to return and says so
     rather than returning nothing.
 
+    Matches come nearest-layer-first, so a class a dependency reopens with
+    `modded class` is shown before the game's own declaration of it: pass
+    `layer='core'` to ask the game specifically.
+
     Like every answer here, it names the layer each declaration came from and
-    how old that layer is.
+    how old that layer is -- and when it finds nothing, every layer it looked
+    in.
     """
     guard = require_project()
     if guard:
@@ -1091,7 +1229,9 @@ def knowledge_show(
                 name, kind=kind or None, owner=owner or None,
                 layer=layer or None, limit=limit + 1,
             )
-            page, truncated, views, missing = _answer(store, records, limit, profile, game)
+            page, truncated, views, missing = _answer(
+                store, records, limit, profile, game, layer=layer
+            )
             shown = []
             for record in page:
                 entry = record.to_dict()
@@ -1104,6 +1244,7 @@ def knowledge_show(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
 
+    elsewhere = [] if shown else _elsewhere(store, name, kind, owner, layer)
     data = {
         "query": {"name": name, "kind": kind, "owner": owner, "layer": layer,
                   "body": bool(body), "limit": limit},
@@ -1113,8 +1254,9 @@ def knowledge_show(
         "layers": views,
         "unbuilt": [entry["layer"] for entry in missing],
         "stale": bool(_stale_layers(views)),
+        "elsewhere": [record.to_dict() for record in elsewhere],
     }
-    hint = _search_hint(views, missing, truncated, empty=not shown)
+    hint = _search_hint(views, missing, truncated, empty=not shown, elsewhere=elsewhere)
     if not shown:
         return Result(
             False,
@@ -1179,7 +1321,9 @@ def knowledge_overrides(
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
 
-    page, truncated, views, missing = _answer(store, records, limit, profile, game)
+    page, truncated, views, missing = _answer(
+        store, records, limit, profile, game, layer=layer
+    )
     data = {
         "query": {"name": name, "owner": owner, "layer": layer, "limit": limit},
         "count": len(page),
