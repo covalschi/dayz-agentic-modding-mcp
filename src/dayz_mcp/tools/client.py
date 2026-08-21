@@ -132,13 +132,11 @@ FOREGROUND_REFUSED_HINT = (
 # mod's own refusal lists the verbs it does know, and this says what to do
 # about it instead of leaving the caller staring at that list.
 CHAT_VERB_MISSING_HINT = (
-    "this bridge build has no chat verb yet. Chat is delivered server-side by the "
-    "mod, so the verb has to exist in the bridge's dispatcher: add it in "
-    "bridge/scripts (KnownVerbs, IsKnownVerb, the routing in Dispatch and a "
-    "handler that calls the engine's ChatMP for the connected player), rebuild "
-    "with bridge_build and restart the stand. There is no keyboard path to chat "
-    "in this tool set -- client_type fills an input field that is already open, "
-    "and it costs the foreground."
+    "the stand is running a bridge build older than this server: chat is delivered "
+    "server-side by the mod, and the verb ships with this repository's bridge "
+    "sources. Rebuild it with bridge_build and restart the stand so it loads the "
+    "new pbo. There is no keyboard path to chat in this tool set -- client_type "
+    "fills an input field that is already open, and it costs the foreground."
 )
 
 # The guard against two client starts at once, and PROCESS-global on purpose:
@@ -725,9 +723,25 @@ def client_chat(text: str, color: str = "", timeout: float = WORLD_TIMEOUT_SECON
     form. Those exist only on the client and are filled by `client_type`, which
     does need the foreground.
 
+    The line goes to EVERY connected player, and the answer says how many got
+    it: the engine's call names one recipient, so a verb that quietly took the
+    first player would put the line on one screen and leave it missing from the
+    one the caller was watching.
+
+    `color` is one of colorStatusChannel (the default), colorAction,
+    colorFriendly or colorImportant. Anything else is refused BY THE MOD rather
+    than passed on, because the client turns a colour class it does not know
+    into plain white and says nothing about it. Long lines are refused too,
+    rather than cut somewhere the caller cannot see.
+
+    What success promises is that the engine accepted the call for each named
+    recipient -- not that the line was visible. A client drops whole chat
+    channels according to the player's own profile options, so an accepted line
+    that nobody can see is a client setting, not a fault in the bridge.
+
     Requires the bridge to be loaded and ticking, like every other world
-    command, and requires the bridge build to know the chat verb; if it does
-    not, the mod says so and the hint says what to add.
+    command, and requires the stand to be running a bridge build that knows the
+    verb; if it is not, the mod says so and the hint says what to do.
     """
     if not text or not text.strip():
         return fail(

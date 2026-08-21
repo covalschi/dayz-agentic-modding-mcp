@@ -120,10 +120,31 @@ def test_png_bytes_keeps_rows_in_top_down_order():
 
 
 def test_png_bytes_refuses_a_buffer_that_does_not_match_the_size():
-    """A short buffer would encode as a torn image with no error anywhere --
-    the same class of silent success this module exists to prevent."""
-    with pytest.raises(ValueError):
+    """A mismatched buffer would encode as a torn image -- the same class of
+    silent success this module exists to prevent.
+
+    Asserted on the MESSAGE, not merely on "something raised". Deleting the
+    size check does not make this pass silently: the alpha pass further down
+    (`pixels[3::4] = b"\\xff" * (width * height)`) trips its own ValueError on
+    any mismatch, so a bare `pytest.raises(ValueError)` is satisfied by an
+    accident -- measured: the check could be removed with the file still
+    reporting 38 passed. What the deliberate refusal adds is a sentence naming
+    both counts, which is the difference between a caller fixing their buffer
+    and a caller reading "attempt to assign bytes of size 16 to extended slice
+    of size 1".
+
+    Both directions, because the frame-versus-client-area confusion this
+    module already hit once produces a buffer that is too LONG, not short.
+    """
+    with pytest.raises(ValueError) as short:
         winui.png_bytes(_bgra((1, 2, 3)), 4, 4)
+    assert "buffer is 4 bytes" in str(short.value)
+    assert "4x4 BGRA needs 64" in str(short.value)
+
+    with pytest.raises(ValueError) as long:
+        winui.png_bytes(_bgra(*[(1, 2, 3)] * 9), 2, 2)
+    assert "buffer is 36 bytes" in str(long.value)
+    assert "2x2 BGRA needs 16" in str(long.value)
 
 
 def test_the_png_is_readable_by_a_real_decoder():
@@ -514,6 +535,25 @@ def test_shot_captures_the_client_area_not_the_window_frame(tmp_path, own_window
 
 
 @WINDOWS_ONLY
+def test_shot_refuses_when_printwindow_declines_to_draw(tmp_path, monkeypatch, own_window):
+    """PrintWindow returning 0 is the one honest signal that nothing was drawn.
+    Without this check the capture continues over an untouched bitmap and
+    writes a perfectly valid all-black PNG -- a file, a size, an `ok`, and no
+    picture. That is the exact shape of the failure a D3D window on a separate
+    Windows desktop produced, and the reason lit_fraction exists at all; this
+    is the earlier, cheaper half of the same guard."""
+    monkeypatch.setattr(winui.user32, "PrintWindow", lambda hwnd, dc, flags: 0)
+    out = tmp_path / "frame.png"
+
+    got = winui.shot(os.getpid(), out)
+
+    assert not got.ok
+    assert "PrintWindow" in got.error
+    assert got.hint
+    assert not out.exists(), "a refused capture must not leave a file behind"
+
+
+@WINDOWS_ONLY
 def test_shot_refuses_a_minimized_window_instead_of_saving_an_empty_image(tmp_path, own_window):
     """Measured: a minimized window's client area collapses to 0x0. Without
     this refusal the caller gets a valid-looking file and no way to tell that
@@ -531,9 +571,49 @@ def test_shot_refuses_a_minimized_window_instead_of_saving_an_empty_image(tmp_pa
 
 
 @WINDOWS_ONLY
-def test_focus_reports_the_verified_truth_not_the_api_return_code(own_window):
+def test_focus_is_false_when_the_foreground_belongs_to_someone_else(monkeypatch, own_window):
     """SetForegroundWindow returns success while doing nothing when Windows
-    refuses the change. The only trustworthy answer is what
-    GetForegroundWindow says afterwards -- and False is a normal answer."""
-    result = winui.focus(os.getpid())
-    assert result is (winui.foreground_pid() == os.getpid())
+    refuses the change, so the only trustworthy answer is what
+    GetForegroundWindow says AFTERWARDS. This is the guard that stops
+    SendInput typing into whoever's window is actually in front -- the exact
+    accident that got input automation banned on this project once.
+
+    Deterministic, and it has to be. The test this replaced asserted
+    `focus(pid) is (foreground_pid() == os.getpid())`, which re-evaluates the
+    implementation's own final expression and compares it against itself: a
+    `focus` that returned True without verifying anything passed it whenever
+    the pytest process happened to hold the foreground at that instant, which
+    is exactly what it did. Measured: with that mutation in place the file
+    still reported 38 passed.
+
+    The grab is stubbed rather than performed, so this cannot take the
+    foreground away from whoever is at the machine either.
+    """
+    grabs = []
+    monkeypatch.setattr(
+        winui.user32, "SetForegroundWindow", lambda hwnd: grabs.append(hwnd) or 1
+    )
+    monkeypatch.setattr(winui, "foreground_pid", lambda: os.getpid() + 1)
+
+    assert winui.focus(os.getpid(), settle=0.0) is False
+    # False must mean "checked, and it is not ours" -- not "declined to try".
+    assert grabs, "the foreground was never even asked for"
+
+
+@WINDOWS_ONLY
+def test_focus_is_true_only_because_the_check_after_the_grab_said_so(monkeypatch, own_window):
+    """The other half, without which a constant False would pass the test
+    above. The stub answers "someone else" on the pre-check and "ours" on the
+    verification, so a True can only have come from the read taken AFTER the
+    grab -- not from the early short-circuit and not from a constant."""
+    monkeypatch.setattr(winui.user32, "SetForegroundWindow", lambda hwnd: 1)
+    reads = []
+
+    def foreground_pid():
+        reads.append(1)
+        return os.getpid() if len(reads) > 1 else os.getpid() + 1
+
+    monkeypatch.setattr(winui, "foreground_pid", foreground_pid)
+
+    assert winui.focus(os.getpid(), settle=0.0) is True
+    assert len(reads) == 2, "the foreground was read once, so nothing was verified"

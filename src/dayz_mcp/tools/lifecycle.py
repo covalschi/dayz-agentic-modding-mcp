@@ -588,6 +588,28 @@ def server_status(pulse_seconds: float = 1.0) -> Result:
 
 
 def client_compile_check(extra_mods: str = "", wait_seconds: float = 120) -> Result:
+    """Compile the CLIENT half of the scripts and judge the result. Returns a
+    job id.
+
+    A server boot never compiles anything behind the client-only guard, so a
+    broken menu, a broken widget or a broken client-side action passes every
+    server check and then breaks in front of a player. This runs the diagnostic
+    client for `wait_seconds`, stops it, and judges what it wrote -- and the
+    verdict does not accept a clean log on its own: the game's own "Module:
+    Mission" line has to appear, otherwise "no errors" only means "not that far
+    yet" and the job says so.
+
+    The client runs against a THROWAWAY -profiles directory inside this job's
+    artifacts, so it never reads or writes the test stand. It also joins
+    nothing: this is a compile pass, not a session. For the live client that
+    connects to the stand -- and for looking at it, acting through it, and
+    judging its .RPT -- the tools are client_start and its siblings, and
+    log_verdict(source="client") reads THIS job's log while client_verdict
+    reads the live client's.
+
+    `extra_mods` appends to the -mod list for this run only, for checking that
+    a mod still compiles alongside another one.
+    """
     guard = require_project()
     if guard:
         return guard

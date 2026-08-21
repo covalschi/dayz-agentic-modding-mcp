@@ -20,7 +20,11 @@ from dayz_mcp import gamepad, winui
 from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
 from dayz_mcp.errors import Result, fail, ok
-from dayz_mcp.tools import client, session
+from dayz_mcp.tools import client, lifecycle, session
+
+# A pid no process on this machine can hold (Windows pids stay far below this),
+# so a test that reaches a kill path by mistake still cannot touch anything.
+UNREACHABLE_PID = 4_000_000_001
 
 PROFILE = """
 [project]
@@ -644,13 +648,41 @@ def test_client_type_refuses_untypeable_text_before_stealing_the_screen(tmp_path
     assert focused == []
 
 
+def registered_client_tools() -> set[str]:
+    """Every client tool this module exports, DERIVED rather than listed.
+
+    The invariant below used to enumerate six tools by hand, which left
+    client_start, client_stop and client_verdict unwatched -- adding a focus
+    grab to two of them kept the whole suite green. An invariant that does not
+    cover tools added later is not an invariant, so the names come from the
+    export list and the sweep asserts it covered all of them.
+
+    client_compile_check shares the prefix and is registered, but belongs to
+    lifecycle.py: it spawns a throwaway client of its own and has nothing to do
+    with the live one.
+    """
+    return {
+        name for name in tools.__all__
+        if name.startswith("client_")
+        and getattr(getattr(tools, name), "__module__", "") == client.__name__
+    }
+
+
 def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
     """The invariant the whole phase rests on, proved by watching who calls
-    `focus` rather than by reading docstrings. Eyes, gamepad and chat all work
-    with the client in the background; only field entry does not."""
-    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
-    started = client.client_start(timeout=5)
-    wait_for_job(started.data["job_id"])
+    `focus` rather than by reading docstrings. Eyes, gamepad, chat, lifecycle
+    and the verdict all work with the client in the background; only field
+    entry does not.
+
+    Every tool is called on a path where it does its REAL work, never an early
+    refusal: a refusal returns before reaching the body, so a focus grab hidden
+    below it would go unseen -- which is exactly how the hand-written version of
+    this test missed three tools. Hence the ordering: start first (nothing is
+    tracked yet), stop last (it clears the pid).
+    """
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch, players=1)
+    (stand / "clientprofile").mkdir(parents=True, exist_ok=True)
+    (stand / "clientprofile" / "DayZ_x64_probe.RPT").write_text("starting\n", encoding="utf-8")
 
     asked = []
     monkeypatch.setattr(winui, "focus", lambda pid, **kw: asked.append(pid) or True)
@@ -659,20 +691,65 @@ def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
     monkeypatch.setattr(gamepad, "move", lambda x, y, s: ok({}))
     monkeypatch.setattr(gamepad, "look", lambda x, y, s: ok({}))
     monkeypatch.setattr(gamepad, "press", lambda b, s: ok({}))
+    monkeypatch.setattr(gamepad, "close_pad", lambda: ok({"pad": "closed"}))
     monkeypatch.setattr(client, "_world_command", lambda v, a, t: ok({}))
     monkeypatch.setattr(winui, "geometry", lambda pid: ok({"minimized": False, "foreground": False}))
+    monkeypatch.setattr(client, "stop", lambda pid: True)
 
-    client.client_shot()
-    client.client_move(0, 1, 1)
-    client.client_look(0, 1, 1)
-    client.client_press("a")
-    client.client_chat("hi")
-    client.client_status()
-    assert asked == []
+    started = client.client_start(timeout=5)
+    assert started.ok is True
+    assert wait_for_job(started.data["job_id"]).status == "done"
+    swept = {"client_start"}
 
+    for name, call in (
+        ("client_status", client.client_status),
+        ("client_shot", client.client_shot),
+        ("client_move", lambda: client.client_move(0, 1, 0)),
+        ("client_look", lambda: client.client_look(0, 1, 0)),
+        ("client_press", lambda: client.client_press("a")),
+        ("client_chat", lambda: client.client_chat("hi")),
+        ("client_verdict", client.client_verdict),
+        # Last on purpose: it clears the tracked pid, and everything above
+        # would then refuse before reaching its own body.
+        ("client_stop", client.client_stop),
+    ):
+        result = call()
+        assert result.ok is True, (name, result.error)
+        swept.add(name)
+
+    missed = registered_client_tools() - swept - {"client_type"}
+    assert not missed, f"these client tools escaped the foreground sweep: {sorted(missed)}"
+    assert asked == [], "a tool other than client_type asked for the foreground"
+
+    # And the one that is allowed to, does.
+    session.set_client_pid(777, client.CLIENT_IMAGE)
     monkeypatch.setattr(winui, "type_text", lambda pid, text: ok({"typed": text, "characters": 1}))
-    client.client_type("a")
+    assert client.client_type("a").ok is True
     assert asked == [777]
+
+
+def test_the_client_pid_never_becomes_something_server_stop_can_kill(tmp_path, monkeypatch):
+    """The client runs the SAME executable as the server, so the image check
+    that protects server_stop from a recycled pid cannot tell the two apart.
+    known_pids is server_stop's only other guard -- if a client pid ever
+    entered it, server_stop(pid=...) would sail through and kill the client.
+
+    Guarded on the property rather than on the reading: adding
+    known_pids.add(pid) to set_client_pid left the whole suite green.
+    """
+    make_project(tmp_path)
+    killed = []
+    monkeypatch.setattr(lifecycle, "is_alive", lambda pid, image="": False)
+    monkeypatch.setattr(lifecycle, "stop", lambda pid: killed.append(pid) or True)
+
+    session.set_client_pid(UNREACHABLE_PID, client.CLIENT_IMAGE)
+
+    assert session.known_pid(UNREACHABLE_PID) is False
+    refused = tools.server_stop(pid=UNREACHABLE_PID)
+    assert refused.ok is False
+    assert "not one this session started" in refused.error
+    assert killed == []
+    assert session.client_pid() == UNREACHABLE_PID
 
 
 def test_the_two_text_tools_say_which_case_they_are(tmp_path):
@@ -773,6 +850,21 @@ async def test_the_client_tools_are_registered_with_their_real_signatures():
     assert "text" in listed["client_chat"].inputSchema["properties"]
     assert "button" in listed["client_press"].inputSchema["properties"]
     assert "submit" in listed["client_type"].inputSchema["properties"]
+
+
+@pytest.mark.anyio
+async def test_no_tool_in_the_client_namespace_is_registered_without_a_description():
+    """FastMCP takes a tool's description from its docstring, and an agent
+    browsing this namespace sees the descriptions and nothing else. One tool
+    reading `<none>` beside well-described siblings is a tool that gets used
+    last or not at all -- which is what client_compile_check was, phase-1 and
+    docstringless, sitting in the middle of the client_* list."""
+    listed = await mcp_server.mcp.list_tools()
+    bare = [
+        tool.name for tool in listed
+        if tool.name.startswith("client_") and not (tool.description or "").strip()
+    ]
+    assert bare == []
 
 
 def test_importing_the_client_tools_does_not_touch_the_driver_or_the_window_layer():
