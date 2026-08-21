@@ -19,6 +19,13 @@ SIGNER_REL = "Bin/DsUtils/DSSignFile.exe"
 CFGCONVERT_REL = "Bin/CfgConvert/CfgConvert.exe"
 BANKREV_REL = "Bin/PboUtils/BankRev.exe"
 IMAGETOPAA_REL = "Bin/ImageToPAA/ImageToPAA.exe"
+BINARIZE_REL = "Bin/Binarize/binarize.exe"
+#: What `-binpath=` wants: the folder that CONTAINS a `bin` directory holding
+#: the main config, NOT that `bin` directory itself. Measured, because the
+#: difference is the entire effect -- pointed at `.../Binarize/bin` the switch
+#: changed not one line of a real build's log, and pointed at `.../Binarize` it
+#: removed 25 of 112.
+BINARIZE_BINPATH_REL = "Bin/Binarize"
 TOOLS_PROBE = FILEBANK_REL
 
 

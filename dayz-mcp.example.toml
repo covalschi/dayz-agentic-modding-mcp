@@ -42,6 +42,17 @@ pre_script = ""
 # requires the stale-pbo check below to measure the ORIGINAL source, which
 # only this server's own packer.py can guarantee.
 stage = false
+# Optional, and required only for building models: the directory that holds the
+# PREFIX FOLDERS -- the one that contains a folder named like the path prefix
+# baked into your models (e.g. "MyMod/data/textures/..."). It becomes the
+# working directory of the model build, because binarize has NO project-root
+# switch: the root is whatever directory it was started in, and started in the
+# wrong one it writes a valid model with unresolvable texture paths and exits 0.
+# Relative to this file. It may point outside the repository (a staging area
+# that gathers several mods' prefix trees is a normal layout) and that is
+# announced in the profile's notes; an absolute path is refused, because a
+# committed absolute path builds correctly on exactly one machine.
+# project_root = "staging"
 
 [expect]
 # The line your mod prints when it has finished loading. The server does not

@@ -42,6 +42,10 @@ class BuildCfg:
     # something. See packer.py's pack_one for why this needs an explicit
     # opt-in rather than being the default.
     stage: bool = False
+    # The directory the model tools must resolve prefixed paths against,
+    # relative to the profile directory. Empty means the project declares none
+    # and nothing model-shaped can run. See resolve_project_root.
+    project_root: str = ""
 
 
 @dataclass
@@ -92,6 +96,25 @@ def resolve_mod_dir(root: Path, sources: dict[str, str], mod: str) -> Path:
     that need the same resolved path later, so the formula lives in one place.
     """
     return (Path(root) / sources.get(mod, mod)).resolve()
+
+
+def resolve_project_root(root: Path, project_root: str) -> Path | None:
+    """The one directory every model tool has to agree on, or None.
+
+    `binarize` has NO project-root option: the root is the process's working
+    directory, and the exporting add-on relativises material paths against a
+    root of its own. Today those two, plus the absolute paths stored inside the
+    source file, are three separate statements of the same fact that nothing
+    forces to agree -- and when they disagree the build still succeeds, with an
+    artifact the engine renders untextured.
+
+    Declared once, here, and resolved by one formula so every consumer gets the
+    same answer. Relative to the profile directory for the same reason
+    `build.sources` is: an absolute path is true on one machine only, and the
+    live defect this key exists to remove is exactly an absolute path stored by
+    a tool, still pointing at a directory from an unrelated session.
+    """
+    return (Path(root) / project_root).resolve() if project_root else None
 
 
 def _is_within(path: Path, base: Path) -> bool:
@@ -194,12 +217,30 @@ def load_profile(path: str | Path) -> Result:
             hint="write it as stage = true or stage = false",
         )
 
+    # Check build.project_root is a relative string
+    project_root_val = b.get("project_root", "")
+    if not isinstance(project_root_val, str):
+        return fail(
+            f"build.project_root must be a string, got {type(project_root_val).__name__}",
+            hint='write it as a path relative to this file, e.g. project_root = "staging"',
+        )
+    if project_root_val and Path(project_root_val).is_absolute():
+        return fail(
+            f"build.project_root is absolute: {project_root_val}",
+            hint="make it relative to this file. An absolute path is true on one machine "
+                 "only, and it is the very defect this key removes: the root is stated today "
+                 "in three places at once (the source file's material paths, the exporting "
+                 "add-on's stored preference and binarize's working directory) and nothing "
+                 "makes them agree",
+        )
+
     build = BuildCfg(
         mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
         exclude=[str(x) for x in exclude_val],
         sources={str(k): str(v) for k, v in sources_val.items()},
         stage=stage_val,
+        project_root=project_root_val,
     )
     if not build.mods:
         return fail(
@@ -232,6 +273,29 @@ def load_profile(path: str | Path) -> Result:
                      f"engine will load; create {mod_dir / 'config.cpp'}, or remove {mod} "
                      "from build.mods",
             )
+    declared_root = resolve_project_root(root, build.project_root)
+    if declared_root is not None:
+        if not declared_root.is_dir():
+            return fail(
+                f"build.project_root not found: {build.project_root} ({declared_root})",
+                hint="create that directory, or point the key at the one that holds the "
+                     "prefix folders. It becomes the working directory of the model build, "
+                     "and a working directory that is not there fails in a way nobody can "
+                     "read",
+            )
+        # Deliberately NOT the escape refusal build.sources has. A staging area
+        # that gathers the prefix trees of several mods legitimately sits
+        # beside the repositories rather than inside one of them -- that is the
+        # layout this was measured against. Announced, though: the build then
+        # depends on a directory this repository does not own, and nothing in
+        # it is covered by this repository's history.
+        if not _is_within(declared_root, root_resolved):
+            notes.append(
+                f"build.project_root points outside the repository: {build.project_root} "
+                f"({declared_root}); the build depends on a directory this repository does "
+                "not own"
+            )
+
     if build.pre_script and not (root / build.pre_script).exists():
         return fail(
             f"pre_script not found: {build.pre_script}",

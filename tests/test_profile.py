@@ -2,7 +2,7 @@ from pathlib import Path
 import textwrap
 import tomllib
 from dayz_mcp.packer import DEFAULT_EXCLUDE
-from dayz_mcp.profile import load_profile, resolve_mod_dir
+from dayz_mcp.profile import load_profile, resolve_mod_dir, resolve_project_root
 
 EXAMPLE_PROFILE = Path(__file__).resolve().parents[1] / "dayz-mcp.example.toml"
 
@@ -395,6 +395,100 @@ def test_sources_as_scalar_is_rejected(tmp_path):
     r = load_profile(write(tmp_path, bad))
     assert not r.ok
     assert "build.sources must be a table" in r.error
+
+
+# --- Requirement: build.project_root declares, once, the directory the model
+# tools must resolve prefixed paths against. It lives on the PORTABLE side
+# because it describes the repository's layout, not the machine: the same
+# declaration has to produce the same paths inside the artifact on every
+# checkout, and a value that is not committed cannot do that. Today the same
+# root is stated in three places at once -- the material paths inside the
+# .blend, a modelling add-on's stored preference, and binarize's working
+# directory -- and nothing makes them agree. ---
+
+
+def test_project_root_is_absent_by_default(tmp_path):
+    """A project with no models declares nothing and behaves exactly as before
+    this key existed."""
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.build.project_root == ""
+    assert resolve_project_root(p.root, p.build.project_root) is None
+
+
+def test_project_root_resolves_against_the_profile_directory(tmp_path):
+    (tmp_path / "staging").mkdir()
+    text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nproject_root = "staging"')
+    r = load_profile(write(tmp_path, text))
+    assert r.ok, r.error
+    assert r.data.build.project_root == "staging"
+    assert resolve_project_root(r.data.root, r.data.build.project_root) == (
+        tmp_path / "staging").resolve()
+
+
+def test_an_absolute_project_root_is_rejected(tmp_path):
+    """An absolute path in a committed file is the defect this key exists to
+    remove, not a way of expressing it: the modelling add-on on the machine
+    this was designed against stores exactly such a path, and it points at a
+    directory left over from an unrelated session."""
+    (tmp_path / "staging").mkdir()
+    absolute = str(tmp_path / "staging").replace("\\", "/")
+    text = BASE.replace('mods = ["MyMod"]', f'mods = ["MyMod"]\nproject_root = "{absolute}"')
+    r = load_profile(write(tmp_path, text))
+    assert not r.ok
+    assert "project_root" in r.error
+    assert "relative" in r.hint
+
+
+def test_a_project_root_that_is_not_there_is_rejected(tmp_path):
+    """binarize started in a directory that does not exist fails in a way
+    nobody can read. The profile answers first, by name."""
+    text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nproject_root = "staging"')
+    r = load_profile(write(tmp_path, text))
+    assert not r.ok
+    assert "project_root" in r.error
+    assert "staging" in r.error
+
+
+def test_a_project_root_that_is_a_file_is_rejected(tmp_path):
+    (tmp_path / "staging").write_text("", encoding="utf-8")
+    text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nproject_root = "staging"')
+    r = load_profile(write(tmp_path, text))
+    assert not r.ok
+    assert "project_root" in r.error
+
+
+def test_a_project_root_beside_the_repository_is_allowed_but_announced(tmp_path):
+    """Unlike build.sources, this one may point outside the repository: a
+    staging area that gathers the prefix trees of several mods legitimately
+    sits beside them, and that is the layout on the machine this was measured
+    against. It is announced, because a build then depends on a directory the
+    repository does not own."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "staging").mkdir()
+    text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nproject_root = "../staging"')
+    r = load_profile(write(repo, text))
+    assert r.ok, r.error
+    assert resolve_project_root(r.data.root, r.data.build.project_root) == (
+        tmp_path / "staging").resolve()
+    assert any("project_root" in n for n in r.data.notes)
+
+
+def test_project_root_as_a_non_string_is_rejected(tmp_path):
+    text = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nproject_root = 3')
+    r = load_profile(write(tmp_path, text))
+    assert not r.ok
+    assert "project_root must be a string" in r.error
+
+
+def test_project_root_in_the_machine_file_is_refused_by_the_merge_rule(tmp_path):
+    """It belongs to [build], and [build] is portable-only. Stated in the local
+    file it would be one more uncommitted place for the root to drift -- which
+    is the whole defect."""
+    (tmp_path / "staging").mkdir()
+    r = load_profile(write(tmp_path, BASE, '[build]\nproject_root = "staging"\n'))
+    assert not r.ok
+    assert "[build]" in r.error
 
 
 # --- Requirement: build.stage opts into packing a filtered copy instead of
