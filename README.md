@@ -91,6 +91,16 @@ in its notes.
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
 | `world_action(action_class, target_class, subject, radius, pos)` | run a mod's own action through the engine's gate — see below |
 | `world_exec(verb, args)` | the escape hatch: an arbitrary verb through the same transport, marked non-standard in every answer |
+| `client_start(timeout, extra_args)` | start the game client and connect it to the stand; returns a job id. Always windowed. Finishes when the bridge reports `players >= 1` — a count, not a timer |
+| `client_status()` | pid, window geometry, whether the window is minimized or in front, the background setting, the player count, and whether a virtual controller is attached |
+| `client_stop()` | stop the client this session started, and unplug the virtual controller |
+| `client_shot(path)` | capture the client's window to a PNG, with `lit_fraction` — the number that tells a real frame from an all-black one. No focus needed |
+| `client_move(x, y, seconds)` | walk the character with the left stick. Analog, and the only tract that moves the character at all. No focus needed |
+| `client_look(x, y, seconds)` | turn the camera with the right stick. No focus needed |
+| `client_press(button, seconds)` | one gamepad button, from a closed table of fourteen names. No focus needed |
+| `client_chat(text, color)` | put a line in chat — delivered **server-side by the bridge**, so no keyboard, no window, no focus |
+| `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
+| `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`
@@ -227,6 +237,81 @@ bridge's dispatcher (the comment above `KnownVerbs()` in
 machinery on purpose — a verb this server typed and validated would be a verb
 this server answers for.
 
+## The client: three input layers, and why there are three
+
+The bridge reaches the **server**. What it cannot do is look at the client's
+screen or act through the client — walk a character across ground, open a
+menu, fill a field a mod drew. The `client_*` tools are that, and they use
+three different tracts because no one of them can do the other two's work.
+Every line below is a measurement against a live client, not a design
+intention.
+
+| Tract | What it does | Needs the foreground |
+|---|---|---|
+| the bridge (`world_*`, `client_chat`) | the world, and text into chat | no |
+| a virtual gamepad, ViGEmBus (`client_move` / `look` / `press`) | movement, camera, and some interface | no |
+| real keystrokes, `SendInput` (`client_type`) | text into a field that exists only on the client | **yes, and it takes it** |
+
+**Keyboard emulation does not move the character, and window messages do
+nothing at all.** `SendInput` scancodes with the foreground verified: 25 s of
+forward, **0 m**. `PostMessage`/`SendMessage` WM_KEYDOWN into the main window
+and its children: **0 m**, and no reaction from the menus either. The engine
+reads movement from raw input and ignores emulated keys, which is why no
+tool here offers a window message.
+
+**The virtual gamepad does move it, unfocused, and it is ANALOG — the reason
+it stays even where a key would do.** Measured in one run with a third-party
+application holding the foreground throughout:
+
+    stick fully forward,   10.0 s  ->  38.40 m   (3.84 m/s)
+    stick at 0.3 forward,   8.0 s  ->  11.34 m   (1.42 m/s)
+
+Same tract, same character, 2.7× the speed from stick deflection alone.
+"The character is walking, not running" cannot be expressed with a key, which
+knows only on and off. In the same run the character walked about 141 m of its
+own accord, and the mod's own count of objects within 10 m of it went
+1 → 0 → 1 as it left the spot and came back — a state change caused by
+presence, which a teleport cannot produce.
+
+**Some of the interface answers the pad, and some does not.** Measured, with
+the game window behind another application the whole time: `back` opens and
+closes the inventory, `start` opens the pause menu, `b` closes it — all at the
+default 0.1 s tap, so a tap is long enough for the engine to latch. But `a`
+moved nothing, at 0.1 s or at 0.5 s, and neither did the d-pad inside those
+screens: the client did not switch to controller-navigation mode, so there was
+no focused element for a confirm to act on. Treat menu **dismissal** as a
+gamepad job and menu **confirmation** as unproven.
+
+**The eyes need no focus either.** A capture is a live frame with the window
+at the very bottom of the z-order (`lit_fraction` 0.9997 unfocused, 0.9997
+focused in the same session). The one state that defeats them is a
+**minimized** window, whose client area collapses to 0×0 — refused with a
+reason rather than saved as a valid-looking empty picture.
+
+**All of that background behaviour rests on one client setting**, `pauseMode`
+(GAME → UPDATE IN BACKGROUND). At the value measured here the client keeps
+drawing and simulating while unfocused, which is why the frame is live and the
+stick still moves the character. At "no graphics" both would stop *silently* —
+a frozen frame looks exactly like a live one. So `client_start` and
+`client_status` READ that setting and warn; they never write it, because it
+belongs to whoever owns the machine.
+
+**`client_type` is the only tool that takes the screen**, and it is honest
+about it: the answer carries `foreground_taken` and a sentence saying the
+person at the machine could not type into their own window while it ran. It
+verifies the foreground with `GetForegroundWindow` after asking for it, because
+`SetForegroundWindow` returns success having done nothing when Windows refuses
+— and typing blind sends the keystrokes into whatever window the person is
+actually using. When the foreground cannot be had, nothing is typed and the
+refusal names the process holding it.
+
+**ViGEm is emulation of a real device and this is a test stand.** The driver is
+signed and installs without a reboot, and the gamepad is a *new* device rather
+than a filter over the machine's own keyboard and mouse — a filter driver was
+tried here once and cost the machine's owner all keyboard and mouse input until
+it was unwound by hand. None of that is a promise about anticheat on a live
+server, and nothing in this phase makes one.
+
 ## Known limitations
 
 * **Stale-pbo detection is mtime-based, not content-based.** `mod_build`
@@ -267,6 +352,28 @@ this server answers for.
   first would let an innocuous substring swallow a fatal line -- but it means
   `noise` can only suppress warnings and ordinary lines, never demote an
   error-level one.
+* **`client_verdict` is an errors-and-crashes verdict, not a readiness one.**
+  `[expect]` describes the *server's* log: its ready line and counters are
+  printed by a mod's server-side init, and `max_warnings` is a budget counted
+  over that same log. A client `.RPT` contains none of it, so those three keys
+  are deliberately not applied here and the answer lists them in
+  `not_applied`. `forbid`, `error_regex` and `noise` are about the text of a
+  log line and still apply. There is no client-side ready line to declare;
+  whether the client got in is answered by the player count `client_start`
+  waits on, not by its log.
+* **The client tools join a stand this session did not start; `client_chat`
+  cannot.** `client_start` will happily connect to whatever is already on the
+  port, and says whose it is. But chat is delivered server-side, through the
+  same channel as the `world_*` tools, and that channel acts only on a server
+  this session started — so on a borrowed stand everything except `client_chat`
+  works. The refusal names the pids holding the port rather than suggesting a
+  `server_start` that would refuse them.
+* **Chat is not reachable from the gamepad, and confirming a menu is not
+  either.** The game binds its chat line to Enter and nothing else, and there
+  is no on-screen keyboard, so text is either a bridge message (`client_chat`,
+  free) or real keystrokes (`client_type`, costs the foreground).
+  `client_type("", submit=True)` sends Enter alone, which is how the chat line
+  is opened — and, on the evidence above, the only confirm the tool set has.
 
 ## Install
 
