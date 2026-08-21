@@ -115,7 +115,24 @@ modded class ActionManagerServer
         if (m_Player.GetCommandModifier_Action() || m_Player.GetCommand_Action())
             return "player is already performing an action";
 
-        if (m_Player.IsSprinting())
+        // IsSprinting() reads a CACHED HumanMovementState, refreshed only by
+        // explicit GetMovementState() calls inside the player's own
+        // command-handler frame. The engine's gate runs in that frame, so the
+        // cache is fresh there; this gate runs from the 1 Hz CallLater,
+        // OUTSIDE it, so it reads the native state fresh instead -- equal to
+        // the cache whenever the cache is fresh, correct when it is not.
+        // Honest status of this branch: it has never been observed to fire.
+        // In the one live attempt, the server-side position trace showed the
+        // sprinting client moving at walking speed, so the input never
+        // produced a sprint the server could see, and the owner then ruled
+        // the scenario out of scope: auto-tests act on conjured subjects the
+        // model owns, never on a human, so this refusal is engine-gate
+        // mirroring (the engine would reject the delivery anyway), not a
+        // feature. It stays because a named reason beats the engine's silent
+        // early return if it ever does fire.
+        HumanMovementState dzmcpMove = new HumanMovementState();
+        m_Player.GetMovementState(dzmcpMove);
+        if (dzmcpMove.m_iMovement == DayZPlayerConstants.MOVEMENT_SPRINT)
             return "player is sprinting";
 
         return "";
