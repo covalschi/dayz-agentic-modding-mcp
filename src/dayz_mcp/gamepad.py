@@ -20,6 +20,15 @@ further measurements shape the whole design:
 Typing text is the one thing a pad cannot do (DayZ has no on-screen keyboard),
 and it is the only job left for keyboard injection.
 
+VIGEM EMULATES GAMEPADS AND NOTHING ELSE. The bus offers exactly two device
+types -- `VX360Gamepad` and `VDS4Gamepad` -- and there is no virtual keyboard
+or virtual mouse to be had this way, however natural the question is. The
+alternatives are a filter driver (Interception) or a custom signed HID driver.
+Interception was tried on this machine on 2026-08-21 and took away ALL
+keyboard and mouse input until it was unwound; it is not a route this project
+takes. Text therefore goes through injection into the focused window, and
+there is no pad-shaped path to a keystroke.
+
 THE PROPERTY THIS MODULE IS BUILT AROUND: a stick that stays engaged is a
 character running forever with nobody watching. Every engagement therefore
 lives inside a `try/finally` (`_run_hold`), the release has a fallback that
@@ -28,6 +37,18 @@ the bus entirely, and `atexit` neutralises anything still held when the
 interpreter exits. Process death is itself a release: ViGEmBus removes a
 virtual device when the process that created it goes away, so a hard kill
 leaves the game seeing no pad rather than a held one.
+
+THE DEVICE HAS A SESSION LIFECYCLE, one per process rather than one per call:
+`open_pad` plugs it in, `status` says whether it is plugged in and since when,
+`close_pad` unplugs it. Plugging in is OBSERVABLE INSIDE THE GAME -- DayZ
+switches its on-screen hints to controller mode the moment a controller
+appears (measured in task 1) -- so it is a change to the system under test,
+like adding a mod to the stand, and `open_pad` says so in its answer instead
+of doing it quietly. `move`/`look`/`press` still open the device themselves
+when nothing is open, so a caller who only wants to walk is not made to
+perform ceremony; what they must never do is create a SECOND device, or hand
+one back at the end of every call and make the game watch a controller
+connect and disconnect all session long.
 
 Analog triggers (LT/RT) are deliberately not here. They are axes, not buttons,
 so they do not fit `press`, and nothing in this phase needs them; adding them
@@ -104,10 +125,24 @@ INSTALL_HINT = (
     "server cannot do it, and nothing else it offers requires one."
 )
 
-# One pad per process. Creating a virtual device per call is slow and churns a
-# kernel driver for no reason. The lock covers both this reference and the
-# report mutations below, which are read-modify-write on a shared device.
+# Said out loud in `open_pad`'s answer, because plugging a controller in
+# changes the thing being measured.
+PLUG_IN_NOTICE = (
+    "A virtual controller is now attached to this machine, and that is visible "
+    "inside the game: DayZ switches its on-screen hints to controller mode as soon "
+    "as a controller appears (measured 2026-08-21). Treat it as a change to the "
+    "system under test and call `close_pad` when the session is done, so the owner "
+    "is not left with a phantom controller plugged in."
+)
+
+# One device per SESSION, not per call. Creating a virtual device per call is
+# slow, churns a kernel driver, and makes the game watch a controller connect
+# and disconnect over and over. The lock covers this reference, the timestamps
+# beside it, and the report mutations below, which are read-modify-write on a
+# shared device.
 _pad = None
+_opened_at = 0.0  # wall clock, for reporting when the device was plugged in
+_opened_monotonic = 0.0  # for measuring how long it has been plugged in
 _lock = threading.RLock()
 
 
@@ -132,16 +167,19 @@ def _new_pad():
 
 
 def _acquire():
-    """`(pad, None)` when a device is available, `(None, refusal)` when not.
+    """`(pad, None, created)` when a device is available, `(None, refusal,
+    False)` when not. `created` is True only for the call that actually
+    plugged the device in -- the one whose caller needs to hear about the
+    side effect.
 
     The failure is NOT cached. The refusal exists to get the driver installed,
     and a cached "no driver" would mean the owner doing exactly what the
     message asked and still seeing it fail until the server is restarted.
     """
-    global _pad
+    global _pad, _opened_at, _opened_monotonic
     with _lock:
         if _pad is not None:
-            return _pad, None
+            return _pad, None, False
         try:
             # Creating it is the whole probe: vgamepad attaches the device to
             # the bus here and ships a neutral report of its own, so a device
@@ -151,7 +189,7 @@ def _acquire():
         except ImportError as exc:
             return None, fail(
                 f"the python package vgamepad is not importable: {exc}", INSTALL_HINT
-            )
+            ), False
         except Exception as exc:
             # What a missing driver actually looks like: vgamepad raises a
             # bare Exception carrying VIGEM_ERROR_BUS_NOT_FOUND, or asserts
@@ -160,45 +198,113 @@ def _acquire():
             return None, fail(
                 f"no virtual gamepad: ViGEmBus would not accept a virtual device ({exc})",
                 INSTALL_HINT,
-            )
+            ), False
         _pad = pad
-        return pad, None
+        _opened_at = time.time()
+        _opened_monotonic = time.monotonic()
+        return pad, None, True
 
 
-def _drop(pad) -> None:
-    """Forget `pad` without touching it. Dropping the last reference makes
-    vgamepad remove the target from the bus, which is itself a release: a game
-    sees no pad at all rather than one with an input held down.
+def _forget(pad) -> bool:
+    """Forget `pad` without touching it, and say whether it was the live one.
+
+    Dropping the last reference makes vgamepad remove the target from the bus,
+    which is itself a release: a game sees no pad at all rather than one with
+    an input held down.
 
     Only if it is still the current one -- a caller cleaning up after a device
     that failed must not throw away a replacement someone else has since
     acquired.
     """
-    global _pad
+    global _pad, _opened_at, _opened_monotonic
     with _lock:
-        if _pad is pad:
-            _pad = None
+        if _pad is not pad:
+            return False
+        _pad = None
+        _opened_at = 0.0
+        _opened_monotonic = 0.0
+        return True
 
 
-def shutdown() -> None:
-    """Neutralise the pad and let the device go. Registered with `atexit`, and
-    used by tests to get back to a known state. A no-op when no device was
-    ever created."""
-    global _pad
+def open_pad() -> Result:
+    """Plug the virtual controller in for this session, once.
+
+    Calling it twice is not an error and does not make a second device: the
+    answer just says `created: false`. The call that actually created one
+    carries `side_effect`, because the game can see a controller appear.
+    """
+    pad, refusal, created = _acquire()
+    if refusal is not None:
+        return refusal
+    return ok(_device_data(created))
+
+
+def close_pad() -> Result:
+    """Unplug the device: neutralise it, then remove it from the bus.
+
+    Also the `atexit` hook, and the two must not fight -- so it is idempotent
+    by construction. An explicit close leaves `_pad` empty, which makes the
+    one at interpreter exit a no-op rather than a second attempt on a device
+    that is already gone.
+
+    Always `ok`. If the last neutral report cannot be shipped it says so in
+    `released`, but it is not a failure: letting the device go removes it from
+    the bus, which is a stronger release than any report.
+    """
+    global _pad, _opened_at, _opened_monotonic
     with _lock:
         pad, _pad = _pad, None
+        opened_monotonic, _opened_monotonic = _opened_monotonic, 0.0
+        _opened_at = 0.0
     if pad is None:
-        return
+        return ok({"pad": "closed", "was_open": False, "released": False})
+    released = True
     try:
         pad.reset()
         pad.update()
     except Exception:
-        # Already on the way out, and the reference is gone either way -- so
-        # the device is removed from the bus regardless.
-        pass
+        released = False
+    return ok({
+        "pad": "closed",
+        "was_open": True,
+        "released": released,
+        "open_seconds": round(max(0.0, time.monotonic() - opened_monotonic), 1),
+    })
 
 
-atexit.register(shutdown)
+def status() -> Result:
+    """Is a device plugged in, and since when.
+
+    Deliberately does NOT create one: creating it is the observable act this
+    lifecycle exists to make explicit, and a status call that plugged a
+    controller into the owner's machine to answer "is one plugged in" would be
+    absurd. On a machine with no driver this therefore answers "closed" rather
+    than refusing -- it reports the session, not the hardware.
+    """
+    with _lock:
+        pad = _pad
+    if pad is None:
+        return ok({"pad": "closed", "device": None, "opened_at": None,
+                   "open_seconds": None})
+    return ok(_device_data(False))
+
+
+def _device_data(created: bool) -> dict:
+    with _lock:
+        opened_at, opened_monotonic = _opened_at, _opened_monotonic
+    data = {
+        "pad": "open",
+        "device": "virtual Xbox 360 controller",
+        "created": created,
+        "opened_at": round(opened_at, 3),
+        "open_seconds": round(max(0.0, time.monotonic() - opened_monotonic), 1),
+    }
+    if created:
+        data["side_effect"] = PLUG_IN_NOTICE
+    return data
+
+
+atexit.register(close_pad)
 
 
 def _release(pad, release) -> str:
@@ -224,11 +330,15 @@ def _release(pad, release) -> str:
             pad.update()
         return f"the release failed ({surgical}); the whole report was reset instead"
     except Exception as second:
-        _drop(pad)
+        removed = _forget(pad)
+        fate = (
+            "the virtual device was removed from the bus to make sure nothing stayed held"
+            if removed
+            else "the device had already been replaced, so there was nothing to remove"
+        )
         return (
             f"the release failed ({surgical}) and resetting the report failed too "
-            f"({second}); the virtual device was removed from the bus to make sure "
-            f"nothing stayed held"
+            f"({second}); {fate}"
         )
 
 
@@ -300,7 +410,8 @@ _STICK_HINT = (
 _RELEASE_HINT = (
     "Check that the virtual device is still present (ViGEmBus running, no driver "
     "update in progress). Call `neutral` to force everything back to rest; if that "
-    "also fails, restart this server -- the device disappears with the process."
+    "also fails, `close_pad` unplugs the device entirely, which stops the game from "
+    "seeing any input at all. The device also disappears with this process."
 )
 
 
@@ -324,7 +435,7 @@ def _stick(which: str, x, y, seconds) -> Result:
     clamped_y = max(-STICK_LIMIT, min(STICK_LIMIT, y_value))
     clamped = (clamped_x, clamped_y) != (x_value, y_value)
 
-    pad, refusal = _acquire()
+    pad, refusal, created = _acquire()
     if refusal is not None:
         return refusal
     apply = pad.left_joystick_float if which == "left" else pad.right_joystick_float
@@ -342,7 +453,20 @@ def _stick(which: str, x, y, seconds) -> Result:
         "seconds": held_for,
         "held": round(measured, 3),
     }
-    return _verdict(data, failure, release_error)
+    return _verdict(_with_open_notice(data, created), failure, release_error)
+
+
+def _with_open_notice(data: dict, created: bool) -> dict:
+    """Say when THIS call was the one that plugged the controller in.
+
+    A caller who never called `open_pad` still deserves to know a controller
+    just appeared -- the game's hints change, and that is a side effect on the
+    system under test, not an implementation detail.
+    """
+    data["opened"] = created
+    if created:
+        data["side_effect"] = PLUG_IN_NOTICE
+    return data
 
 
 def _verdict(data: dict, failure: str, release_error: str) -> Result:
@@ -368,6 +492,10 @@ def move(x, y, seconds) -> Result:
     `move(0, 1, 6)` is the measured 24 m walk. Values outside [-1, 1] are
     clamped (and reported as clamped); `seconds` above `MAX_HOLD_SECONDS` is
     refused. The stick is back at rest when this returns, on every path.
+
+    Opens the session's device if none is open yet and reports that it did
+    (`opened`, plus the side effect the game can see); the device stays open
+    afterwards -- `close_pad` is what unplugs it.
     """
     return _stick("left", x, y, seconds)
 
@@ -385,6 +513,8 @@ def press(button, seconds=DEFAULT_PRESS_SECONDS) -> Result:
     surrounding spaces ignored. Buttons drive the interface as well as the
     character: BACK opens the inventory, the shoulder buttons move between
     menu tabs, B leaves a menu -- all measured, all with the window unfocused.
+
+    Opens the session's device if none is open yet, exactly as `move` does.
     """
     if not isinstance(button, str):
         return fail(
@@ -405,7 +535,7 @@ def press(button, seconds=DEFAULT_PRESS_SECONDS) -> Result:
         return fail(complaint, _CEILING_HINT)
 
     bit = BUTTONS[name]
-    pad, refusal = _acquire()
+    pad, refusal, created = _acquire()
     if refusal is not None:
         return refusal
     measured, failure, release_error = _run_hold(
@@ -415,7 +545,7 @@ def press(button, seconds=DEFAULT_PRESS_SECONDS) -> Result:
         held_for,
     )
     data = {"button": name, "seconds": held_for, "held": round(measured, 3)}
-    return _verdict(data, failure, release_error)
+    return _verdict(_with_open_notice(data, created), failure, release_error)
 
 
 def neutral() -> Result:

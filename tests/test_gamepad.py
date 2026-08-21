@@ -76,12 +76,12 @@ def pad(monkeypatch):
     `_sleep` is replaced by a recorder so the whole file runs in milliseconds
     while still proving which duration was actually requested.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
     fake = FakePad()
     monkeypatch.setattr(gamepad, "_new_pad", lambda: fake)
     monkeypatch.setattr(gamepad, "_sleep", lambda seconds: None)
     yield fake
-    gamepad.shutdown()
+    gamepad.close_pad()
 
 
 @pytest.fixture
@@ -110,7 +110,7 @@ def test_a_missing_driver_refuses_instead_of_raising(monkeypatch, name, call):
     A traceback reaching the caller is a defect: the pad is constructed lazily
     inside a tool call, and a tool must answer with an envelope.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
 
     def no_driver():
         # What vgamepad actually raises with the package installed and the
@@ -131,7 +131,7 @@ def test_a_missing_package_names_the_package_too(monkeypatch):
     separate installs and a caller who sees only one of them named will do
     only half the work.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
 
     def no_package():
         raise ImportError("No module named 'vgamepad'")
@@ -326,7 +326,7 @@ def test_a_device_that_cannot_be_released_at_all_is_torn_down(monkeypatch):
     the bus is the only remaining way to make the game stop seeing a held
     input, and it beats keeping a pad nobody can talk to.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
     made: list[FakePad] = []
 
     class DeadPad(FakePad):
@@ -344,7 +344,7 @@ def test_a_device_that_cannot_be_released_at_all_is_torn_down(monkeypatch):
         move(0.0, 1.0, 0.1)
         assert len(made) == 2, "an unreleasable device was kept and reused"
     finally:
-        gamepad.shutdown()
+        gamepad.close_pad()
 
 
 def test_the_release_is_surgical_so_holds_can_be_combined(pad):
@@ -389,10 +389,9 @@ def test_the_atexit_safety_net_releases_on_interpreter_shutdown(tmp_path):
             def release_button(self, b): pass
 
         gamepad._new_pad = Pad
-        pad, refusal = gamepad._acquire()
-        assert refusal is None, refusal
-        pad.buttons = 1                      # leave the device engaged
-        open(r"{marker}", "w").close()       # forget the report _acquire sent
+        result = gamepad.open_pad()
+        assert result.ok, result
+        gamepad._pad.buttons = 1             # leave the device engaged
         """
     )
     subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
@@ -402,7 +401,7 @@ def test_the_atexit_safety_net_releases_on_interpreter_shutdown(tmp_path):
 
 
 def test_neutral_releases_everything_at_once(pad):
-    gamepad._acquire()  # the device has to exist before it can be held
+    gamepad.open_pad()  # the device has to exist before it can be held
     pad.press_button(BUTTONS["a"])
     pad.left_joystick_float(1.0, 1.0)
     result = neutral()
@@ -415,7 +414,7 @@ def test_neutral_does_not_conjure_a_pad_that_does_not_exist(monkeypatch):
     release must not create one -- least of all on a machine with no driver,
     where it would turn a no-op into a refusal.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
 
     def never():
         raise AssertionError("neutral() created a pad")
@@ -457,7 +456,7 @@ def test_an_unknown_button_is_refused_without_a_driver(monkeypatch):
     is about the name they got wrong -- not about a driver that is beside the
     point.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
 
     def never():
         raise AssertionError("a bad button name reached the driver")
@@ -502,6 +501,200 @@ def test_our_button_bits_match_the_ones_vgamepad_uses():
 
 
 # --------------------------------------------------------------------------
+# The session lifecycle: plugged in once, on purpose, and unplugged on purpose
+# --------------------------------------------------------------------------
+
+def test_open_pad_creates_the_device_once_and_reports_what_it_made(monkeypatch):
+    """One device per session, not per call. Calling open twice is not an
+    error and must not produce a second controller -- the second answer just
+    says it created nothing.
+    """
+    gamepad.close_pad()
+    made: list[FakePad] = []
+
+    def factory():
+        made.append(FakePad())
+        return made[-1]
+
+    monkeypatch.setattr(gamepad, "_new_pad", factory)
+    try:
+        first = gamepad.open_pad()
+        assert first.ok is True
+        assert first.data["created"] is True
+        assert first.data["pad"] == "open"
+        assert "controller" in first.data["device"]
+        assert first.data["opened_at"] > 0
+
+        second = gamepad.open_pad()
+        assert second.ok is True
+        assert second.data["created"] is False
+        assert len(made) == 1
+    finally:
+        gamepad.close_pad()
+
+
+def test_open_pad_says_that_plugging_in_is_visible_inside_the_game(pad):
+    """Attaching a controller is not a neutral act: DayZ switches its on-screen
+    hints to controller mode the moment one appears (measured in task 1). That
+    is a change to the system under test, like adding a mod to the stand, so
+    the answer names it instead of letting it be discovered from a screenshot.
+    The idempotent second call does NOT repeat it -- nothing was plugged in.
+    """
+    first = gamepad.open_pad()
+    assert "controller" in first.data["side_effect"]
+    assert "close_pad" in first.data["side_effect"]
+    assert "side_effect" not in gamepad.open_pad().data
+
+
+def test_open_pad_refuses_without_a_driver(monkeypatch):
+    gamepad.close_pad()
+
+    def no_driver():
+        raise Exception("VIGEM_ERROR_BUS_NOT_FOUND")
+
+    monkeypatch.setattr(gamepad, "_new_pad", no_driver)
+    result = gamepad.open_pad()
+    assert result.ok is False
+    assert "github.com/nefarius/ViGEmBus/releases" in result.hint
+
+
+def test_close_pad_unplugs_neutralises_and_is_idempotent(monkeypatch):
+    """A session that is done must not leave a phantom controller attached to
+    the owner's machine. Closing twice is harmless by construction -- it has
+    to be, because it is also the atexit hook.
+    """
+    gamepad.close_pad()
+    made: list[FakePad] = []
+
+    def factory():
+        made.append(FakePad())
+        return made[-1]
+
+    monkeypatch.setattr(gamepad, "_new_pad", factory)
+    try:
+        gamepad.open_pad()
+        first = gamepad.close_pad()
+        assert first.ok is True
+        assert first.data["was_open"] is True
+        assert first.data["released"] is True
+        assert made[0].last == NEUTRAL
+
+        second = gamepad.close_pad()
+        assert second.ok is True
+        assert second.data["was_open"] is False
+        assert len(made[0].updates) == 1, "a closed device was written to again"
+    finally:
+        gamepad.close_pad()
+
+
+def test_close_pad_still_unplugs_a_device_it_cannot_write_to(monkeypatch):
+    """Letting the device go removes it from the bus, which is a stronger
+    release than any report -- so a final report that will not ship is worth
+    reporting but is not a failure.
+    """
+    gamepad.close_pad()
+
+    class DeadPad(FakePad):
+        def update(self):
+            raise OSError("device gone")
+
+    monkeypatch.setattr(gamepad, "_new_pad", DeadPad)
+    try:
+        gamepad.open_pad()
+        result = gamepad.close_pad()
+        assert result.ok is True
+        assert result.data["released"] is False
+        assert gamepad.status().data["pad"] == "closed"
+    finally:
+        gamepad.close_pad()
+
+
+def test_status_does_not_plug_anything_in(monkeypatch):
+    """A status call that attached a controller to the owner's machine in
+    order to answer "is a controller attached" would be absurd -- and on a
+    machine with no driver it would refuse instead of answering.
+    """
+    gamepad.close_pad()
+
+    def never():
+        raise AssertionError("status() created a device")
+
+    monkeypatch.setattr(gamepad, "_new_pad", never)
+    result = gamepad.status()
+    assert result.ok is True
+    assert result.data == {"pad": "closed", "device": None, "opened_at": None,
+                           "open_seconds": None}
+
+
+def test_status_reports_an_open_device_and_how_long_it_has_been_open(pad):
+    opened = gamepad.open_pad()
+    result = gamepad.status()
+    assert result.ok is True
+    assert result.data["pad"] == "open"
+    assert result.data["created"] is False  # status never creates anything
+    assert result.data["opened_at"] == opened.data["opened_at"]
+    assert result.data["open_seconds"] >= 0
+
+
+def test_a_plain_move_opens_the_device_without_ceremony_and_says_it_did(pad):
+    """No ceremony for a caller who just wants to walk -- but the controller
+    still appeared, and the answer says which call did it.
+    """
+    first = move(0.0, 1.0, 0.1)
+    assert first.ok is True
+    assert first.data["opened"] is True
+    assert "controller" in first.data["side_effect"]
+
+    second = move(0.0, 1.0, 0.1)
+    assert second.data["opened"] is False
+    assert "side_effect" not in second.data
+    assert press("a", 0.1).data["opened"] is False
+
+
+def test_a_finished_call_leaves_the_device_plugged_in(pad):
+    """The difference between a session device and a lazy per-call one: after
+    a hold the input is released but the controller stays attached, so the
+    game does not watch it connect and disconnect all session long.
+    """
+    move(0.0, 1.0, 0.1)
+    assert gamepad.status().data["pad"] == "open"
+    assert pad.last == NEUTRAL
+
+
+def test_an_explicit_close_leaves_nothing_for_atexit_to_redo(tmp_path):
+    """The safety net must not fight the explicit close. After close_pad the
+    device is already gone, so interpreter exit has nothing to write -- one
+    report in the file, not two.
+    """
+    marker = tmp_path / "reports.txt"
+    script = textwrap.dedent(
+        f"""
+        from dayz_mcp import gamepad
+
+        class Pad:
+            def __init__(self):
+                self.buttons = 1
+            def reset(self):
+                self.buttons = 0
+            def update(self):
+                open(r"{marker}", "a").write("report\\n")
+            def left_joystick_float(self, x, y): pass
+            def right_joystick_float(self, x, y): pass
+            def press_button(self, b): pass
+            def release_button(self, b): pass
+
+        gamepad._new_pad = Pad
+        gamepad.open_pad()
+        closed = gamepad.close_pad()
+        assert closed.data["was_open"] is True, closed
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                   check=True, cwd=str(tmp_path))
+    assert marker.read_text(encoding="utf-8").splitlines() == ["report"]
+
+
+# --------------------------------------------------------------------------
 # One pad per process
 # --------------------------------------------------------------------------
 
@@ -509,7 +702,7 @@ def test_the_pad_is_created_once_and_reused(monkeypatch):
     """Creating a virtual device per call is slow and churns a kernel driver
     for no reason.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
     made: list[FakePad] = []
 
     def factory():
@@ -524,11 +717,11 @@ def test_the_pad_is_created_once_and_reused(monkeypatch):
         press("a", 0.1)
         assert len(made) == 1
     finally:
-        gamepad.shutdown()
+        gamepad.close_pad()
 
 
-def test_shutdown_neutralises_and_drops_the_pad(monkeypatch):
-    gamepad.shutdown()
+def test_a_closed_device_is_not_reused_by_the_next_call(monkeypatch):
+    gamepad.close_pad()
     made: list[FakePad] = []
 
     def factory():
@@ -539,12 +732,12 @@ def test_shutdown_neutralises_and_drops_the_pad(monkeypatch):
     monkeypatch.setattr(gamepad, "_sleep", lambda seconds: None)
     try:
         move(0.0, 1.0, 0.1)
-        gamepad.shutdown()
+        gamepad.close_pad()
         assert made[0].last == NEUTRAL
         move(0.0, 1.0, 0.1)
         assert len(made) == 2
     finally:
-        gamepad.shutdown()
+        gamepad.close_pad()
 
 
 def test_a_driver_installed_mid_session_starts_working(monkeypatch):
@@ -552,7 +745,7 @@ def test_a_driver_installed_mid_session_starts_working(monkeypatch):
     point of the refusal message, and a cached "no driver" would make them
     restart the server to see it take effect.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
     state = {"driver": False}
     fake = FakePad()
 
@@ -568,7 +761,7 @@ def test_a_driver_installed_mid_session_starts_working(monkeypatch):
         state["driver"] = True
         assert move(0.0, 1.0, 0.1).ok is True
     finally:
-        gamepad.shutdown()
+        gamepad.close_pad()
 
 
 # --------------------------------------------------------------------------
@@ -588,21 +781,28 @@ def test_a_real_pad_accepts_neutral_reports(monkeypatch):
     paths call are checked for existence instead, which is the part a
     stand-in cannot vouch for.
     """
-    gamepad.shutdown()
+    gamepad.close_pad()
     try:
-        pad, refusal = gamepad._acquire()
+        opened = gamepad.open_pad()
     except Exception as exc:  # pragma: no cover - defensive
-        pytest.fail(f"_acquire raised instead of refusing: {exc!r}")
-    if refusal is not None:
-        pytest.skip(f"no virtual gamepad on this machine: {refusal.error}")
+        pytest.fail(f"open_pad raised instead of refusing: {exc!r}")
+    if not opened.ok:
+        pytest.skip(f"no virtual gamepad on this machine: {opened.error}")
     try:
+        assert opened.data["created"] is True
+        assert "controller" in opened.data["side_effect"]
+        pad = gamepad._pad
         for method in ("left_joystick_float", "right_joystick_float",
                        "press_button", "release_button", "reset", "update"):
             assert hasattr(pad, method), method
         assert move(0.0, 0.0, 0.0).ok is True
         assert look(0.0, 0.0, 0.0).ok is True
+        assert gamepad.status().data["pad"] == "open"
         result = neutral()
         assert result.ok is True
         assert result.data["pad"] == "neutral"
     finally:
-        gamepad.shutdown()
+        closed = gamepad.close_pad()
+    assert closed.data == {"pad": "closed", "was_open": True, "released": True,
+                           "open_seconds": closed.data["open_seconds"]}
+    assert gamepad.status().data["pad"] == "closed"
