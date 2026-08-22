@@ -91,6 +91,9 @@ in its notes.
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
+| `world_entities(class_name, radius, pos, limit)` | **which** objects are nearby, not how many: class, position, distance and health for each. A page, and it says so — the true total comes back beside the list |
+| `world_time_set(hour, minute, day, month, year)` | move the world clock. Every field left at -1 keeps its current value, read back from the engine first, because the engine sets a date as five numbers at once |
+| `world_weather_set(what, value, seconds, duration)` | move overcast, rain, fog, snowfall or wind. A **nudge, not a lock**: the engine keeps simulating weather afterwards, and both the tool and the mod say so |
 | `world_action(action_class, target_class, subject, radius, pos)` | run a mod's own action through the engine's gate — see below |
 | `world_exec(verb, args)` | the escape hatch: an arbitrary verb through the same transport, marked non-standard in every answer |
 | `client_start(timeout, extra_args)` | start the game client and connect it to the stand; returns a job id. Always windowed. Finishes when the bridge reports `players >= 1` — a count, not a timer |
@@ -431,6 +434,14 @@ a full disk.
 | `knowledge_overrides` | 4.2 ms |
 | `knowledge_callers`, 23 call sites out of 113 703 | 0.38 ms of query |
 | `mod_lint` on a 76-file mod | 277 ms of text checks, 7 ms of index checks |
+
+Measured on a live stand, three boots: `world_time_set(hour=3, minute=7)` moved
+the clock to `2026-09-20 03:07` and left the date where it was;
+`world_weather_set("fog", 0.9, seconds=2)` took the published fog from 0.085 to
+0.900 and held it; `world_entities(pos="7500 0 7500", radius=150, limit=5)`
+listed 5 of 171 objects with `truncated: true`. Distances came back at 320 m
+for a 150 m radius until they were made horizontal, which is what the engine's
+own radius test measures.
 | `knowledge_show`, a class with 400 members and its ancestry | 6.8 ms |
 | `knowledge_status`, all three layers measured | 41 ms (110 ms on the first call after a build) |
 

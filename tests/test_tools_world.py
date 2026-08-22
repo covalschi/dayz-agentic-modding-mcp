@@ -455,3 +455,115 @@ def test_world_exec_is_registered():
 
     names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert "world_exec" in names
+
+
+# ------------------------------------------------- the clock, the sky, the list
+
+
+def test_setting_nothing_is_refused_before_anything_is_sent(live):
+    """SetDate takes all five fields at once. A call that changed nothing would
+    still overwrite the date with whatever the tool made up."""
+    result = world.world_time_set()
+    assert not result.ok
+    assert live.sent == []
+    assert "hour" in result.hint
+
+
+def test_only_the_fields_asked_for_are_sent(live):
+    world.world_time_set(hour=14)
+    assert live.sent[-1].verb == "time"
+    assert live.sent[-1].args == {"hour": "14"}
+
+
+def test_every_date_field_can_be_sent_and_all_go_as_strings(live):
+    world.world_time_set(hour=1, minute=2, day=3, month=4, year=2016)
+    args = live.sent[-1].args
+    assert args == {"hour": "1", "minute": "2", "day": "3", "month": "4", "year": "2016"}
+
+
+def test_the_clock_answer_carries_the_world_as_it_now_is(live):
+    live.state = BridgeState(
+        tick=9, session_id="sess-1",
+        world={"players": 0, "date_hour": 14, "date_minute": 0},
+    )
+    result = world.world_time_set(hour=14)
+    assert result.ok, result.error
+    assert result.data["world"]["date_hour"] == 14
+    assert result.data["tick"] == 9
+
+
+def test_weather_sends_what_it_was_given(live):
+    world.world_weather_set("rain", 0.5, seconds=60, duration=120)
+    assert live.sent[-1].verb == "weather"
+    assert live.sent[-1].args == {
+        "what": "rain", "value": "0.5", "seconds": "60", "duration": "120",
+    }
+
+
+def test_the_mods_refusal_about_weather_reaches_the_caller_verbatim(live):
+    live.answer = CommandState(
+        id="", status="failed",
+        detail="weather: what must be overcast, rain, fog, snowfall or wind, not 'sunshine'",
+        finished_at=1.0,
+    )
+    result = world.world_weather_set("sunshine", 1)
+    assert not result.ok
+    assert "sunshine" in result.error
+
+
+def test_entities_names_what_is_there(live):
+    live.state = BridgeState(
+        tick=9, session_id="sess-1",
+        world={
+            "players": 0,
+            "entities_total": 2,
+            "entities": ["Apple|7500 0 7500|1.5|100", "Rag|7501 0 7500|2.25|50"],
+        },
+    )
+    result = world.world_entities()
+    assert result.ok, result.error
+    assert result.data["entities"][0] == {
+        "class": "Apple", "pos": "7500 0 7500", "distance": 1.5, "health": 100.0,
+    }
+    assert result.data["count"] == 2
+    assert result.data["total"] == 2
+    assert result.data["truncated"] is False
+
+
+def test_a_list_shorter_than_the_count_says_so(live):
+    """The mod caps the list and reports the true total. A page that did not
+    say it was a page would read as the whole world."""
+    live.state = BridgeState(
+        tick=9, session_id="sess-1",
+        world={"players": 0, "entities_total": 900, "entities": ["Apple|7500 0 7500|1|100"]},
+    )
+    result = world.world_entities()
+    assert result.data["count"] == 1
+    assert result.data["total"] == 900
+    assert result.data["truncated"] is True
+
+
+def test_a_line_that_does_not_parse_survives_instead_of_vanishing(live):
+    live.state = BridgeState(
+        tick=9, session_id="sess-1",
+        world={"players": 0, "entities_total": 1, "entities": ["nonsense"]},
+    )
+    result = world.world_entities()
+    assert result.data["entities"] == [{"raw": "nonsense"}]
+    assert result.data["count"] == 1
+
+
+def test_an_empty_class_is_not_sent_at_all(live):
+    """Empty means "everything"; sending "" would make the mod filter on it."""
+    world.world_entities()
+    assert "class" not in live.sent[-1].args
+    world.world_entities(class_name="Apple")
+    assert live.sent[-1].args["class"] == "Apple"
+
+
+def test_a_command_that_finished_with_no_readable_snapshot_says_which_half_is_missing(live):
+    live.state = None
+    result = world.world_time_set(hour=8)
+    assert result.ok, result.error
+    assert result.data["world"] == {}
+    assert "no readable state" in result.data["world_unavailable"]

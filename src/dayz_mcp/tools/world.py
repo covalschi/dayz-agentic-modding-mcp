@@ -426,6 +426,181 @@ def world_set(what: str, value: float, target: str = "",
     return _run("set", _args(what=what, value=value, target=target or None), timeout)
 
 
+#: What `world_time_set` reads as "leave this field where it is".
+#:
+#: Not a magic number standing in for a real value: every field of a date is
+#: non-negative, so -1 cannot collide with one. SetDate takes all five fields
+#: at once, so a tool that defaulted the ones it was not given would silently
+#: move the date to set the hour.
+UNCHANGED = -1
+
+#: How many objects `world_entities` lists by default. The mod caps it at 200
+#: and reports the true total either way; asking for more than the cap is
+#: clamped there rather than refused.
+ENTITY_LIMIT = 200
+
+
+def _date_args(year: int, month: int, day: int, hour: int, minute: int) -> dict:
+    return _args(
+        year=None if year == UNCHANGED else int(year),
+        month=None if month == UNCHANGED else int(month),
+        day=None if day == UNCHANGED else int(day),
+        hour=None if hour == UNCHANGED else int(hour),
+        minute=None if minute == UNCHANGED else int(minute),
+    )
+
+
+def world_time_set(hour: int = UNCHANGED, minute: int = UNCHANGED,
+                   day: int = UNCHANGED, month: int = UNCHANGED,
+                   year: int = UNCHANGED,
+                   timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Move the world clock.
+
+    Every field left at -1 keeps the value the world already has, read back
+    from the engine before the change. That matters because the engine sets a
+    date as five numbers at once: a tool that filled in the missing ones would
+    move the date every time somebody set the hour.
+
+    Ranges are the engine's own documented ones -- month 1-12, day 1-31, hour
+    0-23, minute 0-59 -- and are checked in the mod, before a native call that
+    would otherwise be handed a value it does not define behaviour for.
+
+    The answer carries the world's clock as it stands after the change, from
+    the mod's own snapshot rather than from what was asked for.
+    """
+    if all(v == UNCHANGED for v in (hour, minute, day, month, year)):
+        return fail(
+            "world_time_set was given nothing to change",
+            hint="pass at least one of hour, minute, day, month, year; "
+                 "everything left at -1 keeps its current value",
+        )
+    answered = _run("time", _date_args(year, month, day, hour, minute), timeout)
+    if not answered.ok:
+        return answered
+    return _with_world(answered)
+
+
+def world_weather_set(what: str, value: float, seconds: float = 0.0,
+                      duration: float = 0.0,
+                      timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Move one weather phenomenon towards a value.
+
+    `what` is "overcast", "rain", "fog", "snowfall" or "wind". The first four
+    take a value between 0 and 1; wind takes a speed in metres per second.
+    `seconds` is how long the change takes (0 is immediate) and `duration` is
+    how long the value is held before the engine's own simulation may move it
+    again.
+
+    THIS IS A NUDGE, NOT A LOCK. The engine keeps simulating weather, so a
+    value set here drifts afterwards -- said here and in the mod's own answer,
+    because the alternative is a caller who sets rain, looks up two minutes
+    later and concludes the tool did nothing.
+    """
+    answered = _run(
+        "weather",
+        _args(what=what, value=value, seconds=seconds, duration=duration),
+        timeout,
+    )
+    if not answered.ok:
+        return answered
+    return _with_world(answered)
+
+
+def world_entities(class_name: str = "", radius: float = 30.0, pos: str = "",
+                   limit: int = ENTITY_LIMIT,
+                   timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """WHICH objects are nearby, not how many.
+
+    `world_state(class_name=...)` counts; this one names them, with each
+    object's class, position, distance and health. An empty `class_name` lists
+    everything found rather than nothing.
+
+    The list is a page: the mod caps it at 200 entries and reports the true
+    total separately, so `total` larger than `count` means there is more out
+    there -- never a shorter list quietly standing in for the world.
+
+    `distance` is HORIZONTAL, because the engine's own radius test ignores
+    height: at the centre of Chernarus the terrain is 300 m up, so a
+    straight-line distance from a position written as "7500 0 7500" reads 320 m
+    for objects the engine returned inside a 150 m radius. A number that
+    contradicts the filter that produced it is worse than no number.
+
+    Players are not in it. The mod's own gather step skips them, which is what
+    keeps a `delete` of everything nearby from reaching the person standing in
+    it, and this tool shares that step deliberately rather than growing a
+    second notion of what is in the world.
+    """
+    answered = _run(
+        "entities",
+        _args(**{"class": class_name or None, "radius": radius,
+                 "pos": pos or None, "limit": limit}),
+        timeout,
+    )
+    if not answered.ok:
+        return answered
+    enriched = _with_world(answered)
+    world = enriched.data.get("world") or {}
+    enriched.data["entities"] = [
+        _entity(line) for line in world.get("entities", []) if isinstance(line, str)
+    ]
+    enriched.data["total"] = world.get("entities_total", -1)
+    enriched.data["count"] = len(enriched.data["entities"])
+    enriched.data["truncated"] = (
+        isinstance(enriched.data["total"], int)
+        and enriched.data["total"] > enriched.data["count"]
+    )
+    return enriched
+
+
+def _entity(line: str) -> dict:
+    """One `class|x y z|distance|health` line as a dict.
+
+    A line that does not have four parts is passed through under `raw` rather
+    than dropped or guessed at: a reader that silently discarded what it could
+    not parse would report a shorter world than the one the mod found.
+    """
+    parts = line.split("|")
+    if len(parts) != 4:
+        return {"raw": line}
+    return {
+        "class": parts[0],
+        "pos": parts[1],
+        "distance": _number(parts[2]),
+        "health": _number(parts[3]),
+    }
+
+
+def _number(text: str) -> float | str:
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _with_world(answered: Result) -> Result:
+    """Add the mod's own world snapshot to an answer.
+
+    Read after the command finished, so it is the world as it now is rather
+    than the arguments echoed back. A snapshot that cannot be read is reported
+    as absent rather than faked: the command itself already succeeded, and
+    saying so while admitting the snapshot is missing beats either half.
+    """
+    channel = Channel(server_profiles_dir())
+    state = channel.read_state()
+    if state is None:
+        time.sleep(0.3)
+        state = channel.read_state()
+    if state is None:
+        answered.data["world"] = {}
+        answered.data["world_unavailable"] = (
+            "the command finished, but no readable state has been published since"
+        )
+        return answered
+    answered.data["world"] = state.world
+    answered.data["tick"] = state.tick
+    return answered
+
+
 def world_action(action_class: str, target_class: str = "", subject: str = "",
                  radius: float = 30.0, pos: str = "",
                  timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:

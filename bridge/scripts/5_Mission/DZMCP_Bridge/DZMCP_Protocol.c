@@ -132,6 +132,39 @@ class DZMCP_WorldSnapshot
     // wedge check be read from outside without a command round trip.
     int action_pending;
 
+    // The world's own clock and weather, refreshed every tick like the player
+    // block. Published rather than answered on request for the same reason the
+    // player position is: a caller asking "what time is it" should not pay a
+    // command round trip for something the mod already knows every second.
+    //
+    // The date fields are the engine's own five (World.GetDate, out params),
+    // and the weather values are GetActual() -- what it IS now, not what it is
+    // heading towards, because a forecast reads as a lie to anyone comparing
+    // it against the sky.
+    int date_year;
+    int date_month;
+    int date_day;
+    int date_hour;
+    int date_minute;
+    float weather_overcast;
+    float weather_rain;
+    float weather_fog;
+    float weather_wind;
+
+    // The last `entities` listing. Separate from query_count, which counts and
+    // nothing else: a caller that wants to know WHICH objects are there cannot
+    // get it from a number, and a caller that wants the number should not pay
+    // for a list.
+    //
+    // entities_total is what was actually found; the array holds at most
+    // ENTITY_LIST_MAX of them. The two differing is the honest way to say "the
+    // list is a page, not the answer" -- a truncated list that did not say so
+    // would read as the whole world.
+    string entities_class;
+    float entities_radius;
+    int entities_total;
+    ref array<string> entities;
+
     void DZMCP_WorldSnapshot()
     {
         tick_time = 0;
@@ -149,6 +182,21 @@ class DZMCP_WorldSnapshot
         query_radius = 0;
         query_count = -1;
         action_pending = -1;
+
+        date_year = 0;
+        date_month = 0;
+        date_day = 0;
+        date_hour = 0;
+        date_minute = 0;
+        weather_overcast = -1;
+        weather_rain = -1;
+        weather_fog = -1;
+        weather_wind = -1;
+
+        entities_class = "";
+        entities_radius = 0;
+        entities_total = -1;
+        entities = new array<string>();
     }
 }
 

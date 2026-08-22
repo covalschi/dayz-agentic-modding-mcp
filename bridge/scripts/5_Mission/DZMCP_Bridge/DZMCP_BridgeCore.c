@@ -74,6 +74,15 @@ class DZMCP_BridgeCore
     // Upper bound on the deliberate padding the probe_bloat verb can request.
     static const int PAD_MAX = 16384;
 
+    // How many objects one `entities` listing may name.
+    //
+    // A ceiling on the DOCUMENT, not on the search: the count found is always
+    // reported whole, and the two differing is how a page says it is a page.
+    // Sized against the probe_bloat measurement -- the state document is
+    // rewritten every tick, and a list of thousands would make every tick pay
+    // for one caller's question.
+    static const int ENTITY_LIST_MAX = 200;
+
     // ---- the chat verb's own limits ---------------------------------------
     //
     // CHAT_TEXT_MAX is a refusal threshold, not a truncation point: the mailbox
@@ -550,12 +559,15 @@ class DZMCP_BridgeCore
     // failure -- see DZMCP_Log.
     protected string KnownVerbs()
     {
-        return "ping, spawn, teleport, set, delete, query, action, chat, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, teleport, set, delete, query, entities, time, weather, action, chat, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
     {
         if (verb == "ping" || verb == "probe_bloat" || verb == "probe_stall" || verb == "probe_fault")
+            return true;
+
+        if (verb == "entities" || verb == "time" || verb == "weather")
             return true;
 
         if (verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query")
@@ -623,6 +635,21 @@ class DZMCP_BridgeCore
         if (verb == "query")
         {
             VerbQuery(args);
+            return;
+        }
+        if (verb == "entities")
+        {
+            VerbEntities(args);
+            return;
+        }
+        if (verb == "time")
+        {
+            VerbTime(args);
+            return;
+        }
+        if (verb == "weather")
+        {
+            VerbWeather(args);
             return;
         }
         if (verb == "action")
@@ -1013,6 +1040,198 @@ class DZMCP_BridgeCore
         m_State.world.query_count = found.Count();
 
         FinishCommand(DZMCP_STATUS_DONE, "found " + found.Count() + " object(s) of class '" + className + "' within " + radius + "m of " + DZMCP_World.PosToText(pos));
+    }
+
+    // entities: WHICH objects are nearby, not how many.
+    //
+    //   class   config class to filter by; empty lists everything found
+    //   radius  how far to look, clamped by DZMCP_World
+    //   pos     where to look from; defaults to the player, as everywhere else
+    //   limit   how many to LIST. The count found is reported whole either way,
+    //           so a page never reads as the world.
+    protected void VerbEntities(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|radius|pos|limit|", "class, radius, pos, limit"))
+            return;
+
+        vector pos;
+        if (!ResolvePosition(args, pos))
+            return;
+
+        string radiusText = ArgOr(args, "radius", "0");
+        float radius = DZMCP_World.ClampRadius(radiusText.ToFloat());
+
+        string limitText = ArgOr(args, "limit", "" + ENTITY_LIST_MAX);
+        if (!DZMCP_World.IsNumeric(limitText))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "entities: limit must be a number, not " + Excerpt(limitText));
+            return;
+        }
+        int limit = Math.Round(limitText.ToFloat());
+        if (limit < 1)
+            limit = 1;
+        if (limit > ENTITY_LIST_MAX)
+            limit = ENTITY_LIST_MAX;
+
+        string className = ArgOr(args, "class", "");
+
+        array<Object> found;
+        DZMCP_World.Gather(className, pos, radius, found);
+
+        m_State.world.entities.Clear();
+        DZMCP_World.Describe(found, pos, limit, m_State.world.entities);
+
+        m_State.world.entities_class = DZMCP_Text.Sanitize(className, ID_LEN);
+        m_State.world.entities_radius = radius;
+        m_State.world.entities_total = found.Count();
+
+        FinishCommand(DZMCP_STATUS_DONE, "listed " + m_State.world.entities.Count() + " of " + found.Count() + " object(s) within " + radius + "m of " + DZMCP_World.PosToText(pos));
+    }
+
+    // time: move the world clock.
+    //
+    // Every field the caller leaves out keeps its current value, read back
+    // from the engine first -- SetDate takes all five at once, so a verb that
+    // defaulted the missing ones would silently move the date to set the hour.
+    protected void VerbTime(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|year|month|day|hour|minute|", "year, month, day, hour, minute"))
+            return;
+
+        int year;
+        int month;
+        int day;
+        int hour;
+        int minute;
+        GetGame().GetWorld().GetDate(year, month, day, hour, minute);
+
+        if (!ReadIntArg(args, "year", year))
+            return;
+        if (!ReadIntArg(args, "month", month))
+            return;
+        if (!ReadIntArg(args, "day", day))
+            return;
+        if (!ReadIntArg(args, "hour", hour))
+            return;
+        if (!ReadIntArg(args, "minute", minute))
+            return;
+
+        string why;
+        if (!DZMCP_World.DateInRange(month, day, hour, minute, why))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "time: " + why);
+            return;
+        }
+
+        GetGame().GetWorld().SetDate(year, month, day, hour, minute);
+        RefreshWorld();
+        FinishCommand(DZMCP_STATUS_DONE, "world time set to " + DZMCP_World.DateToText(year, month, day, hour, minute));
+    }
+
+    // weather: move one phenomenon towards a value.
+    //
+    //   what      overcast, rain, fog, snowfall or wind
+    //   value     0..1 for a phenomenon; metres per second for wind
+    //   seconds   how long the change takes; 0 is immediate
+    //   duration  how long the value is held before the engine may move it
+    //
+    // The engine keeps simulating weather afterwards, so a value set here is a
+    // nudge, not a lock -- said in the answer rather than left for the caller
+    // to discover when the sky changes back on its own.
+    protected void VerbWeather(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|what|value|seconds|duration|", "what, value, seconds, duration"))
+            return;
+
+        string what = ArgOr(args, "what", "");
+        if (what != "overcast" && what != "rain" && what != "fog" && what != "snowfall" && what != "wind")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "weather: what must be overcast, rain, fog, snowfall or wind, not " + Excerpt(what));
+            return;
+        }
+
+        if (!HasArg(args, "value"))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "weather needs a value argument");
+            return;
+        }
+        string valueText = args.Get("value");
+        if (!DZMCP_World.IsNumeric(valueText))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "weather: value must be a number, not " + Excerpt(valueText));
+            return;
+        }
+        float value = valueText.ToFloat();
+
+        Weather weather = GetGame().GetWeather();
+        if (!weather)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "this world has no weather to set");
+            return;
+        }
+
+        if (what == "wind")
+        {
+            if (value < 0)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "weather: wind speed cannot be negative");
+                return;
+            }
+            weather.SetWindSpeed(value);
+            RefreshWorld();
+            FinishCommand(DZMCP_STATUS_DONE, "wind speed set to " + value + " -- the engine keeps simulating weather, so this is a nudge, not a lock");
+            return;
+        }
+
+        if (value < 0 || value > 1)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "weather: " + what + " takes a value between 0 and 1, not " + value);
+            return;
+        }
+
+        float seconds = ReadFloatArg(args, "seconds", 0);
+        float duration = ReadFloatArg(args, "duration", 0);
+
+        WeatherPhenomenon phenomenon = DZMCP_World.Phenomenon(what);
+        if (!phenomenon)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "this world has no " + what + " to set");
+            return;
+        }
+
+        phenomenon.Set(value, seconds, duration);
+        RefreshWorld();
+        FinishCommand(DZMCP_STATUS_DONE, what + " heading to " + value + " over " + seconds + "s, held for " + duration + "s -- the engine keeps simulating weather, so this is a nudge, not a lock");
+    }
+
+    // Read one integer argument in place, leaving `into` untouched when the
+    // caller did not send it. Returns false having ALREADY reported the
+    // refusal, so a verb reads as a straight line of guards.
+    protected bool ReadIntArg(map<string, string> args, string key, out int into)
+    {
+        if (!HasArg(args, key))
+            return true;
+        string text = args.Get(key);
+        if (!DZMCP_World.IsNumeric(text))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "time: " + key + " must be a number, not " + Excerpt(text));
+            return false;
+        }
+        into = Math.Round(text.ToFloat());
+        return true;
+    }
+
+    // A float argument, or the fallback. No refusal on a bad value: the two
+    // arguments that use this are timings, and a timing that cannot be read is
+    // worth defaulting rather than worth failing the whole change for.
+    protected float ReadFloatArg(map<string, string> args, string key, float fallback)
+    {
+        if (!HasArg(args, key))
+            return fallback;
+        string text = args.Get(key);
+        if (!DZMCP_World.IsNumeric(text))
+            return fallback;
+        return text.ToFloat();
     }
 
     // action: run a mod's own action through the engine's gate.
@@ -1456,6 +1675,8 @@ class DZMCP_BridgeCore
     // readable afterwards.
     protected void RefreshWorld()
     {
+        RefreshClockAndSky();
+
         int players = DZMCP_World.PlayerCount();
         m_State.world.players = players;
 
@@ -1490,6 +1711,35 @@ class DZMCP_BridgeCore
             else
                 m_State.world.action_pending = 0;
         }
+    }
+
+    // The world's own clock and sky, refreshed every tick like the player
+    // block. Cheap: five out parameters and four floats, all engine-side reads
+    // with no search. Published rather than answered on request for the same
+    // reason the player position is -- a caller asking what time it is should
+    // not pay a command round trip for something the mod already knows.
+    protected void RefreshClockAndSky()
+    {
+        int year;
+        int month;
+        int day;
+        int hour;
+        int minute;
+        GetGame().GetWorld().GetDate(year, month, day, hour, minute);
+        m_State.world.date_year = year;
+        m_State.world.date_month = month;
+        m_State.world.date_day = day;
+        m_State.world.date_hour = hour;
+        m_State.world.date_minute = minute;
+
+        Weather weather = GetGame().GetWeather();
+        if (!weather)
+            return;
+
+        m_State.world.weather_overcast = weather.GetOvercast().GetActual();
+        m_State.world.weather_rain = weather.GetRain().GetActual();
+        m_State.world.weather_fog = weather.GetFog().GetActual();
+        m_State.world.weather_wind = weather.GetWindSpeed();
     }
 
     protected void Publish()

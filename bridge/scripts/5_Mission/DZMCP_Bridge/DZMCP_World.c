@@ -16,6 +16,13 @@
 //   Object.GetType() / IsKindOf(type)              3_game/entities/object.c:473 / 517
 //   ItemBase.SetQuantity(...) -> bool              4_world/entities/itembase.c:3340
 //   vector.ToString(beautify)                      1_core/proto/enconvert.c:21
+//   World.GetDate(out y,mo,d,h,mi)                 3_game/global/world.c:33
+//   World.SetDate(y, mo, d, h, mi)                 3_game/global/world.c:51
+//   Game.GetWeather() -> Weather                   used at 3_game/dayzgame.c:3332
+//   Weather.GetOvercast/GetRain/GetFog/GetSnowfall 3_game/weather.c:183-189
+//   WeatherPhenomenon.Set(forecast, time, minDur)  3_game/weather.c:22
+//   WeatherPhenomenon.GetActual()                  3_game/weather.c:11
+//   Weather.SetWindSpeed(speed) / GetWindSpeed()   3_game/weather.c:243, 251
 //
 // FORMATTING RULE, the same one the dispatcher carries: an Enforce statement
 // ends at the end of its line. One statement, one line, however long.
@@ -211,6 +218,94 @@ class DZMCP_World
     // does. Membership of GetPlayers is the second, so that a momentary empty
     // player list -- mid-connection, mid-disconnect -- cannot expose a real
     // player to a class filter that happens to match their character.
+    // The date ranges the engine documents, checked here rather than passed
+    // through: SetDate takes month 1-12, day 1-31, hour 0-23, minute 0-59, and
+    // a value outside those is undefined behaviour in native code, which is the
+    // one kind of failure this bridge cannot report on.
+    static bool DateInRange(int month, int day, int hour, int minute, out string why)
+    {
+        why = "";
+        if (month < 1 || month > 12)
+            why = "month must be 1-12, not " + month;
+        else if (day < 1 || day > 31)
+            why = "day must be 1-31, not " + day;
+        else if (hour < 0 || hour > 23)
+            why = "hour must be 0-23, not " + hour;
+        else if (minute < 0 || minute > 59)
+            why = "minute must be 0-59, not " + minute;
+        return why == "";
+    }
+
+    static string DateToText(int year, int month, int day, int hour, int minute)
+    {
+        return "" + year + "-" + Pad2(month) + "-" + Pad2(day) + " " + Pad2(hour) + ":" + Pad2(minute);
+    }
+
+    static string Pad2(int value)
+    {
+        if (value >= 0 && value < 10)
+            return "0" + value;
+        return "" + value;
+    }
+
+    // The phenomenon a weather verb names, or null when the name is not one.
+    // Wind is deliberately NOT here: it is set through Weather itself, not
+    // through a phenomenon, and returning null for it lets the caller say so.
+    static WeatherPhenomenon Phenomenon(string what)
+    {
+        Weather weather = GetGame().GetWeather();
+        if (!weather)
+            return null;
+        if (what == "overcast")
+            return weather.GetOvercast();
+        if (what == "rain")
+            return weather.GetRain();
+        if (what == "fog")
+            return weather.GetFog();
+        if (what == "snowfall")
+            return weather.GetSnowfall();
+        return null;
+    }
+
+    // One line per object: class, position, distance from the origin, health.
+    // A flat string per entry rather than a nested object, because the world
+    // block travels as free-form JSON and an array of strings is the one shape
+    // whose serialization this bridge has already proven on the wire (errors).
+    //
+    // The separator is `|`: it cannot appear in a DayZ config class name, and a
+    // position printed by PosToText has no bars in it either.
+    // Fills the array it is GIVEN rather than making one: the destination is a
+    // `ref` member of the published state, and every other array in that
+    // document is mutated in place. Replacing a ref member would be a second
+    // way of doing one thing, and the lifetime of the old array is the kind of
+    // question this project does not answer by guessing.
+    static void Describe(array<Object> found, vector origin, int limit, array<string> lines)
+    {
+        int count = found.Count();
+        if (limit < count)
+            count = limit;
+        for (int i = 0; i < count; i++)
+        {
+            Object item = found.Get(i);
+            if (!item)
+                continue;
+            vector at = item.GetPosition();
+            // HORIZONTAL distance, deliberately. The engine's own radius test
+            // in GetObjectsAtPosition ignores height, so a straight-line
+            // distance disagrees with the radius the caller asked for: at the
+            // centre of Chernarus, objects the engine returned for a 150 m
+            // radius are 320 m away in three dimensions, because the terrain
+            // there is 300 m up and the caller wrote "7500 0 7500". Measured,
+            // not assumed -- and reporting a number that contradicts the
+            // filter that produced it is how a tool teaches an agent to
+            // distrust it.
+            vector flat = at - origin;
+            flat[1] = 0;
+            float away = flat.Length();
+            lines.Insert(item.GetType() + "|" + PosToText(at) + "|" + away + "|" + item.GetHealth("", ""));
+        }
+    }
+
     static bool IsProtectedPerson(Object candidate, array<Man> players)
     {
         Man asMan;
