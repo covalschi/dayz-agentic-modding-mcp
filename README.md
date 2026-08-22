@@ -106,6 +106,11 @@ in its notes.
 | `client_chat(text, color)` | put a line in chat — delivered **server-side by the bridge**, so no keyboard, no window, no focus |
 | `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
 | `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |
+| `ui_menu()` | what the client's interface is doing: open menu class, cursor, dialog. Free — republished every tick |
+| `ui_tree(root, depth, limit)` | the client's **widget tree**: path, class, name, visibility, screen rectangle, depth and text. A page, and it says so |
+| `ui_find(name, class_name, text, root)` | the same walk, filtered in the client so the whole tree never has to travel |
+| `ui_click(path, expect_name, expect_class, via)` | press a widget. `via="script"` goes through the open menu's handler with no focus; `via="cursor"` puts the real mouse on its rectangle |
+| `ui_text(path, text, expect_name)` | write into an edit box, and read the value back out of the widget |
 | `mod_lint(mod, strict)` | judge the Enforce Script without packing or booting anything. `mod_build` runs it first and refuses on what it refuses |
 | `knowledge_build(layer, full, only)` | build or refresh a layer of the API index; returns a job id. `only=[path]` re-reads exactly the files you name |
 | `knowledge_status()` | what each layer holds, how old it is, and whether it still matches what is on disk |
@@ -117,6 +122,15 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
+
+**Three limits the engine imposes on the UI tools, none of them worked around:**
+a plain `TextWidget` has `SetText` and **no** `GetText` anywhere in `enwidgets.c`, so a
+label's string cannot be read at all — what a mod's interface MEANS stays a question for
+the server-side bridge, where the data is real. A script-level click reaches only the open
+scripted menu, because `Widget` has `SetHandler` and no `GetHandler`; `via="cursor"` is
+there for everything else. And the client has to load the bridge: one pbo carries both
+halves, so a profile listing it under `mods.server_only` keeps it off the client's `-mod`
+line — that case is refused by name rather than answered with an empty tree.
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`

@@ -1111,3 +1111,45 @@ def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
     status, tick = result  # must not raise ValueError: too many values to unpack
     assert status == HEARTBEAT_STALLED
     assert tick == 1
+
+
+# --- A second bridge, in a second profile directory, with its own mailbox ---
+
+
+def test_a_channel_can_be_given_its_own_file_names(tmp_path):
+    """The client half of the bridge runs in a profile directory that sits
+    NEXT TO the server's. Same names in both would cost nothing until the day
+    one path is pointed at the other, and then the two bridges eat each other's
+    mail with no error anywhere."""
+    from dayz_mcp.bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
+
+    server = Channel(tmp_path)
+    client = Channel(tmp_path, cmd_name=CLIENT_CMD_FILENAME, state_name=CLIENT_STATE_FILENAME)
+
+    assert server._cmd_path() != client._cmd_path()
+    assert server._state_path() != client._state_path()
+    assert client._cmd_path().name == "dayz_mcp_client_cmd.json"
+    assert client._state_path().name == "dayz_mcp_client_state.json"
+
+
+def test_two_channels_in_one_directory_do_not_see_each_other(tmp_path):
+    from dayz_mcp.bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
+
+    server = Channel(tmp_path)
+    client = Channel(tmp_path, cmd_name=CLIENT_CMD_FILENAME, state_name=CLIENT_STATE_FILENAME)
+    _write_state(tmp_path)
+    (tmp_path / CLIENT_STATE_FILENAME).write_text(
+        json.dumps({"tick": 1, "session_id": "client-1", "command": None,
+                    "errors": [], "world": {}}),
+        encoding="utf-8",
+    )
+
+    built = server.build_command("ping", {})
+    assert built.ok, built.error
+    assert server.send(built.data, is_alive=True).ok
+    # The server's mailbox is now occupied. The client's is not, and a send into
+    # it must not be refused as an occupied mailbox or a lost race.
+    built_client = client.build_command("ui_tree", {})
+    assert built_client.ok, built_client.error
+    assert built_client.data.session_id == "client-1", "each half reads its own session"
+    assert client.send(built_client.data, is_alive=True).ok

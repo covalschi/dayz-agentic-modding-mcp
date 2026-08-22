@@ -35,6 +35,13 @@ const string DZMCP_STATUS_FAILED  = "failed";
 const string DZMCP_CMD_PATH   = "$profile:dayz_mcp_cmd.json";
 const string DZMCP_STATE_PATH = "$profile:dayz_mcp_state.json";
 
+// The CLIENT half, which runs against its own -profiles directory -- a sibling
+// of the server's, never the same one. Distinct names cost nothing and buy the
+// one failure that would be invisible: two bridges pointed at one directory,
+// each claiming the other's mail, with no error anywhere.
+const string DZMCP_CLIENT_CMD_PATH   = "$profile:dayz_mcp_client_cmd.json";
+const string DZMCP_CLIENT_STATE_PATH = "$profile:dayz_mcp_client_state.json";
+
 // The mod's report on the command it currently knows about.
 //
 // Never published as a null reference (brief R12): an idle bridge publishes
@@ -165,6 +172,29 @@ class DZMCP_WorldSnapshot
     int entities_total;
     ref array<string> entities;
 
+    // ---- what the CLIENT half fills in -----------------------------------
+    //
+    // One document class for both halves, because the Python side reads this
+    // block as a free-form dict and a second class would be a second wire
+    // contract to keep in step. Each half fills what it can see and leaves the
+    // other's fields at their "never asked" defaults -- which is why those
+    // defaults are -1 and "" rather than 0 and "unknown".
+    //
+    //   ui_menu    class of the open scripted menu, "" when none is open
+    //   ui_cursor  1/0/-1: is the cursor visible, -1 when there is no UI
+    //              manager to ask
+    //   ui_dialog  1/0/-1: is a modal dialog up
+    //   ui_root    which root the last listing walked: "menu" or "screen"
+    //   ui_total   how many nodes that walk VISITED; the array holds at most
+    //              DZMCP_Ui.NODES_MAX of them, and the two differing is how a
+    //              page says it is a page
+    string ui_menu;
+    int ui_cursor;
+    int ui_dialog;
+    string ui_root;
+    int ui_total;
+    ref array<string> ui_nodes;
+
     void DZMCP_WorldSnapshot()
     {
         tick_time = 0;
@@ -197,6 +227,13 @@ class DZMCP_WorldSnapshot
         entities_radius = 0;
         entities_total = -1;
         entities = new array<string>();
+
+        ui_menu = "";
+        ui_cursor = -1;
+        ui_dialog = -1;
+        ui_root = "";
+        ui_total = -1;
+        ui_nodes = new array<string>();
     }
 }
 

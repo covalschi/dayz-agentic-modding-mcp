@@ -61,6 +61,13 @@ from .protocol import (
 CMD_FILENAME = "dayz_mcp_cmd.json"
 STATE_FILENAME = "dayz_mcp_state.json"
 
+#: The CLIENT half of the bridge, which runs in its own -profiles directory --
+#: a sibling of the server's, not the same one. Distinct names cost nothing and
+#: buy the one failure that would be invisible: two bridges pointed at one
+#: directory, each claiming the other's mail, with no error anywhere.
+CLIENT_CMD_FILENAME = "dayz_mcp_client_cmd.json"
+CLIENT_STATE_FILENAME = "dayz_mcp_client_state.json"
+
 # A torn read of the state file is the ordinary case, once a second, forever
 # (fact 1 above). Retrying a few times a short beat apart absorbs that
 # without reporting every single stumble as "the bridge is broken"; only
@@ -143,14 +150,22 @@ class HeartbeatSample:
 class Channel:
     """One channel into a single running server's -profiles directory."""
 
-    def __init__(self, profiles_dir: Path) -> None:
+    def __init__(
+        self,
+        profiles_dir: Path,
+        *,
+        cmd_name: str = CMD_FILENAME,
+        state_name: str = STATE_FILENAME,
+    ) -> None:
         self.profiles_dir = Path(profiles_dir)
+        self.cmd_name = cmd_name
+        self.state_name = state_name
 
     def _cmd_path(self) -> Path:
-        return self.profiles_dir / CMD_FILENAME
+        return self.profiles_dir / self.cmd_name
 
     def _state_path(self) -> Path:
-        return self.profiles_dir / STATE_FILENAME
+        return self.profiles_dir / self.state_name
 
     def _unclaimed_mailbox_result(self, cmd_path: Path) -> Result:
         """The mailbox already holds a command the mod has not yet claimed

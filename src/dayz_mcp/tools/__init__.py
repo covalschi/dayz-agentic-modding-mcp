@@ -7,6 +7,7 @@ from .client import (
 )
 from .jobs_api import job_artifacts, job_status, job_wait
 from .lint import mod_lint
+from .ui import ui_click, ui_find, ui_menu, ui_text, ui_tree
 from .knowledge import (
     knowledge_build, knowledge_callers, knowledge_find, knowledge_overrides,
     knowledge_show, knowledge_status,
@@ -35,4 +36,5 @@ __all__ = [
     "knowledge_show", "knowledge_overrides", "knowledge_callers",
     "knowledge_scope", "server_mods",
     "asset_build", "asset_check", "asset_convert", "asset_export",
+    "ui_menu", "ui_tree", "ui_find", "ui_click", "ui_text",
 ]

@@ -206,6 +206,38 @@ class DZMCP_BridgeCore
     // Init
     // -----------------------------------------------------------------------
 
+    // The four things a second half of this bridge says differently, and the
+    // only four. Everything else -- claiming, dispatching, the watchdog, the
+    // terminal dwell, the error ring, publishing -- is the SAME machinery, and
+    // a second copy of it would be a second set of bugs. See
+    // DZMCP_ClientBridgeCore, which overrides exactly these.
+    protected string CmdPath()
+    {
+        return DZMCP_CMD_PATH;
+    }
+
+    protected string StatePath()
+    {
+        return DZMCP_STATE_PATH;
+    }
+
+    // Which half this is, for the log line. The two write into sibling
+    // directories, and a log that does not say which one wrote it makes the
+    // pair harder to read than either alone.
+    protected string Half()
+    {
+        return "server";
+    }
+
+    // The engine's action log is the only evidence for the accept/reject
+    // decision taken inside StartDeliveredAction. It is a SERVER concern: the
+    // client half delivers no actions, and switching it on there would buy
+    // nothing and cost log volume.
+    protected bool WantsActionLog()
+    {
+        return true;
+    }
+
     void Init()
     {
         BuildSessionId();
@@ -216,9 +248,10 @@ class DZMCP_BridgeCore
         // Costs nothing while no action is being delivered, and switching it
         // on here rather than in the task that needs it keeps the compile
         // surface and the runtime behaviour identical between the two.
-        LogManager.ActionLogEnable(true);
+        if (WantsActionLog())
+            LogManager.ActionLogEnable(true);
 
-        DZMCP_Log.Info("session " + m_SessionId + " starting; watchdog " + FormatSeconds(WATCHDOG_SECONDS) + "s, hard limit " + FormatSeconds(HARD_LIMIT_SECONDS) + "s");
+        DZMCP_Log.Info(Half() + " session " + m_SessionId + " starting; watchdog " + FormatSeconds(WATCHDOG_SECONDS) + "s, hard limit " + FormatSeconds(HARD_LIMIT_SECONDS) + "s");
 
         // Publish immediately rather than waiting a second for the first tick.
         // This is the one file write outside the 1 Hz call, and it is
@@ -394,10 +427,10 @@ class DZMCP_BridgeCore
     // end.
     protected void ClaimOne()
     {
-        if (!FileExist(DZMCP_CMD_PATH))
+        if (!FileExist(CmdPath()))
             return;
 
-        FileHandle handle = OpenFile(DZMCP_CMD_PATH, FileMode.READ);
+        FileHandle handle = OpenFile(CmdPath(), FileMode.READ);
         if (handle == 0)
         {
             m_MailboxOpenFails++;
@@ -414,7 +447,7 @@ class DZMCP_BridgeCore
         // executed again on every tick from here to the end of the session.
         // Bailing out without parsing leaves the file for the next tick to
         // try again, which is recoverable; executing it repeatedly is not.
-        if (!DeleteFile(DZMCP_CMD_PATH))
+        if (!DeleteFile(CmdPath()))
         {
             m_MailboxDeleteFails++;
             Retryable(m_MailboxDeleteFails, "the mailbox was read but could not be deleted -- the command is NOT claimed and nothing was executed; the next tick will try again");
@@ -1785,7 +1818,7 @@ class DZMCP_BridgeCore
         // a file handle has no destructor, so a fault raised inside this
         // window leaves the file in an unknown state and the handle open.
         // Everything the document needs is already in `text`.
-        FileHandle handle = OpenFile(DZMCP_STATE_PATH, FileMode.WRITE);
+        FileHandle handle = OpenFile(StatePath(), FileMode.WRITE);
         if (handle == 0)
         {
             m_StateWriteFails++;
