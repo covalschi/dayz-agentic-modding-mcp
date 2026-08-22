@@ -1051,3 +1051,83 @@ def test_importing_the_client_tools_does_not_touch_the_driver_or_the_window_laye
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "False"
+
+
+# --- The keyring the server actually reads is the CLIENT install's ---
+#
+# Reported from another session, after a long hunt. Under verifySignatures = 2
+# the server rejects every client with "missing dta\bin.pbo" and code 118 --
+# which names a vanilla file and says nothing about signatures at all. The
+# cause is that this tool launches the DIAGNOSTIC EXE OUT OF THE CLIENT
+# INSTALL, so the engine reads `keys` beside that executable, while the vanilla
+# key ships only with the separate DayZServer install. A keys folder that is
+# missing, or present without dayz.bikey, leaves the server unable to verify
+# anything at all -- including the game's own pbos.
+
+
+def _signed_stand(tmp_path, monkeypatch, *, keys, verify=2, sign_mods=True):
+    root, stand, game = make_project(tmp_path)
+    (stand / "serverDZ.cfg").write_text(
+        f"verifySignatures = {verify};\n", encoding="utf-8"
+    )
+    if keys is not None:
+        (game / "keys").mkdir()
+        for name in keys:
+            (game / "keys" / name).write_bytes(b"")
+    mod = root / "MyMod"
+    addons = root / "@MyMod" / "addons"
+    addons.mkdir(parents=True)
+    (addons / "MyMod.pbo").write_bytes(b"")
+    if sign_mods:
+        (addons / "MyMod.pbo.someone.bisign").write_bytes(b"")
+    assert mod.exists()
+    with_pause_mode(stand, 2)
+    live_stand(monkeypatch, {777})
+    monkeypatch.setattr(client, "spawn", lambda cmd, cwd: 777)
+    monkeypatch.setattr(client, "CONNECT_POLL_SECONDS", 0.02)
+    publish_state(stand, 1)
+    return root, stand, game
+
+
+def test_a_client_is_refused_when_the_server_has_no_keyring(tmp_path, monkeypatch):
+    _signed_stand(tmp_path, monkeypatch, keys=None)
+    result = tools.client_start()
+    assert not result.ok
+    assert "dayz.bikey" in result.error or "keys" in result.error
+    # The point of the refusal is that the engine's own message names the wrong
+    # thing, so ours has to name the right one.
+    assert "signature" in (result.error + result.hint).lower()
+
+
+def test_a_keyring_without_the_vanilla_key_is_the_same_failure(tmp_path, monkeypatch):
+    """The exact shape another session created by hand: a keys folder holding
+    only the mod's own key. The server then cannot verify the GAME's pbos."""
+    _signed_stand(tmp_path, monkeypatch, keys=["MyMod.bikey"])
+    result = tools.client_start()
+    assert not result.ok
+    assert "dayz.bikey" in result.error
+
+
+def test_a_complete_keyring_is_not_complained_about(tmp_path, monkeypatch):
+    _signed_stand(tmp_path, monkeypatch, keys=["dayz.bikey", "MyMod.bikey"])
+    result = tools.client_start()
+    assert result.ok, result.error
+
+
+def test_signature_checking_off_is_nobodys_business(tmp_path, monkeypatch):
+    """With verifySignatures = 0 none of this applies, and a check that fired
+    anyway would block every local stand that deliberately turns it off."""
+    _signed_stand(tmp_path, monkeypatch, keys=None, verify=0)
+    result = tools.client_start()
+    assert result.ok, result.error
+
+
+def test_an_unsigned_client_mod_is_named_before_the_client_is_started(tmp_path, monkeypatch):
+    """The half this server brought on itself: its own bridge is packed
+    unsigned on purpose, and it became a CLIENT mod. Under verifySignatures = 2
+    that is a client the stand will reject."""
+    _signed_stand(tmp_path, monkeypatch, keys=["dayz.bikey"], sign_mods=False)
+    result = tools.client_start()
+    assert not result.ok
+    assert "MyMod.pbo" in result.error
+    assert "bisign" in (result.error + result.hint).lower()

@@ -62,7 +62,14 @@ from ..paths import GAME_PROBE
 from ..procs import is_alive, spawn, stop, udp_port_holders
 from ..verdict import build_verdict
 from . import session
-from .lifecycle import CLIENT_PROFILE_DIRNAME, mod_list, server_profiles_dir
+from .lifecycle import (
+    CLIENT_PROFILE_DIRNAME,
+    SIGNATURE_HINT,
+    mod_list,
+    server_profiles_dir,
+    signature_problem,
+)
+from .lifecycle import _stand as stand_root
 from .project import require_project
 # The world command builder, imported rather than re-implemented. It is the one
 # place that stamps a command with the live session, refuses when the bridge is
@@ -398,6 +405,16 @@ def client_start(
     game = session.game()
     if not game:
         return fail("game not found", hint="set machine.game in dayz-mcp.local.toml")
+
+    # A REFUSAL here, where server_start only warns: this client would be
+    # rejected on connect, and the engine's own message names a vanilla pbo
+    # rather than the signature policy that actually turned it away.
+    client_mods, _server_mods = mod_list()
+    signatures = signature_problem(
+        Path(game), stand_root() / prof.machine.config, client_mods
+    )
+    if signatures:
+        return fail(signatures, hint=SIGNATURE_HINT)
 
     port = prof.machine.port
     stand = _stand_view(port)

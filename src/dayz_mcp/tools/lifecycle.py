@@ -275,6 +275,98 @@ def mission_module_compiled(profiles: Path, since: float) -> bool:
     return False
 
 
+#: The key that signs the GAME's own pbos. It ships with the DayZServer
+#: install, not with the client -- which is the whole problem below.
+VANILLA_KEY = "dayz.bikey"
+
+_VERIFY_RE = re.compile(r"verifySignatures\s*=\s*(\d+)", re.IGNORECASE)
+
+
+def verify_signatures(config: Path) -> int | None:
+    """The stand's signature policy, or None when its config states none."""
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found = _VERIFY_RE.search(text)
+    return int(found.group(1)) if found else None
+
+
+def unsigned_pbo(mod_dir: Path) -> str:
+    """The first pbo in a mod folder with no signature beside it, or "".
+
+    A signature is a sibling file: `addons/x.pbo` next to
+    `addons/x.pbo.<key>.bisign`. Checked by name rather than by content,
+    because the question here is only whether the mod was signed at all.
+    """
+    addons = mod_dir / "addons"
+    if not addons.is_dir():
+        return ""
+    for pbo in sorted(addons.glob("*.pbo")):
+        if not any(addons.glob(pbo.name + ".*.bisign")):
+            return pbo.name
+    return ""
+
+
+def signature_problem(game: Path, config: Path, client_mods: str) -> str:
+    """Why every client will be rejected by this stand, or "" when none will.
+
+    ONLY under `verifySignatures = 2`. A stand that turns signature checking
+    off is a stand where none of this applies, and a check that fired anyway
+    would block every local stand that deliberately turns it off.
+
+    THE KEYRING IS THE CLIENT INSTALL'S. This tool launches the diagnostic
+    executable out of the client install, so the engine reads `keys` beside
+    THAT executable -- while `dayz.bikey`, which signs the game's own pbos,
+    ships only with the separate DayZServer install. A keys folder that is
+    missing, or present without that key, leaves the server unable to verify
+    anything at all.
+
+    And the engine says none of this out loud. It rejects the client with code
+    118 and "missing dta\bin.pbo" -- a vanilla FILE NAME, with no mention of
+    signatures. Another session lost a long session to that message, and it
+    named a file that was byte-identical on both sides the whole time.
+    """
+    if verify_signatures(config) != 2:
+        return ""
+
+    keys = game / "keys"
+    if not keys.is_dir():
+        return (
+            f"this stand runs with verifySignatures = 2, and the keyring the server will "
+            f"read is {keys} -- which does not exist. The engine resolves `keys` beside the "
+            f"executable it runs, and this tool runs the client install's diagnostic "
+            f"executable, while {VANILLA_KEY} ships with the DayZServer install"
+        )
+    if not (keys / VANILLA_KEY).is_file():
+        held = ", ".join(sorted(p.name for p in keys.glob("*.bikey"))) or "nothing"
+        return (
+            f"this stand runs with verifySignatures = 2, and {keys} holds {held} but not "
+            f"{VANILLA_KEY} -- the key that signs the GAME's own pbos. Without it the "
+            f"server cannot verify vanilla either"
+        )
+
+    for entry in [p for p in client_mods.split(";") if p.strip()]:
+        bad = unsigned_pbo(Path(entry))
+        if bad:
+            return (
+                f"this stand runs with verifySignatures = 2, and {bad} in {entry} has no "
+                f".bisign beside it -- an unsigned mod on the client's -mod line is a "
+                f"client the stand will reject"
+            )
+    return ""
+
+
+SIGNATURE_HINT = (
+    "the engine does not say 'signature' when it refuses: it answers code 118 and names a "
+    "vanilla pbo, which sends the reader hunting for a corrupt game install. Put a complete "
+    "keyring beside the executable being run -- a directory symlink to the DayZServer "
+    "install's own keys folder is the usual way (mklink /D) -- and add each mod's .bikey to "
+    "it. Or set verifySignatures = 0 in the stand's config, which is what a local stand "
+    "usually wants"
+)
+
+
 def boot_in_flight() -> str:
     """The id of a boot job that is queued or running for this project, or "".
 
@@ -666,6 +758,12 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
     # process itself should not have to wait for the readiness job to finish to
     # find out which one it is.
     started = {"job_id": job.id, "since": since, "pid": pid}
+    # A WARNING, not a refusal. The server itself comes up perfectly; it is
+    # only clients that will be turned away, and compile boots with no client
+    # are half of what this tool is used for.
+    signatures = signature_problem(Path(game), cfg, client_mods)
+    if signatures:
+        started["signatures"] = signatures
     # Only when something is actually wrong: a field that is always present
     # and almost always empty stops being read.
     if transport_left:
