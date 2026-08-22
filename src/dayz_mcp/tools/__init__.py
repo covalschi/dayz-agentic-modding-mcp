@@ -12,6 +12,7 @@ from .knowledge import (
 from .lifecycle import client_compile_check, server_start, server_status, server_stop
 from .logs import log_tail, log_verdict
 from .project import project_open, project_status
+from .scope import knowledge_scope, server_mods
 from .world import (
     world_action, world_delete, world_exec, world_ready, world_set, world_spawn,
     world_state, world_teleport,
@@ -29,5 +30,6 @@ __all__ = [
     "client_chat", "client_type", "client_verdict",
     "knowledge_build", "knowledge_status", "knowledge_find",
     "knowledge_show", "knowledge_overrides",
+    "knowledge_scope", "server_mods",
     "asset_build", "asset_check", "asset_convert", "asset_export",
 ]

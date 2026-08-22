@@ -196,6 +196,63 @@ def record_key(layer: str, declaration: Declaration) -> tuple:
     )
 
 
+def mod_folder(layer: str, file: str) -> str:
+    """Which mod folder a declaration came from, or "" when it belongs to none.
+
+    THE formula for the active mod set, and the reason that feature needs
+    neither a schema change nor a re-index: the dependency layer already labels
+    every declaration `<mod folder>/<archive>/<entry>`, so which mod owns a
+    declaration is a fact the index has been recording since it was built.
+
+    Only the dependency layer has one. The game is the substrate every DayZ mod
+    is written against and the project layer is the code being written -- an
+    active set that narrowed either would answer "no such class" about code the
+    agent is looking at.
+
+    Case is preserved, because this is also what an answer prints. Matching is
+    case-insensitive, which is `lower()` on both sides in the SQL below.
+
+    Must stay term-for-term identical to `_MOD_FOLDER_SQL`; a test compares the
+    two over every record of a seeded index, because two spellings of one rule
+    is how a filter quietly stops matching the function that explains it.
+    """
+    if layer != DEPS:
+        return ""
+    head, separator, _ = file.partition("/")
+    return head if separator else ""
+
+
+#: `mod_folder` above, as SQL. In the query rather than over its output so the
+#: LIMIT counts rows that SURVIVED the filter: filtering afterwards spends the
+#: limit on rows it then discards, and a caller asking for fifty gets nine.
+#:
+#: A CASE expression cannot drive an index, so this cannot steal the query plan
+#: from the name index the way a bare `layer = ?` does (see `_layer_term`).
+_MOD_FOLDER_SQL = (
+    f"(CASE WHEN decl.layer = '{DEPS}' AND instr(decl.file, '/') > 0"
+    " THEN substr(decl.file, 1, instr(decl.file, '/') - 1) ELSE '' END)"
+)
+
+
+def _mods_term(mods: Sequence[str], outside: bool) -> tuple[str, list]:
+    """Restrict to (or to everything but) the mods named.
+
+    The empty string rides in the list on purpose: it is the folder of
+    everything that has none, so `IN ('', ...)` admits the game and the project
+    unconditionally and `NOT IN ('', ...)` excludes them from the inverse. One
+    formula, both directions -- and the inverse is what makes "a filtered-out
+    result is named, never hidden" possible at all.
+
+    NOT `LIKE '<folder>/%'`: an underscore is a single-character wildcard in
+    LIKE and real mod folders carry underscores, so that spelling would quietly
+    admit a different mod whose name differs in exactly that position.
+    """
+    values = [str(m).strip().lower() for m in mods if str(m).strip()]
+    marks = ",".join("?" * (len(values) + 1))
+    operator = "NOT IN" if outside else "IN"
+    return f"lower({_MOD_FOLDER_SQL}) {operator} ({marks})", ["", *values]
+
+
 @dataclass(frozen=True)
 class Record:
     """One declaration as the index holds it: everything the parser produced,
@@ -662,6 +719,26 @@ class KnowledgeStore:
             ).fetchone()
         return int(row[0])
 
+    def mod_folders(self, layer: str = DEPS) -> list[tuple[str, int]]:
+        """The mod folders this layer holds declarations from, with how many.
+
+        What lets a caller choose an active set at all, and what tells a typo
+        apart from a mod that is genuinely not indexed -- a distinction the
+        set's own answer depends on, because a scope naming only names nobody
+        knows would silently blank every dependency answer.
+
+        One grouped scan of the layer, so it belongs to the tools that report
+        state (`knowledge_scope`, `knowledge_status`) and NOT to the search
+        path, which runs on every question.
+        """
+        sql = (
+            f"SELECT {_MOD_FOLDER_SQL} AS folder, COUNT(*) AS held FROM decl"
+            " WHERE decl.layer = ? GROUP BY folder ORDER BY folder"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, (layer,)).fetchall()
+        return [(row["folder"], int(row["held"])) for row in rows if row["folder"]]
+
     def count(self, layer: str | None = None) -> int:
         with self._lock:
             if layer is None:
@@ -731,14 +808,25 @@ class KnowledgeStore:
         layer: str | None = None,
         prefix: bool = False,
         limit: int = DEFAULT_LIMIT,
+        mods: Sequence[str] | None = None,
+        outside: bool = False,
     ) -> list[Record]:
         """Declarations called `name`, by name and then nearest layer first.
 
         Matching is case-insensitive -- the agent types what it remembers, and
         the verbatim spelling comes back in the answer, so nothing is lost.
         An empty `name` means "any", which is how a whole kind gets listed.
+
+        `mods` is the active mod set: only declarations from those mod folders
+        answer, plus everything belonging to no mod folder (the game and the
+        project). `outside=True` inverts it, which is how a caller finds out
+        exactly what the set kept from it -- see `_mods_term`. `mods=None` is
+        no set at all, and an empty sequence is a set naming nothing, which are
+        different requests and give different answers.
         """
-        sql, params = self._find_query(name, kind, owner, layer, prefix, limit)
+        sql, params = self._find_query(
+            name, kind, owner, layer, prefix, limit, mods, outside
+        )
         return self._select(sql, params)
 
     def explain_find(self, name: str, **kwargs) -> str:
@@ -755,6 +843,8 @@ class KnowledgeStore:
             kwargs.get("layer"),
             kwargs.get("prefix", False),
             kwargs.get("limit", DEFAULT_LIMIT),
+            kwargs.get("mods"),
+            kwargs.get("outside", False),
         )
         return self._explain(sql, params)
 
@@ -766,6 +856,8 @@ class KnowledgeStore:
         layer: str | None,
         prefix: bool,
         limit: int,
+        mods: Sequence[str] | None = None,
+        outside: bool = False,
     ) -> tuple[str, list]:
         where: list[str] = []
         params: list = []
@@ -786,6 +878,10 @@ class KnowledgeStore:
         if layer:
             where.append(_layer_term(bool(where)))
             params.append(layer)
+        if mods is not None:
+            clause, values = _mods_term(mods, outside)
+            where.append(clause)
+            params += values
         params.append(_ceiling(limit))
         return _SELECT + _where(where) + _ORDER, params
 
@@ -796,6 +892,8 @@ class KnowledgeStore:
         owner: str | None = None,
         layer: str | None = None,
         limit: int = DEFAULT_LIMIT,
+        mods: Sequence[str] | None = None,
+        outside: bool = False,
     ) -> list[Record]:
         """Who overrides `name` -- the question a text sweep answers worst.
 
@@ -811,7 +909,7 @@ class KnowledgeStore:
         overrides X" usually does not yet know which X is.
         """
         found: dict[tuple, Record] = {}
-        for sql, params in self._override_queries(name, owner, layer, limit):
+        for sql, params in self._override_queries(name, owner, layer, limit, mods, outside):
             for record in self._select(sql, params):
                 found[(record.layer, record.name, record.kind, record.owner,
                        record.file, record.line)] = record
@@ -831,12 +929,15 @@ class KnowledgeStore:
                 kwargs.get("owner"),
                 kwargs.get("layer"),
                 kwargs.get("limit", DEFAULT_LIMIT),
+                kwargs.get("mods"),
+                kwargs.get("outside", False),
             )
         ]
         return "\n".join(plans)
 
     def _override_queries(
-        self, name: str, owner: str | None, layer: str | None, limit: int
+        self, name: str, owner: str | None, layer: str | None, limit: int,
+        mods: Sequence[str] | None = None, outside: bool = False,
     ) -> list[tuple[str, list]]:
         """Three separate indexed searches rather than one query with an OR
         across three columns: an OR over different columns is where SQLite
@@ -853,6 +954,10 @@ class KnowledgeStore:
             # below leads with an indexed, selective term of its own.
             extra.append(_layer_term(True))
             extra_params.append(layer)
+        if mods is not None:
+            clause, values = _mods_term(mods, outside)
+            extra.append(clause)
+            extra_params += values
 
         queries = [
             # The method reading.

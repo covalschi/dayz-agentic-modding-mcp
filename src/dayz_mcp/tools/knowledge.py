@@ -50,6 +50,7 @@ from pathlib import Path
 
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
+from ..knowledge import scope as modscope
 from ..knowledge.layers import (
     CONFIG_SUFFIXES,
     SCRIPT_SUFFIXES,
@@ -74,6 +75,7 @@ from ..knowledge.store import (
     Record,
     SearchTimeout,
     Staleness,
+    mod_folder,
 )
 from . import session
 from .project import require_project
@@ -116,6 +118,12 @@ MAX_BODY_LINES = 400
 
 #: How many paths a status answer names before it stops listing and counts.
 _NAMED = 10
+
+#: How much of what the active mod set kept out is fetched so it can be NAMED.
+#: A ceiling, like every other search here: the answer needs the mods and the
+#: counts, not the corpus. Reaching it is reported (`filtered_truncated`), so a
+#: number that stops short says so instead of understating the loss.
+EXCLUDED_LIMIT = 200
 
 _SOURCE_SUFFIXES: tuple[str, ...] = SCRIPT_SUFFIXES + CONFIG_SUFFIXES
 
@@ -388,6 +396,132 @@ def _incomplete(store: KnowledgeStore, profile, game: str | None) -> list[dict]:
         for layer in LAYERS
         if not inapplicable[layer] and store.layer(layer) is None
     ]
+
+
+# ------------------------------------------------------- the active mod set
+
+
+def _active(store: KnowledgeStore) -> modscope.ActiveSet:
+    """The mod set in force for this project, or "no set"."""
+    return modscope.load(store.path.parent)
+
+
+def _scoped(active: modscope.ActiveSet) -> list[str] | None:
+    """What the store wants: the mods, or None for "do not narrow"."""
+    return list(active.mods) if active.active else None
+
+
+def _excluded_find(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
+    """The same search, run over exactly what the set kept out.
+
+    This is what makes "a filtered-out result is NAMED, never hidden" true. It
+    costs one extra query, and only when a set is in force -- measured against
+    an exact lookup at 0.07 ms, that is the price of never answering "no such
+    thing" about a class that exists.
+
+    A timeout here returns nothing rather than failing: the real answer has
+    already been computed, and a slow second opinion must never turn a good
+    answer into a refusal.
+    """
+    if not active.active:
+        return []
+    try:
+        with store.time_limit(SEARCH_SECONDS):
+            return store.find(
+                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
+            )
+    except SearchTimeout:
+        return []
+
+
+def _excluded_overrides(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
+    if not active.active:
+        return []
+    try:
+        with store.time_limit(SEARCH_SECONDS):
+            return store.overrides(
+                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
+            )
+    except SearchTimeout:
+        return []
+
+
+def _scope_view(active: modscope.ActiveSet, excluded) -> dict:
+    """The active set as an answer carries it: what it is, and what it cost.
+
+    Every answer carries this whether or not it was narrowed, for the same
+    reason every answer carries its layer ages: a narrowing nobody can see is a
+    narrowing nobody can correct. `filtered_out` names the mods that held the
+    matches the set kept out, with counts and one example each -- names, not
+    silence, is the whole design decision.
+    """
+    view = {**active.to_dict(), "age": _age_text(active.age()) if active.active else ""}
+    grouped: dict[str, dict] = {}
+    for record in excluded:
+        folder = mod_folder(record.layer, record.file) or "(no mod folder)"
+        entry = grouped.setdefault(
+            folder, {"mod": folder, "count": 0, "kinds": {}, "example": None}
+        )
+        entry["count"] += 1
+        entry["kinds"][record.kind] = entry["kinds"].get(record.kind, 0) + 1
+        if entry["example"] is None:
+            entry["example"] = record.to_dict()
+    view["filtered_out"] = sorted(
+        grouped.values(), key=lambda e: (-e["count"], e["mod"].lower())
+    )
+    view["filtered_count"] = len(excluded)
+    view["filtered_truncated"] = len(excluded) >= EXCLUDED_LIMIT
+    return view
+
+
+def _scope_names(view: dict) -> str:
+    """The mods the set kept out, named with their counts.
+
+    The counts say "at least" when the ceiling was reached, because a bare
+    number that stopped short understates the loss -- and understating it is
+    the same shape of quiet as hiding it, just smaller.
+    """
+    named = ", ".join(f"{e['count']} in {e['mod']}" for e in view["filtered_out"][:8])
+    if len(view["filtered_out"]) > 8:
+        named += f", and {len(view['filtered_out']) - 8} more mod(s)"
+    if view.get("filtered_truncated"):
+        named += (
+            f" (counted up to the ceiling of {EXCLUDED_LIMIT}, so these are lower bounds)"
+        )
+    return named
+
+
+def _scope_hint(view: dict) -> str:
+    if not view.get("active"):
+        return ""
+    parts = [
+        f"narrowed by the active mod set: {view['count']} mod(s), "
+        f"{view['source'] or 'source not recorded'}, declared {view['age']} ago"
+    ]
+    if view["filtered_out"]:
+        parts.append(
+            "kept out of this answer: " + _scope_names(view)
+            + " -- widen it with knowledge_scope(mods=[...]), or write without that mod. "
+              "Nothing here was hidden: knowledge_scope(clear=True) removes the set"
+        )
+    return " | ".join(parts)
+
+
+def _narrowed_away(lead: str, view: dict) -> str:
+    """The refusal for "not in the set, but it exists".
+
+    A refusal rather than an empty success on purpose. The set is AMBIENT state
+    -- possibly declared in an earlier session -- so unlike a `kind=` passed in
+    the same call, the caller has no reason to suspect a narrowing. An `ok`
+    answer with no results is exactly what "there is no such thing" looks like,
+    and that is the lie this whole feature exists to prevent.
+    """
+    return (
+        lead + ", but the mods outside it hold "
+        + _scope_names(view)
+        + " -- named rather than answered empty, because an empty answer here reads as "
+          "'no such thing' and sends you off to write one"
+    )
 
 
 # ------------------------------------------------------------------- the build
@@ -748,15 +882,24 @@ def knowledge_status() -> Result:
 
     never = [v["layer"] for v in views if v["applies"] and not v["built"]]
     stale = [v["layer"] for v in views if v["stale"]]
+    active = _active(store)
     data = {
         "index": str(store.path),
         "index_bytes": size,
         "layers": views,
+        "scope": _scope_view(active, []),
         "never_built": never,
         "stale_layers": stale,
         "declarations": store.count(),
     }
     hints = []
+    if active.active:
+        hints.append(
+            f"an active mod set is in force ({len(active.mods)} mod(s), "
+            f"{active.source or 'source not recorded'}): answers come from those mods "
+            "plus the game and this project, and anything outside is NAMED rather than "
+            "hidden -- knowledge_scope() to see it, knowledge_scope(clear=True) to drop it"
+        )
     if never:
         hints.append(
             "never built: " + "; ".join(
@@ -874,7 +1017,8 @@ def _stale_layers(views: list[dict]) -> list[str]:
     return [view["layer"] for view in views if view.get("stale")]
 
 
-def _elsewhere(store: KnowledgeStore, name: str, kind: str, owner: str, layer: str) -> list[Record]:
+def _elsewhere(store: KnowledgeStore, name: str, kind: str, owner: str, layer: str,
+               mods: list[str] | None = None) -> list[Record]:
     """The same name, without the narrowing that found nothing.
 
     A search narrowed by `kind=`, `owner=` or `layer=` answers about that slice
@@ -883,12 +1027,16 @@ def _elsewhere(store: KnowledgeStore, name: str, kind: str, owner: str, layer: s
     nothing about the config, and the caller reads it as "the game has no such
     class". The same "not found is not not looked" the empty index gets, one
     level down -- and it costs a query only when the answer was empty anyway.
+
+    It stays inside the active mod set. What the SET kept out is reported
+    separately and by mod name; a second opinion that quietly reached past the
+    set would report the same records twice under two different explanations.
     """
     if not name or not (kind or owner or layer):
         return []
     try:
         with store.time_limit(SEARCH_SECONDS):
-            return store.find(name, limit=SHOW_LIMIT)
+            return store.find(name, limit=SHOW_LIMIT, mods=mods)
     except SearchTimeout:
         # The narrowed search already answered; a slow second opinion is worth
         # nothing and must never turn a good answer into a failure.
@@ -902,6 +1050,10 @@ def _describe_elsewhere(records: list[Record]) -> str:
         if where not in seen:
             seen.append(where)
     return ", ".join(seen)
+
+
+def _join(*parts: str) -> str:
+    return " | ".join(part for part in parts if part)
 
 
 def _ages(views: list[dict]) -> str:
@@ -1024,6 +1176,7 @@ def knowledge_find(
         )
 
     limit = _clamp(limit)
+    active = _active(store)
     started = time.perf_counter()
     try:
         with store.time_limit(SEARCH_SECONDS):
@@ -1034,10 +1187,15 @@ def knowledge_find(
                 layer=layer or None,
                 prefix=prefix,
                 limit=limit + 1,
+                mods=_scoped(active),
             )
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
+    scope_view = _scope_view(active, _excluded_find(
+        store, active, name, kind=kind or None, owner=owner or None,
+        layer=layer or None, prefix=prefix,
+    ))
 
     page, truncated, views, missing = _answer(
         store, records, limit, profile, game, layer=layer
@@ -1059,12 +1217,16 @@ def knowledge_find(
         "by_kind": by_kind,
         "by_layer": by_layer,
         "layers": views,
+        "scope": scope_view,
         "unbuilt": [entry["layer"] for entry in missing],
         "stale": bool(_stale_layers(views)),
     }
-    elsewhere = [] if page else _elsewhere(store, name, kind, owner, layer)
+    elsewhere = [] if page else _elsewhere(store, name, kind, owner, layer, _scoped(active))
     data["elsewhere"] = [record.to_dict() for record in elsewhere]
-    hint = _search_hint(views, missing, truncated, empty=not page, elsewhere=elsewhere)
+    hint = _join(
+        _search_hint(views, missing, truncated, empty=not page, elsewhere=elsewhere),
+        _scope_hint(scope_view),
+    )
     if not page and missing:
         return Result(
             False,
@@ -1072,6 +1234,14 @@ def knowledge_find(
             f"nothing called {name!r} is indexed, and the "
             + ", ".join(repr(entry["layer"]) for entry in missing)
             + " layer(s) have never been built -- this is 'not looked', not 'not there'",
+            hint,
+        )
+    if not page and scope_view["filtered_out"]:
+        return Result(
+            False, data,
+            _narrowed_away(
+                f"nothing called {name!r} is in the active mod set", scope_view
+            ),
             hint,
         )
     return Result(True, data, "", hint)
@@ -1273,11 +1443,12 @@ def knowledge_show(
 
     limit = max(1, min(int(limit or SHOW_LIMIT), MAX_LIMIT))
     lines = max(1, min(int(max_lines or BODY_LINES), MAX_BODY_LINES))
+    active = _active(store)
     try:
         with store.time_limit(SEARCH_SECONDS):
             records = store.find(
                 name, kind=kind or None, owner=owner or None,
-                layer=layer or None, limit=limit + 1,
+                layer=layer or None, limit=limit + 1, mods=_scoped(active),
             )
             page, truncated, views, missing = _answer(
                 store, records, limit, profile, game, layer=layer
@@ -1294,7 +1465,11 @@ def knowledge_show(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
 
-    elsewhere = [] if shown else _elsewhere(store, name, kind, owner, layer)
+    scope_view = _scope_view(active, _excluded_find(
+        store, active, name, kind=kind or None, owner=owner or None,
+        layer=layer or None,
+    ))
+    elsewhere = [] if shown else _elsewhere(store, name, kind, owner, layer, _scoped(active))
     data = {
         "query": {"name": name, "kind": kind, "owner": owner, "layer": layer,
                   "body": bool(body), "limit": limit},
@@ -1302,11 +1477,23 @@ def knowledge_show(
         "truncated": truncated,
         "declarations": shown,
         "layers": views,
+        "scope": scope_view,
         "unbuilt": [entry["layer"] for entry in missing],
         "stale": bool(_stale_layers(views)),
         "elsewhere": [record.to_dict() for record in elsewhere],
     }
-    hint = _search_hint(views, missing, truncated, empty=not shown, elsewhere=elsewhere)
+    hint = _join(
+        _search_hint(views, missing, truncated, empty=not shown, elsewhere=elsewhere),
+        _scope_hint(scope_view),
+    )
+    if not shown and scope_view["filtered_out"]:
+        return Result(
+            False, data,
+            _narrowed_away(
+                f"nothing called {name!r} is in the active mod set", scope_view
+            ),
+            hint,
+        )
     if not shown:
         return Result(
             False,
@@ -1363,15 +1550,20 @@ def knowledge_overrides(
         )
 
     limit = _clamp(limit)
+    active = _active(store)
     started = time.perf_counter()
     try:
         with store.time_limit(SEARCH_SECONDS):
             records = store.overrides(
-                name, owner=owner or None, layer=layer or None, limit=limit + 1
+                name, owner=owner or None, layer=layer or None, limit=limit + 1,
+                mods=_scoped(active),
             )
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
+    scope_view = _scope_view(active, _excluded_overrides(
+        store, active, name, owner=owner or None, layer=layer or None,
+    ))
 
     page, truncated, views, missing = _answer(
         store, records, limit, profile, game, layer=layer
@@ -1383,10 +1575,12 @@ def knowledge_overrides(
         "elapsed_ms": round(elapsed, 3),
         "results": [record.to_dict() for record in page],
         "layers": views,
+        "scope": scope_view,
         "unbuilt": [entry["layer"] for entry in missing],
         "stale": bool(_stale_layers(views)),
     }
-    hint = _search_hint(views, missing, truncated, empty=not page)
+    hint = _join(_search_hint(views, missing, truncated, empty=not page),
+                 _scope_hint(scope_view))
     if not page and missing:
         return Result(
             False,
@@ -1395,6 +1589,14 @@ def knowledge_overrides(
             + ", ".join(repr(entry["layer"]) for entry in missing)
             + " layer(s) have never been built -- an override lives in a layer above "
               "the declaration, so a missing layer is exactly where one would hide",
+            hint,
+        )
+    if not page and scope_view["filtered_out"]:
+        return Result(
+            False, data,
+            _narrowed_away(
+                f"nothing in the active mod set overrides {name!r}", scope_view
+            ),
             hint,
         )
     return Result(True, data, "", hint)

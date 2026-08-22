@@ -77,6 +77,12 @@ for _fn in (
     # exists, what it looks like in full, who changes it.
     tools.knowledge_build, tools.knowledge_status,
     tools.knowledge_find, tools.knowledge_show, tools.knowledge_overrides,
+    # The active mod set. It stands after the search tools because it changes
+    # what they answer: knowledge_scope declares the subset a server runs, and
+    # server_mods proposes one from a live address without applying it. Nothing
+    # they filter out is hidden -- an answer outside the set is named with its
+    # mod, which is why declaring one is safe to do early.
+    tools.knowledge_scope, tools.server_mods,
     # The asset pipeline, in the order a model travels. asset_export comes
     # first and is the OPTIONAL step -- a model already exported to .p3d
     # skips it -- so it stands ahead of the build rather than inside it.
