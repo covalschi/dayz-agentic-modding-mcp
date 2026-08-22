@@ -77,11 +77,14 @@ for _fn in (
     # exists, what it looks like in full, who changes it.
     tools.knowledge_build, tools.knowledge_status,
     tools.knowledge_find, tools.knowledge_show, tools.knowledge_overrides,
-    # The asset pipeline. Build first, then judge -- and asset_convert last,
-    # because it is the one step of the three that touches no model at all.
-    # asset_check stands between them on purpose: it is the tool that answers
-    # for a mod nobody has built here, which is the state a fresh clone is in.
-    tools.asset_build, tools.asset_check, tools.asset_convert,
+    # The asset pipeline, in the order a model travels. asset_export comes
+    # first and is the OPTIONAL step -- a model already exported to .p3d
+    # skips it -- so it stands ahead of the build rather than inside it.
+    # asset_check stands between build and convert on purpose: it is the tool
+    # that answers for a mod nobody has built here, which is the state a fresh
+    # clone is in. asset_convert is last, the one step of the four that
+    # touches no model at all.
+    tools.asset_export, tools.asset_build, tools.asset_check, tools.asset_convert,
 ):
     mcp.tool()(_wrap(_fn))
 

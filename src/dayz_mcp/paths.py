@@ -1,4 +1,4 @@
-"""Locating the game and the tools.
+"""Locating the game, the tools and Blender.
 
 Order: explicit argument -> environment variable -> Steam registry -> every Steam
 library. A candidate counts only if the probe file is actually inside it, so a
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 GAME_PROBE = "DayZDiag_x64.exe"
@@ -87,3 +88,49 @@ def find_game(explicit: str = "") -> str | None:
 
 def find_tools(explicit: str = "") -> str | None:
     return pick(_candidates(explicit, "DAYZ_TOOLS", "DayZ Tools"), TOOLS_PROBE)
+
+
+#: Blender's executable, and the folder its installers put versioned installs in.
+BLENDER_LEAF = "blender.exe" if os.name == "nt" else "blender"
+BLENDER_VENDOR_DIR = "Blender Foundation"
+_BLENDER_VERSION = re.compile(r"(\d+)\.(\d+)")
+
+
+def _version_key(name: str) -> tuple[int, int]:
+    """"Blender 5.2" -> (5, 2), so a machine with several installs gets the
+    newest rather than the lexicographically last -- "Blender 10.0" sorts
+    before "Blender 5.2" as text, and that is the wrong install."""
+    matched = _BLENDER_VERSION.search(name)
+    return (int(matched.group(1)), int(matched.group(2))) if matched else (0, 0)
+
+
+def blender_candidates(explicit: str = "", which=shutil.which) -> list[str]:
+    """Every place Blender might be, best first.
+
+    Unlike the game and the tools, Blender is not a Steam application here and
+    has no registry key this server may rely on, so the search is: what the
+    profile declares, what the environment declares, what is on PATH, and then
+    the versioned install folders, newest first.
+    """
+    out = [explicit, os.environ.get("BLENDER_EXE", "")]
+    on_path = which("blender")
+    if on_path:
+        out.append(str(on_path))
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+        vendor = Path(base) / BLENDER_VENDOR_DIR if base else None
+        if vendor is None or not vendor.is_dir():
+            continue
+        installs = [d for d in vendor.iterdir() if d.is_dir()]
+        for install in sorted(installs, key=lambda d: _version_key(d.name), reverse=True):
+            out.append(str(install / BLENDER_LEAF))
+    return out
+
+
+def find_blender(explicit: str = "", exists=os.path.isfile, which=shutil.which) -> str | None:
+    """The Blender executable, or None. The path to the EXE, not to a folder:
+    unlike DayZ Tools there is no stable layout under an install root worth
+    probing for, and the thing every caller wants is the program itself."""
+    for candidate in blender_candidates(explicit, which):
+        if candidate and exists(candidate):
+            return candidate
+    return None

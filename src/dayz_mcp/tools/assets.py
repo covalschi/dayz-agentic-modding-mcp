@@ -43,6 +43,7 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 
 from ..assets.binarize import binarize_models, find_binpath
+from ..assets.blend import BLEND_SUFFIX, export_p3d
 from ..assets.checks import (
     PROJECT_ROOT_KEY,
     Finding,
@@ -54,13 +55,14 @@ from ..assets.paa import CONVERTIBLE, DXT1, PaaError, alpha_levels, convert, exp
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..packer import ALWAYS_OMIT_FROM_STAGING, name_matches
-from ..paths import BINARIZE_REL, IMAGETOPAA_REL
+from ..paths import BINARIZE_REL, IMAGETOPAA_REL, find_blender
 from ..profile import resolve_mod_dir, resolve_project_root
 from . import session
 from .project import require_project
 
-#: The job kind, so a build in flight can be recognised without guessing.
+#: The job kinds, so work in flight can be recognised without guessing.
 BUILD_KIND = "asset-build"
+EXPORT_KIND = "asset-export"
 
 #: Where a successful deployment records what it put in the mod. Structural,
 #: never a content hash: `binarize`'s own output is not reproducible -- four
@@ -252,6 +254,93 @@ def _record_key(prof, path: Path) -> str:
         return Path(path).resolve().as_posix()
 
 
+def _resolve_target(prof, mod: str, source: str, *, needs_models: bool = True):
+    """Which mod, which root, and which directory of models this call is about.
+
+    One resolution for both halves of the pipeline, because a second spelling
+    of it is a second place where the root and the prefix can disagree --
+    which is the whole defect decision D1 removes. Returns
+    `((mod, prefix, root, prefix_dir, source_dir), None)` or `(None, refusal)`.
+
+    `needs_models` is False for the export, and only for the discovery branch:
+    a directory that is about to receive its FIRST model holds none yet, so
+    "the only directory with models in it" cannot name it and the caller has
+    to say. An explicit `source` is checked identically either way.
+    """
+    mod_name, refusal = _choose_mod(prof, mod)
+    if refusal:
+        return None, refusal
+    prefix = _prefix_of(mod_name)
+
+    root = resolve_project_root(prof.root, prof.build.project_root)
+    if root is None:
+        return None, _no_root(prefix)
+    prefix_dir = _prefix_dir(root, prefix)
+    if prefix_dir is None:
+        # The containment rule, one step earlier and cheaper than binarize's
+        # own: a root that does not even hold the mod's folder is off by at
+        # least one level, and that is the measured silent failure.
+        return None, fail(
+            f"the declared model root {root} holds no {prefix!r} folder",
+            hint=f"{PROJECT_ROOT_KEY} must point at the directory that CONTAINS {prefix!r}, "
+                 f"not at {prefix!r} itself and not one level above it. One level too deep is "
+                 f"the measured silent failure: the artifact comes out valid, smaller, with "
+                 f"plausible texture paths and a success code, and the engine renders it "
+                 f"untextured",
+        )
+
+    if source:
+        source_dir = (prefix_dir / PurePosixPath(str(source).replace("\\", "/"))).resolve()
+        if not _within(source_dir, prefix_dir.resolve()):
+            return None, fail(
+                f"the source {source} climbs out of the mod's own {prefix!r} folder",
+                hint=f"source is relative to <{PROJECT_ROOT_KEY}>/{prefix} -- every path inside "
+                     f"a model resolves against the root, so a model built from outside the "
+                     f"prefix folder cannot produce references that resolve",
+            )
+        if not source_dir.is_dir():
+            return None, fail(
+                f"no such model directory: {source_dir}",
+                hint=f"source is relative to <{PROJECT_ROOT_KEY}>/{prefix}, e.g. "
+                     f'source="data/models"',
+            )
+    else:
+        candidates = _model_dirs(prefix_dir)
+        if not candidates:
+            return None, fail(
+                f"no {MODEL_SUFFIX} anywhere under {prefix_dir}",
+                hint=("export the model to the prefix tree under the declared root first, or "
+                      f"point {PROJECT_ROOT_KEY} at the root the exports really land in")
+                     if needs_models else
+                     ('pass source=<the directory the model should land in, e.g. "data/models">'
+                      f" -- it is relative to <{PROJECT_ROOT_KEY}>/{prefix}, and there is no "
+                      "model under there yet to infer it from"),
+            )
+        if len(candidates) > 1:
+            shown = ", ".join(
+                repr(c.relative_to(prefix_dir).as_posix()) for c in candidates[:10]
+            )
+            return None, fail(
+                f"{len(candidates)} directories under {prefix_dir} hold models, so which one to "
+                "work on cannot be guessed",
+                hint=f"pass source=<one of {shown}> -- subdirectories are deliberately not "
+                     "searched, because recursion would pull in every sibling tree under the "
+                     "root",
+            )
+        source_dir = candidates[0]
+    return (mod_name, prefix, root, prefix_dir, source_dir), None
+
+
+def _in_flight(store, kinds: tuple[str, ...]):
+    """Any job of these kinds still queued or running, newest last.
+
+    The export and the build are checked against EACH OTHER, not just against
+    themselves: they share a directory, one writing the models the other
+    reads, so two of them in flight is the same conflict whichever pair it is.
+    """
+    return [j for j in store.all() if j.kind in kinds and j.status in (QUEUED, RUNNING)]
+
+
 def _texture_pairs(mod_dir: Path, prefix_dir: Path | None, exclude: list[str]) -> list[tuple[Path, Path]]:
     """Every shipped `.paa` paired with the source it was converted from.
 
@@ -312,63 +401,10 @@ def asset_build(mod: str = "", source: str = "", deploy: bool = True) -> Result:
         return guard
     prof = session.profile()
 
-    mod_name, refusal = _choose_mod(prof, mod)
+    target, refusal = _resolve_target(prof, mod, source)
     if refusal:
         return refusal
-    prefix = _prefix_of(mod_name)
-
-    root = resolve_project_root(prof.root, prof.build.project_root)
-    if root is None:
-        return _no_root(prefix)
-    prefix_dir = _prefix_dir(root, prefix)
-    if prefix_dir is None:
-        # The containment rule, one step earlier and cheaper than binarize's
-        # own: a root that does not even hold the mod's folder is off by at
-        # least one level, and that is the measured silent failure.
-        return fail(
-            f"the declared model root {root} holds no {prefix!r} folder",
-            hint=f"{PROJECT_ROOT_KEY} must point at the directory that CONTAINS {prefix!r}, "
-                 f"not at {prefix!r} itself and not one level above it. One level too deep is "
-                 f"the measured silent failure: the artifact comes out valid, smaller, with "
-                 f"plausible texture paths and a success code, and the engine renders it "
-                 f"untextured",
-        )
-
-    if source:
-        source_dir = (prefix_dir / PurePosixPath(str(source).replace("\\", "/"))).resolve()
-        if not _within(source_dir, prefix_dir.resolve()):
-            return fail(
-                f"the source {source} climbs out of the mod's own {prefix!r} folder",
-                hint=f"source is relative to <{PROJECT_ROOT_KEY}>/{prefix} -- every path inside "
-                     f"a model resolves against the root, so a model built from outside the "
-                     f"prefix folder cannot produce references that resolve",
-            )
-        if not source_dir.is_dir():
-            return fail(
-                f"no such model directory: {source_dir}",
-                hint=f"source is relative to <{PROJECT_ROOT_KEY}>/{prefix}, e.g. "
-                     f'source="data/models"',
-            )
-    else:
-        candidates = _model_dirs(prefix_dir)
-        if not candidates:
-            return fail(
-                f"no {MODEL_SUFFIX} anywhere under {prefix_dir}",
-                hint="export the model to the prefix tree under the declared root first, or "
-                     f"point {PROJECT_ROOT_KEY} at the root the exports really land in",
-            )
-        if len(candidates) > 1:
-            shown = ", ".join(
-                repr(c.relative_to(prefix_dir).as_posix()) for c in candidates[:10]
-            )
-            return fail(
-                f"{len(candidates)} directories under {prefix_dir} hold models, so which one to "
-                "build cannot be guessed",
-                hint=f"pass source=<one of {shown}> -- subdirectories are deliberately not "
-                     "searched, because recursion would pull in every sibling tree under the "
-                     "root",
-            )
-        source_dir = candidates[0]
+    mod_name, prefix, root, prefix_dir, source_dir = target
 
     tools_root = session_tools_root()
     if not tools_root:
@@ -387,13 +423,15 @@ def asset_build(mod: str = "", source: str = "", deploy: bool = True) -> Result:
     store = session.jobs()
     # Two builds of one mod would run binarize into two directories and copy
     # both results over the same shipped files. Same answer mod_build gives to
-    # the same question, for the same reason.
-    in_flight = [j for j in store.all() if j.kind == BUILD_KIND and j.status in (QUEUED, RUNNING)]
+    # the same question, for the same reason. An export in flight blocks it
+    # too: that is the job that rewrites the very models this one reads.
+    in_flight = _in_flight(store, (BUILD_KIND, EXPORT_KIND))
     if in_flight:
-        busy = in_flight[-1].id
+        busy = in_flight[-1]
         return fail(
-            f"a model build is already running for this project (job {busy})",
-            hint=f"wait for it with job_wait('{busy}'), or look at it with job_status('{busy}')",
+            f"a {busy.kind} is already running for this project (job {busy.id})",
+            hint=f"wait for it with job_wait('{busy.id}'), or look at it with "
+                 f"job_status('{busy.id}')",
         )
 
     mod_dir = resolve_mod_dir(prof.root, prof.build.sources, mod_name)
@@ -543,6 +581,189 @@ def _finish(store, job_id: str, log_dir: Path, payload: dict, code: int,
     store.finish(job_id, code, summary=summary)
     if error:
         store.fail(job_id, error + (f" -- {hint}" if hint else ""))
+
+
+# ----------------------------------------------------------------- the export
+
+
+def session_blender() -> str | None:
+    """Where Blender is, or None. Same indirection as `session_tools_root`, and
+    for the same reason: every refusal above this has to be exercisable on a
+    machine that has no Blender at all."""
+    prof = session.profile()
+    return find_blender(prof.machine.blender if prof else "")
+
+
+def asset_export(blend: str, mod: str = "", source: str = "", name: str = "") -> Result:
+    """Export a model out of a `.blend` into the project's model root.
+
+    Returns a `job_id`; wait for it with `job_wait(job_id, timeout=...)`. One
+    five-LOD model measured 2.1 s warm and about 8 s cold, but the ceiling is
+    minutes, because how long an export takes is a property of the model.
+
+    This is the pipeline's OPTIONAL first step. It produces the MLOD; the
+    binarized model that the game loads is what `asset_build` makes from it,
+    and that is a separate call on purpose -- each half has its own verdict,
+    and a mod whose `.p3d` came from somewhere else skips this entirely.
+
+    The project root declared as `build.project_root` is pushed into the
+    exporting add-on for the duration of the run, so what the add-on has stored
+    decides nothing. That matters: an add-on preference is remembered from
+    whatever was open last, and against the wrong root every texture path comes
+    out with the drive letter stripped and the rest kept -- valid-looking,
+    resolving to nothing, reported as a success.
+
+    The verdict is read off the file: it must be an MLOD, this run must be what
+    wrote it, all of the source's LODs must have reached it, and none of its
+    references may leave the mod. Measured on a real model: with the exporter's
+    own default arguments, 2 LODs of 5 came out as a valid MLOD with correct
+    paths, `FINISHED`, exit 0, and no mention of it in 169 lines of log.
+
+    `blend` is absolute, or relative to the repository, or relative to
+    `build.project_root`. `source` is the directory the model should land in,
+    relative to the mod's own folder under that root (e.g. "data/models"); with
+    exactly one such directory already holding models it can be omitted.
+    `name` is the file to write, defaulting to the source file's own name with
+    a `.p3d` extension.
+
+    Nothing else is touched: an export that produces nothing leaves the model
+    that is already there exactly as it was, and Blender's user preferences are
+    never written back.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    prof = session.profile()
+
+    target, refusal = _resolve_target(prof, mod, source, needs_models=False)
+    if refusal:
+        return refusal
+    mod_name, prefix, root, prefix_dir, source_dir = target
+
+    blend_path, tried = _locate(prof, blend)
+    if blend_path is None:
+        return fail(
+            f"no such source file: {blend}",
+            hint="looked in " + "; ".join(tried) + f" -- give a path to the {BLEND_SUFFIX} the "
+                 f"model lives in, relative to the repository, relative to {PROJECT_ROOT_KEY}, "
+                 "or absolute",
+        )
+    if blend_path.suffix.lower() != BLEND_SUFFIX:
+        return fail(
+            f"{blend_path.name} is not a {BLEND_SUFFIX} file",
+            hint=f"this exports FROM Blender -- pass the {BLEND_SUFFIX}, not the model it "
+                 "produces",
+        )
+
+    out_name = (name or blend_path.stem + MODEL_SUFFIX).strip()
+    if Path(out_name).name != out_name or not out_name:
+        return fail(
+            f"name must be a file name, not a path: {out_name!r}",
+            hint="the directory is `source`, relative to the mod's own folder under "
+                 f"{PROJECT_ROOT_KEY}; `name` only says what the file is called",
+        )
+    if not out_name.lower().endswith(MODEL_SUFFIX):
+        out_name += MODEL_SUFFIX
+    output = source_dir / out_name
+
+    blender_exe = session_blender()
+    if not blender_exe:
+        return fail(
+            "Blender not found",
+            hint="install Blender, or set machine.blender in dayz-mcp.local.toml to its "
+                 "executable. This step is optional: asset_build works on any .p3d, wherever "
+                 "it came from",
+        )
+
+    store = session.jobs()
+    in_flight = _in_flight(store, (BUILD_KIND, EXPORT_KIND))
+    if in_flight:
+        busy = in_flight[-1]
+        return fail(
+            f"a {busy.kind} is already running for this project (job {busy.id})",
+            hint=f"wait for it with job_wait('{busy.id}'), or look at it with "
+                 f"job_status('{busy.id}')",
+        )
+
+    job = store.create(EXPORT_KIND)
+    log_dir = store.artifacts_dir(job.id)
+
+    def run() -> None:
+        # Every failure has to reach the job: a thread that dies before its job
+        # is resolved leaves it "running" forever and blocks every later one.
+        try:
+            store.start(job.id)
+            _run_export(
+                store, job.id, log_dir, mod_name, prefix,
+                blender_exe=blender_exe, blend=blend_path, output=output, root=root,
+            )
+        except Exception as exc:  # noqa: BLE001 - must reach the job, not just stderr
+            try:
+                store.fail(job.id, f"{type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001 - the job store is the broken part
+                pass
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 - a raised tool call answers nobody
+        store.fail(job.id, f"the export never started: {type(exc).__name__}: {exc}")
+        return fail(
+            f"the export could not be started: {type(exc).__name__}: {exc}",
+            hint="this is the process, not the model -- try again, and check job_status for "
+                 "what was recorded",
+        )
+    return ok({
+        "job_id": job.id,
+        "mod": mod_name,
+        "prefix": prefix,
+        "root": str(root),
+        "blend": str(blend_path),
+        "output": str(output),
+        "blender": blender_exe,
+        "notes": _root_notes(prof),
+    })
+
+
+def _run_export(
+    store, job_id: str, log_dir: Path, mod_name: str, prefix: str, *,
+    blender_exe: str, blend: Path, output: Path, root: Path,
+) -> None:
+    """One export, inside its own thread. Every exit resolves the job."""
+    log_path = log_dir / "blender.log"
+    result = export_p3d(
+        blender_exe,
+        blend=blend, output=output, root=root, prefix=prefix,
+        work_dir=log_dir, log_path=log_path,
+    )
+    if log_path.is_file():
+        store.add_artifact(job_id, log_path)
+
+    payload = result.to_dict()
+    payload.update({"mod": mod_name, "prefix": prefix})
+    artifact = log_dir / "asset-export.json"
+    try:
+        artifact.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        store.add_artifact(job_id, artifact)
+    except (OSError, TypeError, ValueError):
+        pass
+
+    if not result.ok:
+        store.finish(job_id, 1, summary=f"blender {result.seconds:.1f} s: {result.error}")
+        store.fail(job_id, result.error + (f" -- {result.hint}" if result.hint else ""))
+        return
+
+    parts = [
+        f"{Path(result.output).name} {result.size} B {result.kind} {result.lod_count} LODs "
+        f"({result.report.summary})",
+        f"blender {result.seconds:.1f} s, exit {result.code}",
+    ]
+    if result.log:
+        parts.append(f"log: {len(result.log.kept)} of {result.log.total} lines kept")
+    parts.append(
+        f"next: asset_build(mod='{mod_name}') binarizes it -- the engine does not load an MLOD"
+    )
+    parts += list(result.notes)
+    store.finish(job_id, 0, summary=" | ".join(parts))
 
 
 # ------------------------------------------------------------------ the check

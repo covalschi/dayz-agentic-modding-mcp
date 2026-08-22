@@ -764,9 +764,11 @@ async def test_the_three_asset_tools_are_registered_with_real_parameters():
     and the driving agent cannot call these at all -- a phase-1 defect that must
     not come back through a new namespace."""
     listed = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    for name in ("asset_build", "asset_check", "asset_convert"):
+    for name in ("asset_export", "asset_build", "asset_check", "asset_convert"):
         assert name in listed, name
         assert (listed[name].description or "").strip(), name
+    assert "blend" in listed["asset_export"].inputSchema["properties"]
+    assert "name" in listed["asset_export"].inputSchema["properties"]
     assert "mod" in listed["asset_build"].inputSchema["properties"]
     assert "source" in listed["asset_build"].inputSchema["properties"]
     assert "deploy" in listed["asset_build"].inputSchema["properties"]
@@ -809,6 +811,16 @@ async def test_the_asset_tool_descriptions_carry_their_contract():
     assert "_co" in convert and "_ca" in convert
     assert "png" in convert.lower() and "paa" in convert.lower()
 
+    export = listed["asset_export"]
+    # Long work returns a job id here too.
+    assert "job_id" in export and "job_wait" in export
+    # The root that decides every path inside the model.
+    assert PROJECT_ROOT_KEY in export
+    # It is the OPTIONAL half, and what it makes is not what the engine loads.
+    assert "optional" in export.lower()
+    assert "MLOD" in export
+    assert "asset_build" in export
+
 
 @pytest.mark.anyio
 async def test_no_asset_description_promises_byte_equality():
@@ -821,7 +833,7 @@ async def test_no_asset_description_promises_byte_equality():
         t.name: " ".join((t.description or "").split()).lower()
         for t in await mcp_server.mcp.list_tools()
     }
-    for name in ("asset_build", "asset_check", "asset_convert"):
+    for name in ("asset_export", "asset_build", "asset_check", "asset_convert"):
         for promise in ("byte-identical", "byte for byte", "identical bytes",
                         "the same bytes", "byte-for-byte"):
             assert promise not in listed[name], (name, promise)
@@ -964,3 +976,194 @@ def test_a_real_png_converts_and_c7_answers_from_the_source(tmp_path, monkeypatc
     print(f"\nlive asset_convert: {elapsed:.2f} s -> {result.data['format']}, "
           f"{result.data['size']} B, warnings={len(result.data['warnings'])}")
     assert result.data["format"] in ("DXT1", "DXT5")
+
+
+# ------------------------------------------------------------------ the export
+# The optional first half. Its own module's tests cover the export itself; these
+# cover the tool around it -- what it refuses before anything starts, and that
+# the two halves of the pipeline cannot run over each other.
+
+
+class ExportWaiter:
+    """A stand-in for `procs.run_blocking` inside the real `export_p3d`."""
+
+    def __init__(self, writes: bytes | None = SOURCE_MLOD, lods: int = 5):
+        self.writes = writes
+        self.lods = lods
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, cwd, log_path, timeout, env=None):
+        self.calls.append(list(cmd))
+        payload = json.loads(Path(cmd[-1]).read_text(encoding="utf-8"))
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(log_path).write_text("P3D export finished in 0.01 sec\n", encoding="utf-8")
+        Path(payload["result"]).write_text(json.dumps({
+            "addon": "x", "operators": ["export_p3d"], "stored_root": "",
+            "root": payload["root"], "lods_in_blend": self.lods,
+            "operator_result": ["FINISHED"], "error": "",
+        }), encoding="utf-8")
+        if self.writes is not None:
+            out = Path(payload["output"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(self.writes)
+        return 0, ""
+
+
+def with_blender(monkeypatch, tmp_path, waiter=None, *, present: bool = True):
+    """Point the export tool at a stub Blender and an injected waiter."""
+    exe = tmp_path / "blender" / "blender.exe"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("stub", encoding="utf-8")
+    monkeypatch.setattr(assets, "session_blender", lambda: (str(exe) if present else None))
+    if waiter is not None:
+        real = assets.export_p3d
+        monkeypatch.setattr(
+            assets, "export_p3d", lambda exe_, **kw: real(exe_, run=waiter, **kw),
+        )
+    return exe
+
+
+def a_blend(tmp_path) -> Path:
+    blend = tmp_path / "sources" / "thing.blend"
+    blend.parent.mkdir(parents=True, exist_ok=True)
+    blend.write_bytes(b"BLENDER-v502stub")
+    return blend
+
+
+def run_export(**kw):
+    """asset_export, then wait for its job. Returns (answer, job)."""
+    answer = assets.asset_export(**kw)
+    if not answer.ok:
+        return answer, None
+    return answer, session.jobs().wait(answer.data["job_id"], timeout=30)
+
+
+def test_asset_export_without_a_declared_root_refuses_and_names_the_key(tmp_path, monkeypatch):
+    """The same D1 refusal the build gives, because the add-on has the same
+    problem `binarize` has: a root it remembers from somewhere else."""
+    open_project(tmp_path, monkeypatch, project_root=None)
+    with_blender(monkeypatch, tmp_path)
+    result = assets.asset_export(blend=str(a_blend(tmp_path)))
+    assert not result.ok
+    assert PROJECT_ROOT_KEY in result.hint
+
+
+def test_asset_export_without_blender_says_the_step_is_optional(tmp_path, monkeypatch):
+    """A machine with no Blender must still be able to build a mod: the model
+    it ships came from somewhere, and this half is the one that can be skipped.
+    """
+    open_project(tmp_path, monkeypatch)
+    with_blender(monkeypatch, tmp_path, present=False)
+    result = assets.asset_export(blend=str(a_blend(tmp_path)))
+    assert not result.ok
+    assert "Blender not found" in result.error
+    assert "optional" in result.hint.lower()
+    assert "machine.blender" in result.hint
+
+
+def test_asset_export_refuses_a_source_that_is_not_a_blend(tmp_path, monkeypatch):
+    root = open_project(tmp_path, monkeypatch)
+    with_blender(monkeypatch, tmp_path)
+    model = root / "staging" / MOD / "data" / "models" / "thing.p3d"
+    result = assets.asset_export(blend=str(model))
+    assert not result.ok
+    assert ".blend" in result.error
+
+
+def test_asset_export_says_where_it_looked_for_a_source_it_could_not_find(tmp_path, monkeypatch):
+    open_project(tmp_path, monkeypatch)
+    with_blender(monkeypatch, tmp_path)
+    result = assets.asset_export(blend="nowhere/thing.blend")
+    assert not result.ok
+    assert "looked in" in result.hint
+
+
+def test_a_name_that_is_a_path_is_refused(tmp_path, monkeypatch):
+    """`name` says what the file is called; `source` says where it goes. One
+    argument that could do both is a second place for the root to be wrong."""
+    open_project(tmp_path, monkeypatch)
+    with_blender(monkeypatch, tmp_path)
+    result = assets.asset_export(blend=str(a_blend(tmp_path)), name="../elsewhere/thing.p3d")
+    assert not result.ok
+    assert "must be a file name" in result.error
+
+
+def test_the_export_lands_where_the_build_will_look_for_it(tmp_path, monkeypatch):
+    root = open_project(tmp_path, monkeypatch)
+    waiter = ExportWaiter()
+    with_blender(monkeypatch, tmp_path, waiter)
+    answer, job = run_export(blend=str(a_blend(tmp_path)), name="thing.p3d")
+    assert answer.ok, answer.error
+    assert job.status == "done", job.error
+    expected = root / "staging" / MOD / "data" / "models" / "thing.p3d"
+    assert Path(answer.data["output"]) == expected
+    assert expected.read_bytes() == SOURCE_MLOD
+    assert "asset_build" in job.summary
+
+
+def test_the_default_name_comes_from_the_source_file(tmp_path, monkeypatch):
+    open_project(tmp_path, monkeypatch)
+    waiter = ExportWaiter()
+    with_blender(monkeypatch, tmp_path, waiter)
+    answer, job = run_export(blend=str(a_blend(tmp_path)))
+    assert answer.ok, answer.error
+    assert job.status == "done", job.error
+    assert Path(answer.data["output"]).name == "thing.p3d"
+
+
+def test_an_export_that_wrote_nothing_fails_the_job(tmp_path, monkeypatch):
+    """Blender exits 0 and reports FINISHED. The model already on the disk is
+    the previous one, and the job must not call that a success."""
+    root = open_project(tmp_path, monkeypatch)
+    shipped = root / "staging" / MOD / "data" / "models" / "thing.p3d"
+    before = shipped.read_bytes()
+    waiter = ExportWaiter(writes=None)
+    with_blender(monkeypatch, tmp_path, waiter)
+    _answer, job = run_export(blend=str(a_blend(tmp_path)), name="thing.p3d")
+    assert job.status == "failed"
+    assert "E2" in (job.error or "") or "E2" in job.summary
+    assert shipped.read_bytes() == before
+
+
+def test_a_partial_export_is_reported_in_the_summary(tmp_path, monkeypatch):
+    """It warns rather than refuses, so the only thing standing between a
+    two-LOD model and the mod is that the count reaches the person reading."""
+    open_project(tmp_path, monkeypatch)
+    waiter = ExportWaiter(writes=mlod(lods=2, tail=MATERIAL), lods=5)
+    with_blender(monkeypatch, tmp_path, waiter)
+    _answer, job = run_export(blend=str(a_blend(tmp_path)), name="thing.p3d")
+    assert job.status == "done", job.error
+    assert "E3" in job.summary
+
+
+def test_an_export_and_a_build_refuse_to_run_over_each_other(tmp_path, monkeypatch):
+    """They share a directory, one writing the models the other reads."""
+    open_project(tmp_path, monkeypatch)
+    with_blender(monkeypatch, tmp_path)
+    store = session.jobs()
+    job = store.create(assets.EXPORT_KIND)
+    store.start(job.id)
+    build = assets.asset_build()
+    assert not build.ok
+    assert assets.EXPORT_KIND in build.error
+    assert job.id in build.hint
+    store.finish(job.id, 0, summary="done")
+
+    other = store.create(assets.BUILD_KIND)
+    store.start(other.id)
+    export = assets.asset_export(blend=str(a_blend(tmp_path)))
+    assert not export.ok
+    assert assets.BUILD_KIND in export.error
+
+
+def test_the_export_job_keeps_its_log_and_its_answer(tmp_path, monkeypatch):
+    open_project(tmp_path, monkeypatch)
+    waiter = ExportWaiter()
+    with_blender(monkeypatch, tmp_path, waiter)
+    answer, job = run_export(blend=str(a_blend(tmp_path)), name="thing.p3d")
+    assert job.status == "done", job.error
+    artifacts = tools.job_artifacts(answer.data["job_id"])
+    assert artifacts.ok
+    names = {Path(a).name for a in artifacts.data["artifacts"]}
+    assert "blender.log" in names
+    assert "asset-export.json" in names

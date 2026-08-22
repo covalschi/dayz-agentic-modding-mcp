@@ -196,3 +196,27 @@ def test_run_blocking_kills_grandchild_on_timeout(tmp_path):
         # Cleanup: ensure grandchild is truly dead in case assertion failed
         if is_alive(grandchild_pid):
             stop(grandchild_pid)
+
+
+def test_the_env_overlay_adds_without_replacing(tmp_path):
+    """An overlay, never a replacement. Handed to Popen bare, an env dict of
+    one key strips PATH, SystemRoot and TEMP, and a Windows program started
+    without those fails in ways that read like the program is broken."""
+    log = tmp_path / "env.log"
+    code, _tail = run_blocking(
+        [sys.executable, "-c",
+         "import os; print('MARK', os.environ.get('DAYZ_MCP_PROBE'), "
+         "bool(os.environ.get('PATH')))"],
+        tmp_path, log, timeout=30, env={"DAYZ_MCP_PROBE": "set-for-this-run"},
+    )
+    assert code == 0
+    assert "MARK set-for-this-run True" in log.read_text(encoding="utf-8")
+
+
+def test_the_env_overlay_does_not_leak_into_this_process(tmp_path):
+    """These runs happen on job threads; a global mutation would leak into
+    whatever else is running at the time."""
+    assert "DAYZ_MCP_PROBE" not in os.environ
+    run_blocking([sys.executable, "-c", "pass"], tmp_path, tmp_path / "x.log",
+                 timeout=30, env={"DAYZ_MCP_PROBE": "1"})
+    assert "DAYZ_MCP_PROBE" not in os.environ

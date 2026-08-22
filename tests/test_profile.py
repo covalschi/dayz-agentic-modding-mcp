@@ -566,3 +566,20 @@ def test_example_profile_is_a_loadable_profile(tmp_path):
     assert r.ok, r.error
     # No exclude key of its own: the packer default applies, all seven patterns.
     assert r.data.build.exclude == list(DEFAULT_EXCLUDE)
+
+
+def test_machine_blender_is_read_from_the_local_half(tmp_path):
+    """The Blender executable is machine-specific like the game and the tools,
+    and optional like the export step it serves."""
+    local = """
+    [machine]
+    blender = "C:/Program Files/SomeVendor/blender.exe"
+    """
+    p = load_profile(write(tmp_path, BASE, local)).data
+    assert p.machine.blender == "C:/Program Files/SomeVendor/blender.exe"
+
+
+def test_machine_blender_defaults_to_empty(tmp_path):
+    """Absent, discovery answers instead -- a project that never exports a
+    model must not need the key at all."""
+    assert load_profile(write(tmp_path, BASE)).data.machine.blender == ""

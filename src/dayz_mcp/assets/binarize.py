@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -210,7 +211,7 @@ def binarize_command(
     return [str(binarize_exe), *flags, str(source), str(output)]
 
 
-def digest_log(text: str) -> LogDigest:
+def digest_log(text: str, noise: Sequence[str] = NOISE) -> LogDigest:
     """Split a run's log into what is worth reading and what is boilerplate.
 
     A crash line is never muted, whatever else matches it. `0xC0000005` is the
@@ -218,6 +219,10 @@ def digest_log(text: str) -> LogDigest:
     is the one line that explains a zero-length artifact -- the crash shapes
     come from `logparse` rather than being re-spelled here, so the two cannot
     drift apart.
+
+    `noise` is a parameter because the other tool this package drives (Blender,
+    see `blend.py`) has boilerplate of its own and exactly the same need to
+    count it rather than print it. The mechanism is one; only the list differs.
     """
     lines = [ln.rstrip() for ln in (text or "").splitlines() if ln.strip()]
     crashes = {c["text"] for c in classify(lines, [], [])["crashes"]}
@@ -226,7 +231,7 @@ def digest_log(text: str) -> LogDigest:
     muted: dict[str, int] = {}
     for line in lines:
         stripped = line.strip()
-        if stripped not in crashes and any(n in line for n in NOISE):
+        if stripped not in crashes and any(n in line for n in noise):
             key = group_key(line)[:120]
             muted[key] = muted.get(key, 0) + 1
             continue

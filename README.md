@@ -32,6 +32,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | `build.sources` | where a mod's source really lives, relative to the profile (`"."` = the repository root itself) |
 | `build.exclude` | what must never be packed. Listing it **replaces** the default wholesale; the default is `.git`, `*.blend`, `*.blend1`, `.gitignore`, `.gitattributes`, `README.md`, `*.ps1` |
 | `build.stage` | pack a filtered copy instead of refusing when something excluded is present — the layout a root-layout mod needs |
+| `build.project_root` | the directory every model path resolves against, relative to this file. It must **contain** the mod's prefix folder. Required by the model tools and by nothing else — see "The asset pipeline" |
 | `build.pre_script` | a PowerShell script run before packing, for projects that generate code first |
 | `expect.ready_line` | the line the mod prints when it has finished loading — see below |
 | `expect.counters` | `key = value` pairs carried by that line, compared numerically |
@@ -46,6 +47,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 |---|---|
 | `machine.game` | the game installation; discovered automatically if absent |
 | `machine.tools` | DayZ Tools; discovered automatically if absent |
+| `machine.blender` | the Blender **executable**, for `asset_export` only; discovered automatically if absent, and needed by nothing else |
 | `machine.stand_root` | the prepared test stand. The server boots against it and its logs are read from `<stand_root>/profiles`. Defaults to `<root>/testenv` |
 | `machine.config` | the server config filename inside the stand (default `serverDZ.cfg`). It is a setting because a stand can hold a config that hangs forever after world-compile and a working one under another name; it must resolve inside `stand_root` |
 | `machine.port` | the port `server_start` passes to the server (default `2302`) |
@@ -106,6 +108,10 @@ in its notes.
 | `knowledge_find(name, kind, owner, layer, prefix, limit)` | find a class, method, constant, enum or config class by name |
 | `knowledge_show(name, ..., body)` | one declaration in full: signature, members, inheritance chain, and the source itself — read straight out of an archive if that is where it lives |
 | `knowledge_overrides(name, owner, layer)` | who overrides this class or method |
+| `asset_export(blend, mod, source, name)` | export a model out of a `.blend` into `build.project_root`, headless; returns a job id. The **optional** first step — see below |
+| `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
+| `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
+| `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
 
 `job_wait` is the tool meant to wait, and its `timeout` is capped at **600
 seconds** however large a value is passed. Two other tools sleep: `server_status`
@@ -425,6 +431,124 @@ found by the walk 8.8 ms (**15×**); the same file named through `only=` 5.8 ms
 The ceiling bites for real: a query measured at 77 ms, run under a 19.3 ms
 ceiling, was stopped at 19.9 ms, and the connection went on answering.
 
+## The asset pipeline
+
+Getting a model from Blender into a mod is ten steps, and until this phase all
+of them were run by hand. The value is not in launching the tools. It is that
+**every tool in this chain is structurally unable to report failure**, and each
+of those silences had already cost days.
+
+Measured on the real binaries, not assumed:
+
+| What happened | What the tool returned |
+|---|---|
+| `binarize` handed a file where it wanted a directory | **0**, an empty output directory, not one line of text |
+| `binarize` with a material that failed to load | **0**, an ODOL of 46,190 bytes where a correct build is 58,644 |
+| `binarize` handed an already-binarized model | `0xC0000005` and a **zero-length file** in the output directory, on top of whatever was there |
+| the Blender exporter with its own default arguments | `FINISHED`, exit 0, a valid MLOD carrying **2 of the model's 5 LODs**, and no mention of it in 169 lines of log |
+
+So the rule this whole namespace is built on: **the verdict is read off the
+artifact, never off the tool's report.** The exit code is recorded and believed
+in neither direction.
+
+### The root is declared, not assumed
+
+`binarize` has **no project-root option at all** — the full switch list was
+enumerated against the real binary. The root is the working directory of the
+process. The same command, the same input, a different directory, and out comes
+a valid ODOL with plausible texture paths that the engine renders untextured,
+with a success code and no complaint. The exporting Blender add-on has the same
+root in a preference of its own, remembered from whatever project was open
+last: on the machine this was developed on it pointed at a directory from an
+unrelated session, and against a wrong root the add-on does not fail either —
+it strips the drive letter, keeps the rest, and writes paths that look like
+paths.
+
+`build.project_root` is that directory, stated once in the portable half of the
+profile. The server sets it as the binarizer's working directory and pushes it
+into the add-on for the duration of the run, so what the add-on has stored
+decides nothing (it is reported, so you can go and fix it). That is what makes
+a wrong root **impossible** rather than detectable, and it is why the key is
+required before anything model-shaped will run at all.
+
+The refusals it produces happen before a process exists — measured at 0.0003 s
+— and a refused build leaves the model the mod already ships byte for byte
+untouched.
+
+### Twelve checks on the artifact, and four of them refuse
+
+`asset_check` runs them without building anything and without DayZ Tools,
+because a fresh clone must be able to ask whether what it is shipping is
+healthy. Four refuse: a built model is there and is an ODOL (C1), no reference
+escapes the mod (C3), a material was actually inlined (C4), and nothing already
+binarized is offered back to `binarize` (C10). The rest warn: dangling
+references, an rvmat pointing into another mod, a transparency lost to DXT1
+(C7), an animation that never reached the artifact, a `model.cfg` that is not
+the one the artifact was built from, a structural fingerprint that no longer
+matches what the last build deployed. Every finding says what to **do**.
+
+C4 is the one worth knowing about. When `binarize` resolves an rvmat it copies
+that material's own stage textures into the model — `fresnel`,
+`#(argb,8,8,3)`, `env_land_co.paa`, `_nohq`, `_smdi` — strings no MLOD
+contains. Six artifacts out of six were separated correctly by that one test,
+and it found a broken model on this machine that nobody knew about.
+
+### The Blender step is optional
+
+`asset_export` is the only tool here that needs Blender, and everything
+downstream works on a `.p3d` from anywhere — a hand export, a partner's file, a
+model committed years ago. A machine with no Blender builds and ships a mod
+perfectly well; the refusal says so rather than presenting it as a broken
+installation. It does need the exporting add-on to be enabled in the Blender it
+finds, and it never writes Blender's user preferences back (verified: the
+preferences file was byte-identical after every run).
+
+Export and build are two calls rather than one, because each half has its own
+verdict and a build refused by one and allowed by the other is not a decision.
+
+### Byte-equality is never promised
+
+Neither half of this pipeline is reproducible, and the design says so instead
+of pretending:
+
+* **The export.** Seven exports of one unchanged source file — three from one
+  session, three from another, and one made by hand in the GUI months earlier —
+  gave **seven different SHA-256s** at a constant 334,032 bytes. The difference
+  is the order of one internal block.
+* **`binarize`.** Four runs on one unchanged input gave three different results:
+  the size moved by 5 bytes and two 8-byte fragments leaked out of compressed
+  regions.
+
+So a model is never cached or compared by content hash. What is compared is a
+**structural fingerprint** — the file's kind, its LOD count and its set of
+names. Across all seven of those exports that fingerprint was **one value**.
+
+### The measured numbers
+
+One small model, on this machine, through the tools:
+
+| Step | Result | Time |
+|---|---|---|
+| `asset_export` | MLOD, 334,032 B, 5 LODs, clean | **2.1 s** (about 8 s on a cold start) |
+| `asset_build` | ODOL v55, 58,646 B, 4 LODs, all five C4 markers | **43.8 s** (75.6–78.7 s measured on four earlier runs) |
+| `asset_check` | 1 model and 10 texture pairs judged | milliseconds |
+| `asset_convert` | one PNG to DXT1, 50,764 B | 0.52 s |
+| a refusal on a wrong root | before any process is started | **0.0003 s** |
+
+Both logs are almost entirely boilerplate, and what is muted is counted rather
+than dropped: Blender's 169 lines came down to **4**, and `binarize`'s 91 to
+**6** — one of those six being the model's only genuine complaint.
+
+Chained end to end, the export and the build reproduced a model that had been
+made by hand months earlier: same kind, same 4 LODs, **the same 50 strings**,
+and a size one byte apart.
+
+### What none of it answers
+
+Whether the model looks right, is scaled right, is wound right, has a
+collision. Nothing outside the game answers that. C1–C12 shorten the road to
+it; they do not replace it.
+
 ## Known limitations
 
 * **Stale-pbo detection is mtime-based, not content-based.** `mod_build`
@@ -520,6 +644,34 @@ ceiling, was stopped at 19.9 ms, and the connection went on answering.
   guard is recorded on the declaration. A name can therefore be reported that a
   particular build excludes — the alternative, filtering by one guess at the
   defines, would deny the existence of methods that are in the running build.
+* **C12's fingerprint carries the file's size, and `binarize`'s size is not
+  stable.** Rebuilding a model that nobody edited produced an artifact one byte
+  larger than the shipped one, with the same kind, the same LOD count and the
+  same fifty strings — and a different digest, because the size is part of it.
+  So C12 can warn about a rebuild that changed nothing. It warns rather than
+  refuses for exactly this reason, and the parts it is built from are reported
+  beside it so the comparison can be made by hand. Splitting the digest into a
+  stable half and a size is the obvious refinement and is not done.
+* **A partial export warns; it does not refuse.** With the exporter's own
+  default arguments a model came out carrying 2 of its 5 LODs and passing every
+  other check. This server does not pass those arguments, so it should not
+  happen — but an object marked as a LOD and not linked into the scene counts
+  on one side of the comparison and not the other, which is a legitimate reason
+  for the counts to differ, so a refusal would have false positives. Read E3.
+* **The containment rule cannot see every wrong root.** It refuses a root that
+  does not hold the mod's prefix folder, which is the measured failure. A root
+  that *does* hold a folder of that name — a repository whose own mod directory
+  is spelled like the prefix, for instance — passes it, and what catches that
+  case is C10 or C3/C4 one layer down. Measured: pointed at such a root, the
+  build refused, deployed nothing and left the shipped artifact untouched, but
+  the refusal came from the job rather than from the call.
+* **`asset_export` needs the exporting add-on enabled in Blender, and cannot
+  install it.** Blender is launched with the machine owner's real preferences,
+  because starting it with `--factory-startup` takes the add-on away entirely.
+  Their other add-ons are kept off the search path for the run (two of the ones
+  installed here reach the network as they start and are blamed for crashes),
+  which Blender reports as "Add-on not loaded" in the log — that line is this
+  server's own doing, not a fault.
 * **A binarised config has no body to show.** `knowledge_show(body=True)` reads
   a declaration back out of the file or archive it was indexed from, but a
   `config.bin` holds the binary form while the index holds what `CfgConvert`

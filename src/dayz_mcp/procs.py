@@ -24,13 +24,24 @@ def powershell_cmd(script: Path, args: list[str] | None = None) -> list[str]:
 
 
 def run_blocking(
-    cmd: list[str], cwd: Path, log_path: Path, timeout: float | None = None
+    cmd: list[str], cwd: Path, log_path: Path, timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
+    """Run one command to completion, waiting on the process HANDLE.
+
+    `env` is an OVERLAY on this process's environment, never a replacement:
+    handed to Popen bare it would strip PATH, SystemRoot and TEMP, and a
+    Windows program started without those fails in ways that read like the
+    program is broken. Nothing is written back into this process's own
+    environment, because these runs happen on job threads and a global
+    mutation would leak into whatever else is running at the time.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    child_env = {**os.environ, **env} if env else None
     with log_path.open("w", encoding="utf-8", errors="replace") as fh:
         try:
             proc = subprocess.Popen(  # noqa: S603 - command is assembled by us
-                cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT,
+                cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT, env=child_env,
                 # This server talks MCP over stdio: its own stdin is a live
                 # JSON-RPC pipe. Without this, a child inherits that handle and
                 # can read from it, stealing input meant for the server.

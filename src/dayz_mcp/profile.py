@@ -72,6 +72,10 @@ class MachineCfg:
     stand_root: str = ""
     port: int = 2302
     config: str = "serverDZ.cfg"
+    # The Blender EXECUTABLE, not an install root -- see paths.find_blender.
+    # Machine-specific like the other two, and optional like the export step
+    # it serves: a project that never exports a model never needs it.
+    blender: str = ""
 
 
 @dataclass
@@ -407,6 +411,7 @@ def load_profile(path: str | Path) -> Result:
             stand_root=str(lm.get("stand_root", "")),
             port=port_val,
             config=config_val,
+            blender=str(lm.get("blender", "")),
         )
 
         # Check [mods] is a table
