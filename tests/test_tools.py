@@ -1772,3 +1772,67 @@ def test_server_start_refuses_a_single_string_rather_than_resplitting_it(tmp_pat
     also = tools.server_start(timeout=3, extra_args=[1, "-x"])
     assert not also.ok
     assert "cmd" not in captured
+
+
+# --- The window between "server_start returned" and "the session knows the pid" ---
+#
+# Measured, not theorised: three live runs called world_ready straight after
+# server_start and were told "no server started by this session is running"
+# while the server was in fact coming up. The pid was set inside the worker
+# thread, so every tool that asks the session for it lost that race.
+
+
+def test_server_start_knows_the_pid_before_it_returns(tmp_path, monkeypatch):
+    """The spawn happens in the CALLER's thread now, so there is no window in
+    which a started server is invisible to the next call."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4242)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+
+    # The readiness worker is prevented from running AT ALL. Without this the
+    # test passes either way: the thread wins the race in-process and sets the
+    # pid before the assertion is reached, which is exactly the shape of a test
+    # that passes with its own mechanism removed.
+    class NeverStarts:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.threading.Thread", NeverStarts)
+
+    started = tools.server_start(timeout=1)
+    assert started.ok, started.error
+    assert started.data["pid"] == 4242
+    assert session.server_pid() == 4242, "the pid was set by the worker, not by the call"
+
+
+def test_a_spawn_that_fails_is_answered_by_the_call_itself(tmp_path, monkeypatch):
+    """An image that cannot be launched is not a boot outcome, it is a refusal:
+    the caller learns at once instead of after a round trip through job_wait.
+    The job is still recorded as failed, so nothing is left looking alive."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    def boom(cmd, cwd):
+        raise OSError("not a valid Win32 application")
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", boom)
+
+    started = tools.server_start(timeout=5)
+    assert not started.ok
+    assert "OSError" in started.error or "Win32" in started.error
+    assert session.server_pid() in (0, None)
+    job_id = started.data["job_id"]
+    assert tools.job_status(job_id).data["status"] == "failed"

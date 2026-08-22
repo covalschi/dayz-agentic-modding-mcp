@@ -51,7 +51,7 @@ from ..jobs import QUEUED, RUNNING
 from ..packer import pack_one
 from ..procs import is_alive
 from . import session
-from .lifecycle import server_profiles_dir
+from .lifecycle import boot_in_flight, server_profiles_dir
 from .project import require_project
 
 # The repository this server is running from: <root>/src/dayz_mcp/tools/bridge.py.
@@ -538,6 +538,18 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
                 hint="discard it with bridge_clear(); server_start also clears the transport "
                      "before every boot, so a server started through this tool will not run "
                      f"it (the file itself is {mailbox['path']})",
+            )
+        booting = boot_in_flight()
+        if booting:
+            # Same distinction world tools make: a boot in flight is not an
+            # absent server, and the job id is what turns this from a dead end
+            # into a next step.
+            return _not_alive(
+                "booting",
+                base,
+                f"the server is still starting -- boot job {booting} has not finished, so "
+                "the bridge has nothing to run inside yet",
+                hint=f"wait for it with job_wait('{booting}'), then call bridge_status again",
             )
         return _not_alive(
             "no_server",

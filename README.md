@@ -73,7 +73,7 @@ in its notes.
 | `project_open(path)` | read the profile, discover the game and tools, report what is missing |
 | `project_status()` | current project, running server, recent jobs |
 | `mod_build()` | pack and sign every declared mod; returns a job id. Refuses a second build of the same project while one is still running |
-| `server_start(timeout)` | start the test server, finish when it is ready. Refuses if the game port is already held by someone else. Readiness comes from `expect.ready_line` when declared, otherwise from the server binding its port; the job summary names which |
+| `server_start(timeout)` | start the test server, finish when it is ready. Returns the `pid` straight away — the process is spawned before the call returns, so the very next tool already sees a running server. Refuses if the game port is already held by someone else, and refuses on the spot if the image cannot be launched. Readiness comes from `expect.ready_line` when declared, otherwise from the server binding its port; the job summary names which |
 | `server_status(pulse_seconds)` | pid, whether the process is alive, whether the log is growing (sampled `pulse_seconds` apart), and how long it has been stalled |
 | `server_stop(pid)` | stop the server this session started (optional pid for orphaned servers) |
 | `client_compile_check(extra_mods, wait_seconds)` | run the diagnostic client and read its logs |

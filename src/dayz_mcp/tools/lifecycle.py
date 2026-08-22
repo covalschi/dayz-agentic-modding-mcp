@@ -7,6 +7,7 @@ from pathlib import Path
 from ..bridge.channel import CMD_FILENAME, STATE_FILENAME
 from ..compilecheck import client_cmd, judge
 from ..errors import Result, fail, ok
+from ..jobs import QUEUED, RUNNING
 from ..paths import GAME_PROBE
 from ..procs import is_alive, process_mods_tail, spawn, stop, udp_port_holders
 from . import session
@@ -197,6 +198,27 @@ def clear_bridge_transport(profiles: Path) -> list[str]:
     return problems
 
 
+def boot_in_flight() -> str:
+    """The id of a boot job that is queued or running for this project, or "".
+
+    A server that is STARTING is not a server that is absent, and answering
+    "there is nothing to act on" for one is the same silent lie as reporting
+    "frozen" where the honest answer was "could not measure". Measured: three
+    live runs called a world tool straight after server_start and were told no
+    server existed while one was coming up.
+
+    The newest is the one named -- a project cannot usefully have two boots in
+    flight (server_start refuses a second one), so the newest is the one the
+    caller just asked for.
+    """
+    try:
+        jobs = session.jobs()
+    except Exception:  # noqa: BLE001 - a refusal must not become an exception
+        return ""
+    live = [j for j in jobs.all() if j.kind == "boot" and j.status in (QUEUED, RUNNING)]
+    return live[-1].id if live else ""
+
+
 def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> Result:
     """Start the test server and wait for it to be ready. Returns a job id.
 
@@ -375,22 +397,46 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
         cmd.extend(extra_args)
         extras_note = f" | extra args: {' '.join(extra_args)}"
 
+    # SPAWNED HERE, in the caller's own thread, and not in the worker below.
+    #
+    # The pid is what every other tool asks the session for, and setting it
+    # inside the worker left a window in which a server that had just been
+    # started was invisible: three live runs called world_ready immediately
+    # after this returned and were told "no server started by this session is
+    # running" while the server was coming up. The window was small and
+    # entirely avoidable -- spawning is a process create, not a wait, and the
+    # thing worth doing on a thread is the READINESS WAIT that follows.
+    #
+    # A spawn that fails is now answered by this call rather than by the job.
+    # An image that cannot be launched (a partial download, a placeholder --
+    # DayZDiag_x64.exe exists, so find_game's probe passed) is not a boot
+    # outcome, it is a refusal, and the caller should not have to make a round
+    # trip through job_wait to learn it. The job is still recorded as failed,
+    # so nothing is left looking alive.
+    store.start(job.id)
+    try:
+        # Old script_*.log files are left alone: unlinking a file a live server
+        # still holds open raises PermissionError on Windows. The `since` cutoff
+        # below is what tells this run's log apart from theirs.
+        pid = spawn(cmd, Path(game))
+    except Exception as exc:  # noqa: BLE001 - the caller must hear this, not stderr
+        store.fail(job.id, f"{type(exc).__name__}: {exc}")
+        return Result(
+            False, {"job_id": job.id, "since": since},
+            f"the server could not be started: {type(exc).__name__}: {exc}",
+            hint="check that machine.game points at a real DayZ installation and that "
+                 f"{SERVER_IMAGE} there is a runnable image -- a partial download passes "
+                 "the existence check and fails here",
+        )
+    session.set_server_pid(pid, SERVER_IMAGE)
+
     def run() -> None:
-        store.start(job.id)
         # An uncaught exception here must still resolve the job, not just print a
-        # traceback to the stdio server's stderr where the agent cannot see it: a
-        # game directory whose DayZDiag_x64.exe exists but is not a runnable image
-        # (a partial download, a placeholder) passes find_game's existence probe
-        # and then makes spawn() raise OSError. Without this, the job stays
-        # "running" forever, and the next process start relabels it "lost to a
-        # restart" instead of what actually happened.
+        # traceback to the stdio server's stderr where the agent cannot see it.
+        # Without this, the job stays "running" forever, and the next process
+        # start relabels it "lost to a restart" instead of what actually
+        # happened.
         try:
-            # Old script_*.log files are left alone: unlinking a file a live server
-            # still holds open raises PermissionError on Windows, and that exception
-            # inside this thread would leave the job stuck in "running" forever. The
-            # `since` cutoff below is what tells this run's log apart from theirs.
-            pid = spawn(cmd, Path(game))
-            session.set_server_pid(pid, SERVER_IMAGE)
             marker = prof.expect.ready_line
             if not marker:
                 # Nothing to wait for. load_profile already notes that
@@ -491,7 +537,10 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
             store.fail(job.id, f"{type(exc).__name__}: {exc}")
 
     threading.Thread(target=run, daemon=True).start()
-    started = {"job_id": job.id, "since": since}
+    # `pid` is returned as well as recorded: a caller that wants to look at the
+    # process itself should not have to wait for the readiness job to finish to
+    # find out which one it is.
+    started = {"job_id": job.id, "since": since, "pid": pid}
     # Only when something is actually wrong: a field that is always present
     # and almost always empty stops being read.
     if transport_left:

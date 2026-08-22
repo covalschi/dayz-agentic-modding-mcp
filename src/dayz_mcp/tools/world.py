@@ -48,7 +48,7 @@ from ..bridge.channel import Channel
 from ..errors import Result, fail, ok
 from ..procs import is_alive
 from . import session
-from .lifecycle import server_profiles_dir
+from .lifecycle import boot_in_flight, server_profiles_dir
 from .project import require_project
 
 # How long to wait for the mod's answer. Above both in-game deadlines (20 s
@@ -147,6 +147,22 @@ def _live_server() -> tuple[int, bool]:
 
 
 def _no_server() -> Result:
+    """Why there is nothing to act on -- and the two answers are different.
+
+    A boot still in flight is named by its job, because "there is nothing to
+    act on" sends the reader hunting for a server that died when in fact one is
+    on its way up. The other sentence is kept EXACTLY as it was: client_chat
+    matches on it to replace the hint, and so does the muscle memory of anyone
+    who has read this refusal before.
+    """
+    booting = boot_in_flight()
+    if booting:
+        return fail(
+            f"the server is still starting -- boot job {booting} has not finished, so there "
+            "is nothing to act on yet",
+            hint=f"wait for it with job_wait('{booting}'); if it fails, its own error says "
+                 "why. Then call world_ready before the first command",
+        )
     return fail(
         "no server started by this session is running, so there is nothing to act on",
         hint="start one with server_start, wait for the boot job to finish, then call "

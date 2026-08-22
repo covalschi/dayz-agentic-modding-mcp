@@ -567,3 +567,53 @@ def test_a_command_that_finished_with_no_readable_snapshot_says_which_half_is_mi
     assert result.ok, result.error
     assert result.data["world"] == {}
     assert "no readable state" in result.data["world_unavailable"]
+
+
+# --- A boot in flight is not "no server" ---
+
+
+def test_a_command_during_a_boot_names_the_boot_instead_of_denying_it(tmp_path, monkeypatch):
+    """The refusal that sent three live runs looking for a dead server.
+
+    A server that is starting is not a server that is absent, and answering
+    "there is nothing to act on" is the same silent lie as "frozen" instead of
+    "could not measure". The boot has an id; the refusal must carry it.
+    """
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    job = session.jobs().create("boot")
+    session.jobs().start(job.id)
+
+    result = world.world_state()
+    assert not result.ok
+    assert job.id in result.error
+    assert "job_wait" in result.hint
+
+
+def test_with_no_boot_anywhere_the_refusal_stays_what_it_was(tmp_path):
+    """client_chat keys off this exact sentence to replace the hint, and the
+    ordinary case -- nobody ever started anything -- must keep saying it."""
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+
+    result = world.world_state()
+    assert not result.ok
+    assert "no server started by this session" in result.error
+
+
+def test_a_boot_that_already_finished_is_not_offered_as_a_reason(tmp_path):
+    session.reset()
+    root = make_project(tmp_path)
+    with_stand(root, tmp_path / "stand")
+    tools.project_open(str(root))
+    job = session.jobs().create("boot")
+    session.jobs().start(job.id)
+    session.jobs().fail(job.id, "it died")
+
+    result = world.world_state()
+    assert not result.ok
+    assert job.id not in result.error
