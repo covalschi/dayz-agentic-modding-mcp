@@ -12,3 +12,6 @@ dayz-mcp.local.toml
 # is a build artifact like any other project's @ModName, reproduced by
 # packer.pack_one from bridge/ -- never committed.
 /@DZMCP_Bridge/
+
+# local Claude Code permissions, not part of the product
+.claude/
