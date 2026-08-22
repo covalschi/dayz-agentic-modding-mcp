@@ -6,6 +6,7 @@ from .client import (
     client_start, client_status, client_stop, client_type, client_verdict,
 )
 from .jobs_api import job_artifacts, job_status, job_wait
+from .lint import mod_lint
 from .knowledge import (
     knowledge_build, knowledge_callers, knowledge_find, knowledge_overrides,
     knowledge_show, knowledge_status,
@@ -20,7 +21,7 @@ from .world import (
 )
 
 __all__ = [
-    "mod_build", "job_artifacts", "job_status", "job_wait",
+    "mod_build", "mod_lint", "job_artifacts", "job_status", "job_wait",
     "client_compile_check", "server_start", "server_status", "server_stop",
     "log_tail", "log_verdict", "project_open", "project_status",
     "bridge_build", "bridge_status", "bridge_clear",

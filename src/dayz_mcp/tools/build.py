@@ -9,6 +9,7 @@ from ..packer import pack_all
 from ..procs import powershell_cmd, run_blocking
 from ..profile import resolve_mod_dir
 from . import session
+from .lint import mod_lint
 from .project import require_project
 
 
@@ -16,11 +17,31 @@ def session_tools_root() -> str | None:
     return session.tools_root()
 
 
-def mod_build() -> Result:
+def mod_build(skip_lint: bool = False) -> Result:
+    """Pack this project's mods. Returns a `job_id`.
+
+    Runs `mod_lint` first and refuses on what it refuses. That check costs
+    milliseconds and the boot it replaces costs a minute -- and two of the
+    defects it names would not appear in that boot's log at all, because a
+    `modded class` that modifies nothing loads and reports success.
+
+    `skip_lint=True` packs anyway. It exists because a refusal that cannot be
+    overridden is a refusal that gets worked around by not using the tool.
+    """
     guard = require_project()
     if guard:
         return guard
     prof = session.profile()
+
+    if not skip_lint:
+        judged = mod_lint()
+        if not judged.ok:
+            return Result(
+                False, judged.data,
+                "not packed -- " + judged.error,
+                (judged.hint + "; " if judged.hint else "")
+                + "fix it, or pass skip_lint=True to pack anyway",
+            )
     tools_root = session_tools_root()
     if not tools_root:
         return fail(

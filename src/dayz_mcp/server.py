@@ -77,7 +77,7 @@ for _fn in (
     # exists, what it looks like in full, who changes it.
     tools.knowledge_build, tools.knowledge_status,
     tools.knowledge_find, tools.knowledge_show, tools.knowledge_overrides,
-    tools.knowledge_callers,
+    tools.knowledge_callers, tools.mod_lint,
     # The active mod set. It stands after the search tools because it changes
     # what they answer: knowledge_scope declares the subset a server runs, and
     # server_mods proposes one from a live address without applying it. Nothing

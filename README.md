@@ -103,6 +103,7 @@ in its notes.
 | `client_chat(text, color)` | put a line in chat — delivered **server-side by the bridge**, so no keyboard, no window, no focus |
 | `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
 | `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |
+| `mod_lint(mod, strict)` | judge the Enforce Script without packing or booting anything. `mod_build` runs it first and refuses on what it refuses |
 | `knowledge_build(layer, full, only)` | build or refresh a layer of the API index; returns a job id. `only=[path]` re-reads exactly the files you name |
 | `knowledge_status()` | what each layer holds, how old it is, and whether it still matches what is on disk |
 | `knowledge_find(name, kind, owner, layer, prefix, limit)` | find a class, method, constant, enum or config class by name |
@@ -429,6 +430,7 @@ a full disk.
 | `knowledge_find`, prefix, limit 500 | 3.2 ms of query |
 | `knowledge_overrides` | 4.2 ms |
 | `knowledge_callers`, 23 call sites out of 113 703 | 0.38 ms of query |
+| `mod_lint` on a 76-file mod | 277 ms of text checks, 7 ms of index checks |
 | `knowledge_show`, a class with 400 members and its ancestry | 6.8 ms |
 | `knowledge_status`, all three layers measured | 41 ms (110 ms on the first call after a build) |
 
