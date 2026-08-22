@@ -97,6 +97,7 @@ in its notes.
 | `world_action(action_class, target_class, subject, radius, pos)` | run a mod's own action through the engine's gate — see below |
 | `world_exec(verb, args)` | the escape hatch: an arbitrary verb through the same transport, marked non-standard in every answer |
 | `client_start(timeout, extra_args)` | start the game client and connect it to the stand; returns a job id. Always windowed. Finishes when the bridge reports `players >= 1` — a count, not a timer |
+
 | `client_status()` | pid, window geometry, whether the window is minimized or in front, the background setting, the player count, and whether a virtual controller is attached |
 | `client_stop()` | stop the client this session started, and unplug the virtual controller |
 | `client_shot(path)` | capture the client's window to a PNG, with `lit_fraction` — the number that tells a real frame from an all-black one. No focus needed |
@@ -122,6 +123,19 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
+
+**Signatures, and why the engine's own message sends you the wrong way.** Under
+`verifySignatures = 2` a stand refuses every client with code 118 and *"missing
+`dtain.pbo`"* — a vanilla file name, with no mention of signatures at all. The
+cause is usually the keyring: this tool launches the diagnostic executable out of
+the CLIENT install, so the engine reads `keys` beside *that* executable, while
+`dayz.bikey` — the key that signs the game's own pbos — ships with the separate
+DayZServer install. A `keys` folder that is missing, or holding only a mod's own
+key, leaves the server unable to verify anything, vanilla included. `client_start`
+refuses and names which of the three it is; `server_start` only warns, because a
+headless boot with no client is still useful. An unsigned pbo on the client's
+`-mod` line is named the same way — including this server's own bridge, which is
+packed unsigned on purpose.
 
 **Three limits the engine imposes on the UI tools, none of them worked around:**
 a plain `TextWidget` has `SetText` and **no** `GetText` anywhere in `enwidgets.c`, so a
