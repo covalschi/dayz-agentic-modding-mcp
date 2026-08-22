@@ -1836,3 +1836,78 @@ def test_a_spawn_that_fails_is_answered_by_the_call_itself(tmp_path, monkeypatch
     assert session.server_pid() in (0, None)
     job_id = started.data["job_id"]
     assert tools.job_status(job_id).data["status"] == "failed"
+
+
+# --- A boot the engine reports as fine while nobody can connect ---
+#
+# Found by another session using this server, not by these tests. The stand is
+# launched with the DIAGNOSTIC EXE OUT OF THE CLIENT INSTALL, and the engine
+# resolves `mpmissions` next to the executable it is running -- so a machine
+# whose missions live in the separate DayZServer install starts a server that
+# binds its port, logs no error, passes the verdict, and refuses every player
+# with one line: "Mission script has no main function, player connect will stay
+# disabled!". This machine only worked by accident: it happens to have a copy
+# under the client install too.
+
+
+def test_a_missing_mission_is_refused_before_the_server_is_started(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text(
+        'class Missions\n{\n    class DayZ\n    {\n'
+        '        template="dayzOffline.chernarusplus";\n    };\n};\n',
+        encoding="utf-8",
+    )
+    tools.project_open(str(root))
+
+    spawned = []
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn",
+                        lambda cmd, cwd: spawned.append(cmd) or 111)
+
+    started = tools.server_start(timeout=5)
+    assert not started.ok
+    assert "dayzOffline.chernarusplus" in started.error
+    assert spawned == [], "the server must not be started at all"
+    # The remedy has to name where the engine looked, or the reader has no idea
+    # which of two DayZ installations is missing the folder.
+    assert "mpmissions" in started.hint
+
+
+def test_a_mission_that_is_there_is_not_refused(tmp_path, monkeypatch):
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text(
+        'class Missions\n{\n    class DayZ\n    {\n'
+        '        template="dayzOffline.chernarusplus";\n    };\n};\n',
+        encoding="utf-8",
+    )
+    (game / "mpmissions" / "dayzOffline.chernarusplus").mkdir(parents=True)
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 111)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+
+    started = tools.server_start(timeout=1)
+    assert started.ok, started.error
+
+
+def test_a_config_that_names_no_mission_is_not_second_guessed(tmp_path, monkeypatch):
+    """No template means nothing to check. Refusing on a config this tool
+    cannot read would block boots that work today, which is a worse failure
+    than the one being fixed."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("hostname = \"whatever\";\n", encoding="utf-8")
+    tools.project_open(str(root))
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 111)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+
+    started = tools.server_start(timeout=1)
+    assert started.ok, started.error

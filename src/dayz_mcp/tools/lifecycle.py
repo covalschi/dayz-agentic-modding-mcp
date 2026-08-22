@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -198,6 +199,49 @@ def clear_bridge_transport(profiles: Path) -> list[str]:
     return problems
 
 
+#: How the server config names the mission to load, e.g.
+#: `template="dayzOffline.chernarusplus";` inside class Missions/class DayZ.
+_TEMPLATE_RE = re.compile(r"""template\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+
+
+def mission_template(config: Path) -> str:
+    """The mission the server config asks for, or "" if it names none.
+
+    Read with one pattern rather than by parsing the whole config: the only
+    fact wanted here is which folder under `mpmissions` has to exist, and a
+    config this cannot read must not block a boot that works today.
+    """
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    found = _TEMPLATE_RE.search(text)
+    return found.group(1).strip() if found else ""
+
+
+def missing_mission(game: Path, config: Path) -> str:
+    """The mission the engine will not find, or "" when there is nothing wrong.
+
+    THE BOOT FAILURE THAT LOOKS LIKE A SUCCESS. This tool launches the
+    DIAGNOSTIC EXECUTABLE OUT OF THE CLIENT INSTALL, and the engine resolves
+    `mpmissions` next to the executable it is running -- not next to the
+    -config it was handed. A machine whose missions live in the separate
+    DayZServer install therefore starts a server that binds its port, logs not
+    one error, passes the verdict, and then refuses every player with a single
+    line: "Mission script has no main function, player connect will stay
+    disabled!".
+
+    Found by another session using this server, on a machine that did not
+    happen to have a copy of the mission under the client install. The machine
+    this was written on does have one, which is the only reason it never
+    surfaced here.
+    """
+    template = mission_template(config)
+    if not template:
+        return ""
+    return "" if (game / "mpmissions" / template).is_dir() else template
+
+
 def boot_in_flight() -> str:
     """The id of a boot job that is queued or running for this project, or "".
 
@@ -366,6 +410,22 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
             f"udp port {prof.machine.port} is already held by pid(s) {described}, "
             "so this server would not get it",
             hint=hint,
+        )
+
+    # Checked BEFORE the job exists, because this is a refusal and not a boot
+    # outcome: a server started without its mission comes up looking healthy in
+    # every way a job could report.
+    absent = missing_mission(Path(game), cfg)
+    if absent:
+        return fail(
+            f"the server config asks for mission {absent!r}, and the engine will not find "
+            f"it: it looks for mpmissions beside the executable being run, which is "
+            f"{Path(game) / 'mpmissions'}",
+            hint=f"put {absent!r} under {Path(game) / 'mpmissions'} -- a directory symlink "
+                 f"to the DayZServer install's own mpmissions is the usual way "
+                 f"(mklink /D). Without it the server starts, binds its port and logs no "
+                 f"error, and then refuses every player with 'Mission script has no main "
+                 f"function, player connect will stay disabled!'",
         )
 
     client_mods, server_mods = mod_list()

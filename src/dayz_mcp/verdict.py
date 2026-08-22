@@ -10,7 +10,13 @@ reported alongside it (`<key>_total`) so truncation is visible, not silent.
 """
 from __future__ import annotations
 
-from .logparse import DEFAULT_NOISE, classify, find_ready_line, parse_counters
+from .logparse import (
+    DEFAULT_FORBID,
+    DEFAULT_NOISE,
+    classify,
+    find_ready_line,
+    parse_counters,
+)
 from .profile import ExpectCfg
 
 MAX_LIST_ITEMS = 25
@@ -18,7 +24,12 @@ MAX_LIST_ITEMS = 25
 
 def build_verdict(lines: list[str], expect: ExpectCfg) -> dict:
     noise_patterns = list(DEFAULT_NOISE) + list(expect.noise)
-    buckets = classify(lines, forbid=expect.forbid, noise=noise_patterns)
+    # Both lists ADD to the built-in ones rather than replacing them. A
+    # profile's own forbidden string is about its own mod; the engine's are
+    # about whether the run was usable at all, and no project has a reason to
+    # turn those off.
+    forbidden = list(DEFAULT_FORBID) + list(expect.forbid)
+    buckets = classify(lines, forbid=forbidden, noise=noise_patterns)
 
     ready = find_ready_line(lines, expect.ready_line) if expect.ready_line else None
     counters = parse_counters(ready) if ready else {}

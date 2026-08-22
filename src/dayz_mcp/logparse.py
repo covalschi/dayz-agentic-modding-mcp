@@ -8,6 +8,20 @@ from __future__ import annotations
 
 import re
 
+#: Statements the ENGINE makes about the run being unusable, whatever mod is
+#: loaded. Added to whatever a profile declares, never replacing it -- the same
+#: rule `DEFAULT_NOISE` follows, and for the same reason: a profile that
+#: switched these off by declaring one of its own would be a trap nobody
+#: notices until the boot it was meant to catch.
+#:
+#: The first entry was found the hard way by another session using this server:
+#: the stand bound its port, logged not one error, and passed the verdict --
+#: while the engine had already decided that no player may connect. Everything
+#: except this single line said the boot was fine.
+DEFAULT_FORBID = [
+    "Mission script has no main function",
+]
+
 DEFAULT_NOISE = [
     "skeletons.anim.xml",      # the engine probes optional animations in every mod folder
     'bin" was not closed',     # engine storage files not properly closed on shutdown
