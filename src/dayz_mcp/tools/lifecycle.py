@@ -282,14 +282,35 @@ VANILLA_KEY = "dayz.bikey"
 _VERIFY_RE = re.compile(r"verifySignatures\s*=\s*(\d+)", re.IGNORECASE)
 
 
+def _live_lines(text: str):
+    """Every line of a config that the engine actually reads, with its index.
+
+    A commented-out line is not configuration. Skipping it matters in both
+    directions: a config carrying `// verifySignatures = 2;` above a real
+    `verifySignatures = 0;` would otherwise be REPORTED as 2 and, worse, have
+    the comment rewritten while the setting the engine honours stayed put --
+    a change that reads as success and does nothing.
+    """
+    for index, line in enumerate(text.splitlines()):
+        if line.lstrip().startswith("//"):
+            continue
+        yield index, line
+
+
 def verify_signatures(config: Path) -> int | None:
-    """The stand's signature policy, or None when its config states none."""
+    """The stand's signature policy, or None when its config states none.
+
+    Commented-out lines do not count -- see `_live_lines`.
+    """
     try:
         text = config.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    found = _VERIFY_RE.search(text)
-    return int(found.group(1)) if found else None
+    for _index, line in _live_lines(text):
+        found = _VERIFY_RE.search(line)
+        if found:
+            return int(found.group(1))
+    return None
 
 
 def unsigned_pbo(mod_dir: Path) -> str:
@@ -365,6 +386,170 @@ SIGNATURE_HINT = (
     "it. Or set verifySignatures = 0 in the stand's config, which is what a local stand "
     "usually wants"
 )
+
+
+#: The two values DayZ's own config comment recognises: 2 verifies, 0 does not.
+#: 1 is a legacy value that means neither, and a stand carrying it is a stand
+#: nobody can reason about -- so it is refused rather than written.
+SIGNATURE_VALUES = (0, 2)
+
+
+def _signature_note(value: int | None, added: bool) -> str:
+    if value is None:
+        return (
+            "this config does not state verifySignatures at all, so the engine's own "
+            "default applies -- pass a value to write one"
+        )
+    if value == 0:
+        return (
+            "signature checking is OFF: unsigned mods load and any client may join. That "
+            "is what a local stand usually wants, and it is NOT what a public server "
+            "wants" + (" (the key was added to the file)" if added else "")
+        )
+    return (
+        "signature checking is ON: every mod on the client's -mod line needs a .bisign, "
+        "and the keyring beside the executable being run needs dayz.bikey"
+        + (" (the key was added to the file)" if added else "")
+    )
+
+
+def server_signatures(value: int | None = None) -> Result:
+    """Read -- or deliberately change -- the stand's signature policy.
+
+    With no argument this only reports. With `value` it writes `verifySignatures`
+    into the config the profile names as this stand's, and reads it back.
+
+    WHY THIS IS ITS OWN TOOL. `verifySignatures = 2` makes a stand refuse every
+    client with code 118 and "missing dta\bin.pbo" -- a vanilla file name that
+    says nothing about signatures, and that has already cost one session a long
+    hunt through byte-identical files. On a local stand the honest fix is
+    usually to turn the check off rather than to sign a throwaway bridge mod,
+    and doing that by hand in somebody's config is worse than doing it here,
+    where the previous value is reported, the file is read back, and nothing
+    else in it is touched.
+
+    WHAT KEEPS IT SAFE. It edits exactly one file: `machine.stand_root` /
+    `machine.config`, the stand this project already boots, and it refuses a
+    path that resolves outside that root. It refuses while a server is running
+    against that config, because a change the running server will never read is
+    a success message about nothing. And it says which way the setting moved:
+    0 is off, and the answer says so in words rather than leaving a number.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    prof = session.profile()
+
+    if value is not None and value not in SIGNATURE_VALUES:
+        return fail(
+            f"{value!r} is not a signature policy this engine recognises",
+            hint="use 2 to verify signatures or 0 to turn the check off -- DayZ's own "
+                 "config comment says only 2 is supported, and 1 is a legacy value that "
+                 "means neither",
+        )
+
+    stand = _stand()
+    cfg_path = stand / prof.machine.config
+    if not cfg_path.exists():
+        return fail(
+            f"server config not found: {cfg_path}",
+            hint=f"point machine.stand_root at a prepared stand, or set machine.config if "
+                 f"the config there is not named {prof.machine.config!r}",
+        )
+    cfg = cfg_path.resolve()
+    if not _is_within(cfg, stand.resolve()):
+        return fail(
+            f"server config resolves outside stand_root: {cfg}",
+            hint=f"{prof.machine.config} must be a real file inside machine.stand_root -- "
+                 "this tool edits it, and it will not follow a link out of the stand",
+        )
+
+    was = verify_signatures(cfg)
+    if value is None:
+        return ok({
+            "config": str(cfg),
+            "value": was,
+            "was": was,
+            "changed": False,
+            "added": False,
+            "note": _signature_note(was, added=False),
+        })
+
+    # Only now, because reading is harmless and a caller asking what the policy
+    # IS should get an answer whatever the server is doing.
+    running = session.server_pid()
+    if running and is_alive(running, image=session.server_image()):
+        return fail(
+            f"a server is running for this session (pid {running}), and it read this config "
+            "when it started -- changing the file now would report a success that changes "
+            "nothing",
+            hint="call server_stop first, then set it, then start again",
+        )
+
+    if was == value:
+        return ok({
+            "config": str(cfg),
+            "value": was,
+            "was": was,
+            "changed": False,
+            "added": False,
+            "note": _signature_note(was, added=False),
+        })
+
+    # Read and written as BYTES, decoded once. The owner wrote this file: its
+    # comments, its key order and its CRLF line endings all survive, because a
+    # tool that reformatted it would show up as a whole-file change in every
+    # diff they ever look at again.
+    raw = cfg.read_bytes().decode("utf-8", errors="replace")
+    added = was is None
+    if added:
+        newline = "\r\n" if "\r\n" in raw else "\n"
+        if raw and not raw.endswith(("\n", "\r")):
+            raw += newline
+        raw += (
+            f"verifySignatures = {value};"
+            f"       // set by dayz-agentic-modding-mcp (server_signatures){newline}"
+        )
+    else:
+        # Line by line, and only the lines the engine reads: a global
+        # substitution would happily rewrite a commented-out example and leave
+        # the setting that matters exactly as it was.
+        # Split and walked on ONE list, not two. Splitting on the dominant
+        # ending while indexing by str.splitlines() looks equivalent and is
+        # not: splitlines() also breaks on a bare LF, so one stray line
+        # ending -- and the stand's own config on this machine has two --
+        # slides every index after it and rewrites a different line than the
+        # one that matched.
+        keep = "\r\n" if "\r\n" in raw else "\n"
+        lines = raw.split(keep)
+        for index, line in enumerate(lines):
+            if line.lstrip().startswith("//"):
+                continue
+            if _VERIFY_RE.search(line):
+                lines[index] = _VERIFY_RE.sub(f"verifySignatures = {value}", line, count=1)
+                break
+        raw = keep.join(lines)
+    cfg.write_bytes(raw.encode("utf-8"))
+
+    # Read back from disk rather than trusted. The substitution could match
+    # nothing, or match inside a comment, and "it was written" would otherwise
+    # be this tool's own claim about itself -- the same trap as believing
+    # binarize's exit code.
+    now = verify_signatures(cfg)
+    if now != value:
+        return fail(
+            f"the config still reads verifySignatures = {now} after writing {value}",
+            hint=f"look at {cfg} -- the key may appear more than once, and the engine "
+                 "honours one of them",
+        )
+    return ok({
+        "config": str(cfg),
+        "value": now,
+        "was": was,
+        "changed": True,
+        "added": added,
+        "note": _signature_note(now, added=added),
+    })
 
 
 def boot_in_flight() -> str:

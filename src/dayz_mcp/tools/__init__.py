@@ -12,7 +12,13 @@ from .knowledge import (
     knowledge_build, knowledge_callers, knowledge_find, knowledge_overrides,
     knowledge_show, knowledge_status,
 )
-from .lifecycle import client_compile_check, server_start, server_status, server_stop
+from .lifecycle import (
+    client_compile_check,
+    server_signatures,
+    server_start,
+    server_status,
+    server_stop,
+)
 from .logs import log_tail, log_verdict
 from .project import project_open, project_status
 from .scope import knowledge_scope, server_mods
@@ -24,6 +30,7 @@ from .world import (
 __all__ = [
     "mod_build", "mod_lint", "job_artifacts", "job_status", "job_wait",
     "client_compile_check", "server_start", "server_status", "server_stop",
+    "server_signatures",
     "log_tail", "log_verdict", "project_open", "project_status",
     "bridge_build", "bridge_status", "bridge_clear",
     "world_ready", "world_state", "world_spawn", "world_teleport",
