@@ -108,6 +108,7 @@ in its notes.
 | `knowledge_find(name, kind, owner, layer, prefix, limit)` | find a class, method, constant, enum or config class by name |
 | `knowledge_show(name, ..., body)` | one declaration in full: signature, members, inheritance chain, and the source itself — read straight out of an archive if that is where it lives |
 | `knowledge_overrides(name, owner, layer)` | who overrides this class or method |
+| `knowledge_callers(name, kind, owner, layer)` | who **calls** this method or builds this class — every call site, with the class and method that made it |
 | `asset_export(blend, mod, source, name)` | export a model out of a `.blend` into `build.project_root`, headless; returns a job id. The **optional** first step — see below |
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
@@ -415,11 +416,19 @@ The index on disk: 74.7 MB for a real project's three layers; 110 MB for the
 523 dependency archives on their own. Those archives are 92 GB, and none of
 them is unpacked.
 
+**Call sites are what the index pays for.** The game's own scripts hold 43 579
+declarations and **113 703 call sites**, and recording the second set roughly
+doubles the index: measured on the game layer alone, 23.8 MB and 3.7 s to
+build without them, 49.6 MB and 4.5 s with. That is the price of being able to
+answer "who calls this", and it is stated here rather than discovered later on
+a full disk.
+
 | Answer | Time |
 |---|---|
 | `knowledge_find`, exact name | 4.2 ms end to end, of which 3.0 ms is the project walk |
 | `knowledge_find`, prefix, limit 500 | 3.2 ms of query |
 | `knowledge_overrides` | 4.2 ms |
+| `knowledge_callers`, 23 call sites out of 113 703 | 0.38 ms of query |
 | `knowledge_show`, a class with 400 members and its ancestry | 6.8 ms |
 | `knowledge_status`, all three layers measured | 41 ms (110 ms on the first call after a build) |
 

@@ -51,6 +51,7 @@ from pathlib import Path
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..knowledge import scope as modscope
+from ..knowledge.calls import CALL, NEW
 from ..knowledge.layers import (
     CONFIG_SUFFIXES,
     SCRIPT_SUFFIXES,
@@ -428,6 +429,18 @@ def _excluded_find(store: KnowledgeStore, active: modscope.ActiveSet, name: str,
     try:
         with store.time_limit(SEARCH_SECONDS):
             return store.find(
+                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
+            )
+    except SearchTimeout:
+        return []
+
+
+def _excluded_callers(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
+    if not active.active:
+        return []
+    try:
+        with store.time_limit(SEARCH_SECONDS):
+            return store.callers(
                 name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
             )
     except SearchTimeout:
@@ -1506,6 +1519,113 @@ def knowledge_show(
 
 
 # --------------------------------------------------------------- the overrides
+
+
+def knowledge_callers(
+    name: str, kind: str = "", owner: str = "", layer: str = "",
+    limit: int = DEFAULT_LIMIT,
+) -> Result:
+    """Who CALLS this -- every place a method is invoked or a class is built.
+
+    A different question from `knowledge_overrides`, and one no search over
+    declarations can answer: an override is a declaration, a call is not.
+    This is the question asked before changing a signature, before removing
+    something, and when working out how a piece of the game is actually used.
+
+    `kind` narrows to `call` or `new`. `owner` narrows to calls made from one
+    class. Each hit names the class and method it was made from, the file and
+    line, and the layer -- with that layer's age, like every other answer
+    here.
+
+    What it does NOT see, so that an empty answer is not read as proof: a call
+    reached through a variable whose type the index does not track is recorded
+    under the method's own name, not the variable's, and `new array<string>()`
+    has no identifier before its parenthesis to record at all.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    store, failure = _index()
+    if failure:
+        return failure
+    profile = session.profile()
+    game = session.game()
+
+    layer = (layer or "").strip().lower()
+    refusal = (
+        _empty_index_refusal(store, profile, game)
+        or _check_search_args(store, "", layer)
+    )
+    if refusal:
+        return refusal
+    name = (name or "").strip()
+    if not name:
+        return fail(
+            "knowledge_callers needs the name of a method or a class",
+            hint="find one with knowledge_find first",
+        )
+    kind = (kind or "").strip().lower()
+    if kind and kind not in (CALL, NEW):
+        return fail(
+            f"{kind!r} is not a call kind",
+            hint=f"use {CALL!r} for an invocation, {NEW!r} for an instantiation, "
+                 "or leave it empty for both",
+        )
+
+    limit = _clamp(limit)
+    active = _active(store)
+    started = time.perf_counter()
+    try:
+        with store.time_limit(SEARCH_SECONDS):
+            records = store.callers(
+                name, kind=kind or None, owner=owner or None, layer=layer or None,
+                limit=limit + 1, mods=_scoped(active),
+            )
+    except SearchTimeout as exc:
+        return _timeout_refusal(exc)
+    elapsed = (time.perf_counter() - started) * 1000.0
+    scope_view = _scope_view(active, _excluded_callers(
+        store, active, name, kind=kind or None, owner=owner or None,
+        layer=layer or None,
+    ))
+
+    page, truncated, views, missing = _answer(
+        store, records, limit, profile, game, layer=layer
+    )
+    data = {
+        "query": {"name": name, "kind": kind, "owner": owner, "layer": layer,
+                  "limit": limit},
+        "count": len(page),
+        "truncated": truncated,
+        "elapsed_ms": round(elapsed, 3),
+        "results": [record.to_dict() for record in page],
+        "layers": views,
+        "scope": scope_view,
+        "unbuilt": [entry["layer"] for entry in missing],
+        "stale": bool(_stale_layers(views)),
+    }
+    hint = _join(_search_hint(views, missing, truncated, empty=not page),
+                 _scope_hint(scope_view))
+    if not page and missing:
+        return Result(
+            False,
+            data,
+            f"nothing calls {name!r} in what is indexed, and the "
+            + ", ".join(repr(entry["layer"]) for entry in missing)
+            + " layer(s) have never been built -- a caller lives wherever the code "
+              "that uses this was written, so a missing layer is exactly where one "
+              "would hide",
+            hint,
+        )
+    if not page and scope_view["filtered_out"]:
+        return Result(
+            False, data,
+            _narrowed_away(
+                f"nothing in the active mod set calls {name!r}", scope_view
+            ),
+            hint,
+        )
+    return Result(True, data, "", hint)
 
 
 def knowledge_overrides(

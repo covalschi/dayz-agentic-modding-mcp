@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from .calls import Call
 from .parse import CLASS, MODDED, OVERRIDE, Declaration
 
 #: The three layers, in the order that answers them: the project's own code
@@ -73,7 +74,7 @@ _UNKNOWN_RANK = len(LAYERS)
 #: stamped with any other version is rebuilt rather than read through the new
 #: schema -- misreading old rows is how an index starts answering plausible
 #: nonsense.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Every search has a ceiling. Callers may lower it, never remove it.
 DEFAULT_LIMIT = 200
@@ -147,6 +148,25 @@ CREATE INDEX IF NOT EXISTS idx_decl_owner  ON decl (owner_lower, name_lower);
 CREATE INDEX IF NOT EXISTS idx_decl_kind   ON decl (kind, name_lower);
 -- "Who overrides this" for a class: everyone who extends it.
 CREATE INDEX IF NOT EXISTS idx_decl_parent ON decl (parent_lower);
+
+CREATE TABLE IF NOT EXISTS call (
+    id            INTEGER PRIMARY KEY,
+    source_id     INTEGER NOT NULL REFERENCES source(id) ON DELETE CASCADE,
+    layer         TEXT NOT NULL,
+    layer_rank    INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    name_lower    TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    owner         TEXT NOT NULL,
+    owner_lower   TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    qualifier     TEXT NOT NULL,
+    file          TEXT NOT NULL,
+    line          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_name ON call (name_lower);
+CREATE INDEX IF NOT EXISTS idx_call_owner ON call (owner_lower);
 CREATE INDEX IF NOT EXISTS idx_decl_source ON decl (source_id);
 """
 
@@ -228,13 +248,19 @@ def mod_folder(layer: str, file: str) -> str:
 #:
 #: A CASE expression cannot drive an index, so this cannot steal the query plan
 #: from the name index the way a bare `layer = ?` does (see `_layer_term`).
-_MOD_FOLDER_SQL = (
-    f"(CASE WHEN decl.layer = '{DEPS}' AND instr(decl.file, '/') > 0"
-    " THEN substr(decl.file, 1, instr(decl.file, '/') - 1) ELSE '' END)"
-)
+def _mod_folder_sql(table: str) -> str:
+    return (
+        f"(CASE WHEN {table}.layer = '{DEPS}' AND instr({table}.file, '/') > 0"
+        f" THEN substr({table}.file, 1, instr({table}.file, '/') - 1) ELSE '' END)"
+    )
 
 
-def _mods_term(mods: Sequence[str], outside: bool) -> tuple[str, list]:
+_MOD_FOLDER_SQL = _mod_folder_sql("decl")
+
+
+def _mods_term(
+    mods: Sequence[str], outside: bool, table: str = "decl"
+) -> tuple[str, list]:
     """Restrict to (or to everything but) the mods named.
 
     The empty string rides in the list on purpose: it is the folder of
@@ -250,7 +276,42 @@ def _mods_term(mods: Sequence[str], outside: bool) -> tuple[str, list]:
     values = [str(m).strip().lower() for m in mods if str(m).strip()]
     marks = ",".join("?" * (len(values) + 1))
     operator = "NOT IN" if outside else "IN"
-    return f"lower({_MOD_FOLDER_SQL}) {operator} ({marks})", ["", *values]
+    return f"lower({_mod_folder_sql(table)}) {operator} ({marks})", ["", *values]
+
+
+@dataclass(frozen=True)
+class CallSite:
+    """One place a name is called, as the index holds it.
+
+    Deliberately NOT a `Record`: a call site has no signature, no parent and
+    no flags, and giving it empty ones would let it be mistaken for a
+    declaration by any code that reads both.
+    """
+
+    name: str
+    kind: str = ""
+    owner: str = ""
+    method: str = ""
+    qualifier: str = ""
+    file: str = ""
+    line: int = 0
+    layer: str = ""
+    source: str = ""
+
+    @property
+    def caller(self) -> str:
+        """`Class.Method`, or whichever half exists. What an answer prints."""
+        if self.owner and self.method:
+            return f"{self.owner}.{self.method}"
+        return self.method or self.owner or "(file scope)"
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name, "kind": self.kind, "caller": self.caller,
+            "owner": self.owner, "method": self.method,
+            "qualifier": self.qualifier, "file": self.file, "line": self.line,
+            "layer": self.layer,
+        }
 
 
 @dataclass(frozen=True)
@@ -512,6 +573,7 @@ class KnowledgeStore:
         path: str | Path,
         declarations: Iterable[Declaration],
         *,
+        calls: Iterable[Call] = (),
         root: str = "",
         size: int | None = None,
         mtime: float | None = None,
@@ -525,7 +587,9 @@ class KnowledgeStore:
         """
         with self._transaction() as conn:
             self._ensure_layer(conn, layer, root)
-            return self._write_source(conn, layer, path, declarations, size, mtime)
+            return self._write_source(
+                conn, layer, path, declarations, size, mtime, calls
+            )
 
     def replace_layer(
         self,
@@ -539,13 +603,22 @@ class KnowledgeStore:
 
         `sources` is consumed lazily, so a caller may parse as it goes rather
         than holding a corpus in memory.
+
+        Each item is `(path, declarations)` or `(path, declarations, calls)`.
+        The short form is not a default with a hidden meaning -- it says this
+        caller did not read call sites out of this source, which is the truth
+        for every caller that only wants declarations.
         """
         with self._transaction() as conn:
             self._clear_layer(conn, layer)
             self._ensure_layer(conn, layer, root, built=time.time())
             total = 0
-            for path, declarations in sources:
-                total += self._write_source(conn, layer, path, declarations, None, None)
+            for item in sources:
+                path, declarations, *rest = item
+                calls = rest[0] if rest else ()
+                total += self._write_source(
+                    conn, layer, path, declarations, None, None, calls
+                )
             return total
 
     def drop_source(self, layer: str, path: str | Path) -> int:
@@ -586,6 +659,7 @@ class KnowledgeStore:
         declarations: Iterable[Declaration],
         size: int | None,
         mtime: float | None,
+        calls: Iterable[Call] = (),
     ) -> int:
         key = str(path)
         if size is None or mtime is None:
@@ -610,6 +684,14 @@ class KnowledgeStore:
         rows = _rows_for(source_id, layer, decls)
         if rows:
             self._insert(conn, rows, key)
+        call_rows = _call_rows_for(source_id, layer, list(calls))
+        if call_rows:
+            conn.executemany(
+                "INSERT INTO call (source_id, layer, layer_rank, name, name_lower,"
+                " kind, owner, owner_lower, method, qualifier, file, line)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                call_rows,
+            )
         return len(rows)
 
     @staticmethod
@@ -921,6 +1003,77 @@ class KnowledgeStore:
         )
         return ordered[: _ceiling(limit)]
 
+    def callers(
+        self,
+        name: str,
+        *,
+        kind: str | None = None,
+        owner: str | None = None,
+        layer: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+        mods: Sequence[str] | None = None,
+        outside: bool = False,
+    ) -> list[CallSite]:
+        """Every place `name` is called or instantiated.
+
+        The question `knowledge_overrides` cannot answer: an override is a
+        declaration, a call is not, and no amount of searching declarations
+        finds who USES one.
+
+        `kind` narrows to `call` or `new`; `owner` narrows to calls made from
+        one class. `mods` is the active mod set, applied exactly as it is for
+        declarations -- a call site inside a mod that is not on the server is
+        as misleading as a declaration from one.
+        """
+        sql, params = self._caller_query(name, kind, owner, layer, limit, mods, outside)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_call_site(row) for row in rows]
+
+    def explain_callers(self, name: str, **kwargs) -> str:
+        sql, params = self._caller_query(
+            name,
+            kwargs.get("kind"),
+            kwargs.get("owner"),
+            kwargs.get("layer"),
+            kwargs.get("limit", DEFAULT_LIMIT),
+            kwargs.get("mods"),
+            kwargs.get("outside", False),
+        )
+        return self._explain(sql, params)
+
+    def _caller_query(
+        self, name: str, kind: str | None, owner: str | None, layer: str | None,
+        limit: int, mods: Sequence[str] | None, outside: bool,
+    ) -> tuple[str, list]:
+        terms = ["call.name_lower = ?"]
+        params: list = [name.lower()]
+        if kind:
+            terms.append("call.kind = ?")
+            params.append(kind)
+        if owner is not None:
+            terms.append("call.owner_lower = ?")
+            params.append(owner.lower())
+        if layer:
+            # Same reasoning as `_layer_term`: the name index must drive this,
+            # and there is always a name term here, so the filter form is
+            # unconditional rather than conditional.
+            terms.append("+call.layer = ?")
+            params.append(layer)
+        if mods is not None:
+            clause, values = _mods_term(mods, outside, "call")
+            terms.append(clause)
+            params.extend(values)
+        sql = (
+            "SELECT call.layer, call.name, call.kind, call.owner, call.method,"
+            " call.qualifier, call.file, call.line, source.path AS source_path"
+            " FROM call JOIN source ON source.id = call.source_id"
+            " WHERE " + " AND ".join(terms)
+            + " ORDER BY call.layer_rank, call.file, call.line LIMIT ?"
+        )
+        params.append(_ceiling(limit))
+        return sql, params
+
     def explain_overrides(self, name: str, **kwargs) -> str:
         plans = [
             self._explain(sql, params)
@@ -1037,6 +1190,14 @@ def _where(clauses: Sequence[str]) -> str:
     return " WHERE " + " AND ".join(clauses) if clauses else ""
 
 
+def _call_site(row) -> CallSite:
+    return CallSite(
+        name=row["name"], kind=row["kind"], owner=row["owner"],
+        method=row["method"], qualifier=row["qualifier"], file=row["file"],
+        line=int(row["line"]), layer=row["layer"], source=row["source_path"],
+    )
+
+
 def _ceiling(limit: int) -> int:
     """No search is unbounded, however the caller asks."""
     return max(1, min(int(limit), 10_000))
@@ -1093,6 +1254,17 @@ def _collision(rows: Sequence[tuple], source: str) -> str:
         f"{source}: a declaration collides with one already indexed in layer "
         f"'{rows[0][1]}' -- two sources recorded under the same file name?"
     )
+
+
+def _call_rows_for(source_id: int, layer: str, calls: Sequence[Call]) -> list[tuple]:
+    rank = _RANK.get(layer, _UNKNOWN_RANK)
+    return [
+        (
+            source_id, layer, rank, c.name, c.name.lower(), c.kind,
+            c.owner, c.owner.lower(), c.method, c.qualifier, c.file, int(c.line),
+        )
+        for c in calls
+    ]
 
 
 def _rows_for(source_id: int, layer: str, decls: Sequence[Declaration]) -> list[tuple]:

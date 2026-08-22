@@ -54,6 +54,8 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .calls import CALL, NEW, Call, find_calls
+
 CLASS = "class"
 METHOD = "method"
 CONSTANT = "constant"
@@ -475,6 +477,7 @@ class _Parser:
     scopes: list[_Scope] = field(default_factory=list)
     guards: list[str] = field(default_factory=list)
     out: list[Declaration] = field(default_factory=list)
+    calls: list[Call] = field(default_factory=list)
 
     def line_of(self, pos: int) -> int:
         return bisect_right(self.starts, pos)
@@ -533,6 +536,30 @@ class _Parser:
                 return scope.name
         return ""
 
+    def method(self) -> str:
+        """The method whose body the scan is inside, empty if it is not.
+
+        Walks out through unnamed blocks -- an `if`, a `foreach` -- and stops
+        at the class: a call written at class scope is a member initialiser
+        and belongs to no method.
+        """
+        for scope in reversed(self.scopes):
+            if scope.kind in (CLASS, ENUM):
+                return ""
+            if scope.name:
+                return scope.name
+        return ""
+
+    def emit_calls(self, start: int, end: int) -> None:
+        owner, method = self.owner(), self.method()
+        for name, kind, qualifier, pos in find_calls(self.code, start, end):
+            self.calls.append(
+                Call(
+                    name=name, kind=kind, owner=owner, method=method,
+                    qualifier=qualifier, file=self.file, line=self.line_of(pos),
+                )
+            )
+
     def at_decl_scope(self) -> bool:
         return not self.scopes or self.scopes[-1].kind in (CLASS, ENUM)
 
@@ -554,6 +581,25 @@ class _Parser:
 
 def parse_source(source: str, file: str = "") -> list[Declaration]:
     """Every declaration in one Enforce Script source, in the order written."""
+    return _walk(source, file, collect_calls=False).out
+
+
+def parse_calls(source: str, file: str = "") -> list[Call]:
+    """Every call site in one Enforce Script source, in the order written."""
+    return _walk(source, file, collect_calls=True).calls
+
+
+def parse_all(source: str, file: str = "") -> tuple[list[Declaration], list[Call]]:
+    """Both answers from ONE walk.
+
+    The index builder wants both for every source it reads, and walking twice
+    would double the cost of the slowest part of a build for no gain.
+    """
+    p = _walk(source, file, collect_calls=True)
+    return p.out, p.calls
+
+
+def _walk(source: str, file: str, *, collect_calls: bool) -> _Parser:
     stripped = strip_source(source)
     p = _Parser(
         stripped.code,
@@ -599,9 +645,15 @@ def parse_source(source: str, file: str = "") -> list[Declaration]:
             continue
 
         if not p.at_decl_scope():
-            # Inside a method body. Nothing here is a declaration; advance to
-            # the next brace or semicolon so the scope stack keeps tracking.
-            i = _find_stop(code, i)
+            # Inside a method body. Nothing here is a declaration, but every
+            # call site is, so the fragment is read before it is stepped over.
+            # Fragments are disjoint -- the scan always resumes AT the stop
+            # character, which the branches above consume -- so no call is
+            # recorded twice.
+            stop = _find_stop(code, i)
+            if collect_calls:
+                p.emit_calls(i, stop)
+            i = stop
             continue
 
         if c == "[":
@@ -624,7 +676,7 @@ def parse_source(source: str, file: str = "") -> list[Declaration]:
             step, pending = min(_find_stop(code, i), _find_line_end(code, i)), pending
         i = _advance(i, step)
 
-    return p.out
+    return p
 
 
 def _advance(current: int, proposed: int) -> int:
@@ -684,8 +736,11 @@ def _parse_declaration(
                 flags=_flags_from_mods(m.group("mods")),
             )
             p.sync(i, close)
-            # A body if one follows; a `;` clears it if one does not.
-            return close, _Scope("block")
+            # A body if one follows; a `;` clears it if one does not. The
+            # scope carries the method's NAME so that a call found inside the
+            # body can say which method made it -- the one thing a separate
+            # scan over the same file could not work out for itself.
+            return close, _Scope("block", m.group("name"))
 
     # Constants are the only non-callable members indexed: `const` is what
     # tells a flag apart from an ordinary mutable member variable.

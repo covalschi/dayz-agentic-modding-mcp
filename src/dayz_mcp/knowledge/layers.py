@@ -59,7 +59,8 @@ from typing import Callable, Iterable, Iterator, Sequence
 from ..packer import bankrev_cmd, bankrev_output, config_text_cmd
 from ..paths import BANKREV_REL, CFGCONVERT_REL, find_tools
 from ..procs import run_blocking
-from .parse import Declaration, parse_config, parse_source
+from .calls import Call
+from .parse import Declaration, parse_all, parse_config
 from .pbo import DEFAULT_LIMITS, PboError, PboLimits, scan_pbo
 from .store import (
     CORE,
@@ -299,7 +300,9 @@ class _Source:
     key: str
     size: int
     mtime: float
-    load: Callable[[], list[Declaration]]
+    #: Declarations AND call sites, from one read of the source. Two reads
+    #: would double the cost of the slowest part of a build.
+    load: Callable[[], tuple[list[Declaration], list[Call]]]
 
 
 @dataclass
@@ -386,15 +389,20 @@ def _dedupe(
     return kept
 
 
-def _load(source: _Source, layer: str, on_duplicate: str, build: _Build) -> list[Declaration]:
+def _load(
+    source: _Source, layer: str, on_duplicate: str, build: _Build
+) -> tuple[list[Declaration], list[Call]]:
     try:
-        declarations = source.load()
+        declarations, calls = source.load()
     except (OSError, PboError, ValueError, UnicodeError) as exc:
         build.problems.append(
             SkippedSource(path=source.key, reason=f"{type(exc).__name__}: {exc}")
         )
         raise _SourceFailed from exc
-    return _dedupe(layer, declarations, on_duplicate, build, source.key)
+    # Only declarations are de-duplicated. Two call sites of the same name in
+    # one file are two real call sites, and collapsing them would turn "called
+    # in eleven places" into "called".
+    return _dedupe(layer, declarations, on_duplicate, build, source.key), calls
 
 
 def _record_empty(store: KnowledgeStore, layer: str, root: str, source: _Source) -> None:
@@ -423,13 +431,13 @@ def _write_one(
     on_duplicate: str, build: _Build,
 ) -> bool:
     try:
-        declarations = _load(source, layer, on_duplicate, build)
+        declarations, calls = _load(source, layer, on_duplicate, build)
     except _SourceFailed:
         _record_empty(store, layer, root, source)
         return False
     try:
         store.put_source(
-            layer, source.key, declarations,
+            layer, source.key, declarations, calls=calls,
             root=root, size=source.size, mtime=source.mtime,
         )
     except DuplicateDeclaration as exc:
@@ -454,17 +462,17 @@ def _rebuild(
     """
     written = 0
 
-    def stream() -> Iterator[tuple[str, list[Declaration]]]:
+    def stream() -> Iterator[tuple[str, list[Declaration], list[Call]]]:
         nonlocal written
         for source in sources:
             try:
-                declarations = _load(source, layer, on_duplicate, build)
+                declarations, calls = _load(source, layer, on_duplicate, build)
             except _SourceFailed:
                 # Recorded as empty rather than left out: see _record_empty.
-                yield source.key, ()
+                yield source.key, (), ()
                 continue
             written += 1
-            yield source.key, declarations
+            yield source.key, declarations, calls
 
     try:
         store.replace_layer(layer, stream(), root=root)
@@ -566,11 +574,17 @@ def _label(path: str | Path, root: Path) -> str:
         return str(path)
 
 
-def _parse_text(text: str, name: str, label: str) -> list[Declaration]:
-    """Enforce Script or config, decided by the file's own name."""
+def _parse_text(
+    text: str, name: str, label: str
+) -> tuple[list[Declaration], list[Call]]:
+    """Enforce Script or config, decided by the file's own name.
+
+    A config has no call sites -- it is data, not code -- so the second half
+    of the answer is empty there rather than absent.
+    """
     if name.lower().endswith(CONFIG_SUFFIXES):
-        return parse_config(text, file=label)
-    return parse_source(text, file=label)
+        return parse_config(text, file=label), []
+    return parse_all(text, file=label)
 
 
 def _file_source(found: FileStat, root: Path) -> _Source:
@@ -583,7 +597,7 @@ def _file_source(found: FileStat, root: Path) -> _Source:
     """
     path = Path(found.path)
 
-    def load() -> list[Declaration]:
+    def load() -> tuple[list[Declaration], list[Call]]:
         return _parse_text(
             path.read_text(encoding="utf-8", errors="replace"),
             path.name,
@@ -609,8 +623,9 @@ def _pbo_source(
     file, so re-reading the whole file is exactly right."""
     path = Path(found.path)
 
-    def load() -> list[Declaration]:
+    def load() -> tuple[list[Declaration], list[Call]]:
         out: list[Declaration] = []
+        calls: list[Call] = []
         stem = path.stem
         # An archive may hold the same entry name several times: measured on
         # this machine, 112 of 523 archives do, with 127 495 repeated entries
@@ -630,8 +645,12 @@ def _pbo_source(
                     continue
                 out += parse_config(text, file=label)
                 continue
-            out += _parse_text(blob.decode("utf-8", "replace"), base, label)
-        return out
+            found_decls, found_calls = _parse_text(
+                blob.decode("utf-8", "replace"), base, label
+            )
+            out += found_decls
+            calls += found_calls
+        return out, calls
 
     return _Source(key=found.path, size=found.size, mtime=found.mtime, load=load)
 
