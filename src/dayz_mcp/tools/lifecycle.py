@@ -242,6 +242,39 @@ def missing_mission(game: Path, config: Path) -> str:
     return "" if (game / "mpmissions" / template).is_dir() else template
 
 
+#: The engine's own statement that it has compiled the module a mod's mission
+#: scripts live in. Written by every DayZ server, needs no mod and no declared
+#: line -- the same properties that made the port bind worth watching, and
+#: unlike the port it says the SCRIPTS are up.
+MISSION_MODULE_LINE = "Module: Mission"
+
+
+def mission_module_compiled(profiles: Path, since: float) -> bool:
+    """Has THIS run compiled its mission module yet?
+
+    Measured on this machine: the port binds about 17 s after spawn and the
+    mission module compiles about 25 s after it. A boot called ready at the
+    port bind has not compiled one line of the mod, and a verdict taken at that
+    moment sees a log with no errors and says "pass". That is how a stand whose
+    mission the engine could not find -- reported by another session -- passed
+    every check while refusing every player.
+
+    Only logs written by this run are read, by the same `since` cutoff
+    log_verdict uses, so a previous boot's log cannot answer for this one.
+    """
+    for log in profiles.glob("script_*.log"):
+        try:
+            if log.stat().st_mtime < since:
+                continue
+            if MISSION_MODULE_LINE in log.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            # A log being written while it is read is ordinary; the next poll
+            # gets it.
+            continue
+    return False
+
+
 def boot_in_flight() -> str:
     """The id of a boot job that is queued or running for this project, or "".
 
@@ -530,14 +563,28 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 # bind time (16.9s on this project's stand), generously, so a
                 # server that is going to bind has long since done it; a server
                 # that has not by then is answered honestly instead of waited on.
+                #
+                # TWO signals, not one, and the second is why: the port binds
+                # about 17 s after spawn and the mission module compiles about
+                # 25 s after it. Finishing at the port alone reported "ready"
+                # for a server that had not compiled a line of the mod -- and
+                # a verdict taken at that moment reads a log with no errors and
+                # says "pass". That is exactly how a stand whose mission the
+                # engine could not find passed every check while refusing every
+                # player.
                 deadline = time.time() + min(timeout, PORT_READY_WAIT_SECONDS)
+                port_bound = False
+                scripts_up = False
                 while time.time() < deadline:
-                    if pid in udp_port_holders(port):
+                    port_bound = port_bound or pid in udp_port_holders(port)
+                    scripts_up = scripts_up or mission_module_compiled(profiles, since)
+                    if port_bound and scripts_up:
                         store.finish(
                             job.id, 0,
-                            summary=f"ready via port bind, pid {pid} holds udp/{port}; "
-                                    "expect.ready_line is empty, so this says the server is up "
-                                    "and listening, NOT that any mod finished loading"
+                            summary=f"ready, pid {pid}: udp/{port} bound AND the mission "
+                                    "module compiled. expect.ready_line is empty, so this "
+                                    "says the engine is listening and its mission scripts "
+                                    "are up, NOT that any particular mod finished loading"
                                     f"{transport_note}{extras_note}",
                         )
                         return
@@ -545,17 +592,35 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                         store.fail(job.id, "the server process died before it bound its port")
                         return
                     time.sleep(2)
+
+                # Listening but with no mission scripts is the one shape that
+                # must NOT be called ready: the engine answers queries and
+                # refuses every player, and the only line saying so is the mod
+                # log's "Mission script has no main function".
+                if port_bound and not scripts_up:
+                    store.fail(
+                        job.id,
+                        f"pid {pid} is listening on udp/{port}, but the mission module never "
+                        f"compiled within {min(timeout, PORT_READY_WAIT_SECONDS):g}s -- the "
+                        "engine is up and the mission is not, which is a server that will "
+                        "refuse every player. The commonest cause is the mission itself: the "
+                        "engine looks for mpmissions beside the executable it runs, not "
+                        "beside the -config",
+                    )
+                    return
                 # Alive, never bound: the old honest answer, now naming the extra
                 # thing that was actually looked at. Deliberately not a failure --
                 # a server that does not bind this port is unusual, not proof of
                 # anything, and this configuration could not judge readiness at
                 # all before.
                 waited_for = min(timeout, PORT_READY_WAIT_SECONDS)
+                compiled = " the mission module compiled, but" if scripts_up else ""
                 store.finish(
                     job.id, 0,
-                    summary=f"started, pid {pid}; expect.ready_line is empty and udp/{port} was "
-                            f"never observed bound within {waited_for:g}s, so readiness cannot be "
-                            f"detected -- only errors will be judged{transport_note}{extras_note}",
+                    summary=f"started, pid {pid}; expect.ready_line is empty and{compiled} "
+                            f"udp/{port} was never observed bound within {waited_for:g}s, so "
+                            f"readiness cannot be detected -- only errors will be judged"
+                            f"{transport_note}{extras_note}",
                 )
                 return
             deadline = time.time() + timeout

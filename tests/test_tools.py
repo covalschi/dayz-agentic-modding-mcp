@@ -1547,10 +1547,17 @@ def test_process_mods_tail_returns_empty_on_any_failure(monkeypatch):
     assert procs_process_mods_tail(4242) == ""
 
 
-def test_the_port_is_the_readiness_signal_when_no_ready_line_is_declared(tmp_path, monkeypatch):
+def test_the_port_and_the_mission_module_are_the_readiness_signal(tmp_path, monkeypatch):
     """A project with no ready line used to get a three-second dwell and an
-    honest "cannot be determined". The port is a real signal for that case: the
-    server's own doing, needing neither a mod nor a declared line."""
+    honest "cannot be determined". Two engine signals answer for that case --
+    both the server's own doing, needing neither a mod nor a declared line.
+
+    THE PORT ALONE USED TO BE ENOUGH, AND THAT WAS WRONG. Measured on this
+    machine: the port binds about 17 s after spawn, the mission module compiles
+    about 25 s after it. Between the two the server is listening with no
+    mission scripts -- it answers queries and refuses every player -- and a
+    verdict taken there reads a log with no errors and says "pass".
+    """
     session.reset()
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
     stand, game = tmp_path / "stand", tmp_path / "game"
@@ -1559,9 +1566,18 @@ def test_the_port_is_the_readiness_signal_when_no_ready_line_is_declared(tmp_pat
     tools.project_open(str(root))
 
     holders = {"pids": []}
+    profiles = stand / "profiles"
+
+    def fake_spawn(cmd, cwd):
+        (profiles / "script_test.log").write_text(
+            "SCRIPT: Module: Mission; loaded 216x files; 450x classes;" + chr(10),
+            encoding="utf-8",
+        )
+        return 4321
+
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders",
                         lambda port: holders["pids"])
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
 
@@ -1571,10 +1587,10 @@ def test_the_port_is_the_readiness_signal_when_no_ready_line_is_declared(tmp_pat
 
     waited = tools.job_wait(started.data["job_id"], timeout=20)
     assert waited.data["status"] == "done", waited.data
-    assert "ready via port bind" in waited.data["summary"]
-    # And it must not overclaim: a bound port says the engine is listening, not
-    # that any mod finished loading.
-    assert "NOT that any mod finished loading" in waited.data["summary"]
+    assert "bound AND the mission module compiled" in waited.data["summary"]
+    # And it must still not overclaim: two engine signals say the engine and its
+    # mission are up, not that any particular mod finished loading.
+    assert "NOT that any particular mod finished loading" in waited.data["summary"]
 
 
 def test_a_declared_ready_line_stays_the_readiness_verdict(tmp_path, monkeypatch):
@@ -1911,3 +1927,122 @@ def test_a_config_that_names_no_mission_is_not_second_guessed(tmp_path, monkeypa
 
     started = tools.server_start(timeout=1)
     assert started.ok, started.error
+
+
+# --- "Ready" that arrives before the scripts do ---
+#
+# Measured on this machine: the port binds about 17 s after spawn and the
+# mission module compiles about 25 s after it. A boot judged ready at the port
+# bind has not compiled a single line of the mod -- and log_verdict, looking at
+# that same moment, sees a log with no errors and says "pass". I was fooled by
+# this myself: four bisect runs in a row reported "the mission module never
+# compiled" when the truth was that the server had been stopped before it got
+# there.
+
+
+def _mission_line() -> str:
+    return "SCRIPT       : Module: Mission; loaded 216x files; 450x classes;\n"
+
+
+def _bootable(tmp_path, monkeypatch, log_text: str, port_bound: bool = True):
+    """A project with no ready line, whose fake server writes `log_text`."""
+    session.reset()
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    profiles = stand / "profiles"
+
+    running = []
+
+    def fake_spawn(cmd, cwd):
+        # Written from inside the spawn so its mtime is newer than the job's
+        # `since`, exactly as a real server's log would be.
+        (profiles / "script_test.log").write_text(log_text, encoding="utf-8")
+        running.append(4321)
+        return 4321
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 6.0)
+    # Empty until the process exists: the same function answers the pre-flight
+    # "is this port already held by somebody else" check, and a port that looks
+    # held before the spawn refuses the boot outright.
+    monkeypatch.setattr(
+        "dayz_mcp.tools.lifecycle.udp_port_holders",
+        lambda port: (list(running) if port_bound else []),
+    )
+    return tools.server_start(timeout=300)
+
+
+def test_a_bound_port_alone_is_not_ready_when_the_mission_never_compiled(tmp_path, monkeypatch):
+    started = _bootable(tmp_path, monkeypatch, "SCRIPT: Module: World; loaded 2156x files;\n")
+    assert started.ok, started.error
+    waited = tools.job_wait(started.data["job_id"], timeout=30)
+
+    assert waited.data["status"] == "failed", waited.data
+    assert "mission" in waited.data["error"].lower()
+    # The distinction that makes the answer actionable: the engine is up, the
+    # mod is not.
+    assert "listening" in waited.data["error"] or "bound" in waited.data["error"]
+
+
+def test_the_boot_is_ready_when_the_port_is_bound_and_the_mission_compiled(tmp_path, monkeypatch):
+    started = _bootable(
+        tmp_path, monkeypatch,
+        "SCRIPT: Module: World; loaded 2156x files;\n" + _mission_line(),
+    )
+    assert started.ok, started.error
+    waited = tools.job_wait(started.data["job_id"], timeout=30)
+
+    assert waited.data["status"] == "done", waited.data
+    summary = waited.data["summary"]
+    assert "mission" in summary.lower()
+    assert "4321" in summary
+
+
+def test_a_server_that_binds_nothing_still_answers_as_it_did(tmp_path, monkeypatch):
+    """Unchanged on purpose: a stand that does not bind this port is unusual,
+    not proof of anything, and this configuration could not judge readiness at
+    all before the port signal existed."""
+    started = _bootable(tmp_path, monkeypatch, "", port_bound=False)
+    waited = tools.job_wait(started.data["job_id"], timeout=30)
+    assert waited.data["status"] == "done", waited.data
+    assert "readiness cannot be detected" in waited.data["summary"]
+
+
+def test_a_previous_boots_log_does_not_answer_for_this_one(tmp_path, monkeypatch):
+    """The stale-evidence failure, one level down from the one log_verdict's
+    `since` already guards: a log left by an earlier run carries the mission
+    module line for ever, and reading it would make every later boot look ready
+    the instant its port bound -- which is the exact defect this signal was
+    added to close."""
+    session.reset()
+    root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    profiles = stand / "profiles"
+    stale = profiles / "script_old.log"
+    stale.write_text("SCRIPT: Module: Mission; loaded 216x files;" + chr(10), encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+
+    running = []
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn",
+                        lambda cmd, cwd: (running.append(4321), 4321)[1])
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 5.0)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: list(running))
+
+    started = tools.server_start(timeout=300)
+    waited = tools.job_wait(started.data["job_id"], timeout=30)
+
+    assert waited.data["status"] == "failed", waited.data
+    assert "mission module never compiled" in waited.data["error"]
