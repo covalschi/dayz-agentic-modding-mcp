@@ -772,6 +772,7 @@ def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
     monkeypatch.setattr(gamepad, "move", lambda x, y, s: ok({}))
     monkeypatch.setattr(gamepad, "look", lambda x, y, s: ok({}))
     monkeypatch.setattr(gamepad, "press", lambda b, s: ok({}))
+    monkeypatch.setattr(gamepad, "trigger", lambda w, v, s: ok({}))
     monkeypatch.setattr(gamepad, "close_pad", lambda: ok({"pad": "closed"}))
     monkeypatch.setattr(client, "_world_command", lambda v, a, t: ok({}))
     monkeypatch.setattr(winui, "geometry", lambda pid: ok({"minimized": False, "foreground": False}))
@@ -788,6 +789,7 @@ def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
         ("client_move", lambda: client.client_move(0, 1, 0)),
         ("client_look", lambda: client.client_look(0, 1, 0)),
         ("client_press", lambda: client.client_press("a")),
+        ("client_trigger", lambda: client.client_trigger("right", 1.0, 0)),
         ("client_chat", lambda: client.client_chat("hi")),
         ("client_verdict", client.client_verdict),
         # Last on purpose: it clears the tracked pid, and everything above

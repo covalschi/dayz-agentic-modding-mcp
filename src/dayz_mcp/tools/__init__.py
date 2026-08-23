@@ -3,6 +3,7 @@ from .bridge import bridge_build, bridge_clear, bridge_status
 from .build import mod_build
 from .client import (
     client_chat, client_look, client_move, client_press, client_shot,
+    client_trigger,
     client_start, client_status, client_stop, client_type, client_verdict,
 )
 from .jobs_api import job_artifacts, job_status, job_wait
@@ -37,7 +38,7 @@ __all__ = [
     "world_set", "world_delete", "world_action", "world_exec",
     "world_entities", "world_time_set", "world_weather_set",
     "client_start", "client_stop", "client_status", "client_shot",
-    "client_move", "client_look", "client_press",
+    "client_move", "client_look", "client_press", "client_trigger",
     "client_chat", "client_type", "client_verdict",
     "knowledge_build", "knowledge_status", "knowledge_find",
     "knowledge_show", "knowledge_overrides", "knowledge_callers",

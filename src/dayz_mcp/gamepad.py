@@ -50,9 +50,13 @@ perform ceremony; what they must never do is create a SECOND device, or hand
 one back at the end of every call and make the game watch a controller
 connect and disconnect all session long.
 
-Analog triggers (LT/RT) are deliberately not here. They are axes, not buttons,
-so they do not fit `press`, and nothing in this phase needs them; adding them
-means adding a `trigger()` of their own, not stretching the button set.
+Analog triggers (LT/RT) are axes, not buttons, so they do not fit `press` and
+were left out of the original button set. They are here now as a `trigger()`
+of their own, because DayZ binds FIRE to RT and RAISE/AIM to LT: with only
+buttons, a pad can walk the character and drive every menu but can never make
+the weapon under test discharge, which is the one act a firearm mod exists to
+produce. Same contract as the sticks -- clamped to [0, 1], bounded hold,
+released in a `finally`.
 """
 from __future__ import annotations
 
@@ -111,6 +115,15 @@ BUTTONS: dict[str, int] = {
     "x": 0x4000,
     "y": 0x8000,
 }
+
+# Analog trigger travel, 0.0 at rest to 1.0 fully depressed. The XInput ABI
+# carries a trigger as a byte, but vgamepad's float API takes this range and
+# does the conversion, so this module speaks the same units as the sticks.
+TRIGGER_LIMIT = 1.0
+
+# The closed trigger name set, for the same reason BUTTONS is closed: a caller
+# writes trigger("right") and never imports anything from vgamepad.
+TRIGGERS: tuple[str, ...] = ("left", "right")
 
 # The one act in this phase that only the machine owner can perform, so the
 # refusal has to be a set of instructions rather than a diagnosis. Both halves
@@ -573,6 +586,70 @@ def press(button, seconds=DEFAULT_PRESS_SECONDS) -> Result:
         held_for,
     )
     data = {"button": name, "seconds": held_for, "held": round(measured, 3)}
+    return _verdict(_with_open_notice(data, created), failure, release_error)
+
+
+_TRIGGER_HINT = (
+    f"value is trigger travel between 0 and {TRIGGER_LIMIT}: 0 is at rest, 1 is "
+    f"fully depressed. Triggers are named {' and '.join(TRIGGERS)}."
+)
+
+
+def trigger_names() -> list[str]:
+    """Every accepted `trigger` name. The tool layer shows this to the agent."""
+    return list(TRIGGERS)
+
+
+def trigger(which, value=TRIGGER_LIMIT, seconds=DEFAULT_PRESS_SECONDS) -> Result:
+    """Hold one analog trigger at `value` for `seconds`, then let it go.
+
+    In DayZ this is the only path to FIRE (right trigger) and to RAISE/AIM
+    (left trigger). The travel is analog on purpose: a light pull is a
+    different input from a full one, and a weapon that only ever sees 1.0
+    cannot be tested for anything in between.
+
+    Same guarantees as the sticks: the value is clamped rather than refused
+    (and the clamp is reported), the hold is bounded by MAX_HOLD_SECONDS, and
+    the trigger is back at rest when this returns on every exit path --
+    including exceptions. A trigger left down is a weapon firing forever with
+    nobody watching, which is the sharper form of the stuck-stick failure this
+    module is built around.
+    """
+    if not isinstance(which, str):
+        return fail(f"trigger must be one of the names, got {which!r}", _TRIGGER_HINT)
+    name = which.strip().lower()
+    if name not in TRIGGERS:
+        # Before `_acquire`, exactly as `press` does it: a mistyped name is a
+        # complaint about the name, and it must work on a machine with no
+        # driver at all.
+        return fail(f"unknown trigger {which!r}", _TRIGGER_HINT)
+    amount, complaint = _number(value, "value")
+    if complaint:
+        return fail(complaint, _TRIGGER_HINT)
+    held_for, complaint = _seconds(seconds)
+    if complaint:
+        return fail(complaint, _CEILING_HINT)
+
+    clamped_value = max(0.0, min(TRIGGER_LIMIT, amount))
+    clamped = clamped_value != amount
+
+    pad, refusal, created = _acquire()
+    if refusal is not None:
+        return refusal
+    apply = pad.left_trigger_float if name == "left" else pad.right_trigger_float
+    measured, failure, release_error = _run_hold(
+        pad,
+        lambda: apply(clamped_value),
+        lambda: apply(0.0),
+        held_for,
+    )
+    data = {
+        "trigger": name,
+        "value": clamped_value,
+        "clamped": clamped,
+        "seconds": held_for,
+        "held": round(measured, 3),
+    }
     return _verdict(_with_open_notice(data, created), failure, release_error)
 
 

@@ -17,11 +17,14 @@ from dayz_mcp import gamepad
 from dayz_mcp.gamepad import (
     BUTTONS,
     MAX_HOLD_SECONDS,
+    TRIGGER_LIMIT,
     button_names,
     look,
     move,
     neutral,
     press,
+    trigger,
+    trigger_names,
 )
 
 
@@ -38,6 +41,7 @@ class FakePad:
 
     def __init__(self):
         self.lx = self.ly = self.rx = self.ry = 0.0
+        self.lt = self.rt = 0.0
         self.buttons = 0
         self.updates: list[tuple] = []
 
@@ -47,6 +51,12 @@ class FakePad:
     def right_joystick_float(self, x_value_float, y_value_float):
         self.rx, self.ry = x_value_float, y_value_float
 
+    def left_trigger_float(self, value_float):
+        self.lt = value_float
+
+    def right_trigger_float(self, value_float):
+        self.rt = value_float
+
     def press_button(self, button):
         self.buttons |= int(button)
 
@@ -55,10 +65,15 @@ class FakePad:
 
     def reset(self):
         self.lx = self.ly = self.rx = self.ry = 0.0
+        self.lt = self.rt = 0.0
         self.buttons = 0
 
     def update(self):
-        self.updates.append((self.lx, self.ly, self.rx, self.ry, self.buttons))
+        # The triggers go on the END so every existing positional assertion in
+        # this file keeps meaning what it did before the axes were added.
+        self.updates.append(
+            (self.lx, self.ly, self.rx, self.ry, self.buttons, self.lt, self.rt)
+        )
 
     # Convenience for the assertions below, not part of the vgamepad API.
     @property
@@ -66,7 +81,7 @@ class FakePad:
         return self.updates[-1]
 
 
-NEUTRAL = (0.0, 0.0, 0.0, 0.0, 0)
+NEUTRAL = (0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0)
 
 
 @pytest.fixture
@@ -100,6 +115,7 @@ def _every_entry_point():
         ("move", lambda: move(0.0, 1.0, 0.1)),
         ("look", lambda: look(1.0, 0.0, 0.1)),
         ("press", lambda: press("back", 0.1)),
+        ("trigger", lambda: trigger("right", 1.0, 0.1)),
     ]
 
 
@@ -256,7 +272,7 @@ def test_the_requested_duration_is_the_one_slept(pad, slept):
 
 def test_a_normal_hold_ends_neutral(pad):
     move(0.0, 1.0, 0.1)
-    assert pad.updates[0] == (0.0, 1.0, 0.0, 0.0, 0)
+    assert pad.updates[0] == (0.0, 1.0, 0.0, 0.0, 0, 0.0, 0.0)
     assert pad.last == NEUTRAL
 
 
@@ -356,13 +372,13 @@ def test_the_release_is_surgical_so_holds_can_be_combined(pad):
     pad.press_button(BUTTONS["a"])
     pad.right_joystick_float(0.5, 0.25)
     move(0.0, 1.0, 0.1)
-    assert pad.last == (0.0, 0.0, 0.5, 0.25, BUTTONS["a"])
+    assert pad.last == (0.0, 0.0, 0.5, 0.25, BUTTONS["a"], 0.0, 0.0)
 
 
 def test_releasing_a_button_leaves_the_sticks_alone(pad):
     pad.left_joystick_float(0.0, 1.0)
     press("a", 0.1)
-    assert pad.last == (0.0, 1.0, 0.0, 0.0, 0)
+    assert pad.last == (0.0, 1.0, 0.0, 0.0, 0, 0.0, 0.0)
 
 
 def test_the_atexit_safety_net_releases_on_interpreter_shutdown(tmp_path):
@@ -498,6 +514,114 @@ def test_our_button_bits_match_the_ones_vgamepad_uses():
     for name, bit in BUTTONS.items():
         member = getattr(vg.XUSB_BUTTON, "XUSB_GAMEPAD_" + name.upper())
         assert bit == member.value, name
+
+
+# --------------------------------------------------------------------------
+# Triggers: analog, and the only way to make a weapon fire
+# --------------------------------------------------------------------------
+
+def test_the_trigger_set_is_closed_and_documented():
+    """Same contract as the buttons: a caller writes trigger("right") and never
+    imports anything from vgamepad, so the two names are part of this module.
+    """
+    assert trigger_names() == ["left", "right"]
+
+
+def test_an_unknown_trigger_is_refused_with_the_valid_names(pad):
+    result = trigger("middle", 1.0, 0.1)
+    assert result.ok is False
+    assert "left" in result.hint and "right" in result.hint
+    assert pad.updates == []
+
+
+def test_an_unknown_trigger_is_refused_without_a_driver(monkeypatch):
+    """The name check is pure and happens first, exactly as it does for a
+    button: the message is about the name, not about a driver that is beside
+    the point.
+    """
+    gamepad.close_pad()
+
+    def never():
+        raise AssertionError("a bad trigger name reached the driver")
+
+    monkeypatch.setattr(gamepad, "_new_pad", never)
+    result = trigger("middle", 1.0, 0.1)
+    assert result.ok is False
+    assert "middle" in result.error
+
+
+def test_trigger_names_are_case_insensitive_and_forgiving_of_spacing(pad):
+    assert trigger("  RIGHT ", 1.0, 0.1).ok is True
+    assert pad.updates[0][6] == TRIGGER_LIMIT
+
+
+def test_a_trigger_engages_then_releases_exactly_that_axis(pad):
+    """The release is the property this module is built around, and a trigger
+    is its sharpest case: one left down is a weapon firing forever with nobody
+    watching.
+    """
+    trigger("left", 1.0, 0.1)
+    assert pad.updates[0][5] == 1.0
+    assert pad.last[5] == 0.0
+    assert pad.last == NEUTRAL
+
+
+def test_the_two_triggers_are_independent(pad):
+    trigger("right", 0.5, 0.1)
+    assert pad.updates[0][5] == 0.0
+    assert pad.updates[0][6] == 0.5
+
+
+def test_trigger_travel_is_analog_and_passes_through_untouched(pad):
+    """A light pull is a different input from a full one -- that is the whole
+    reason this is an axis and not a button -- so a value in range must reach
+    the device as given.
+    """
+    result = trigger("right", 0.25, 0.1)
+    assert result.data["value"] == 0.25
+    assert result.data["clamped"] is False
+    assert pad.updates[0][6] == 0.25
+
+
+def test_out_of_range_trigger_values_are_clamped_and_reported(pad):
+    """Clamped rather than refused, for the same reason a stick is: hardware
+    saturates at its own edge. A trigger has no negative half, so anything
+    below zero is at rest.
+    """
+    high = trigger("right", 5.0, 0.1)
+    assert (high.data["value"], high.data["clamped"]) == (TRIGGER_LIMIT, True)
+    low = trigger("right", -2.0, 0.1)
+    assert (low.data["value"], low.data["clamped"]) == (0.0, True)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "hard", None])
+def test_a_nonsensical_trigger_value_is_refused_before_the_pad_is_touched(pad, bad):
+    result = trigger("right", bad, 0.1)
+    assert result.ok is False
+    assert pad.updates == []
+
+
+def test_the_ceiling_covers_triggers_too(pad):
+    result = trigger("right", 1.0, MAX_HOLD_SECONDS + 0.1)
+    assert result.ok is False
+    assert pad.updates == []
+
+
+def test_a_trigger_defaults_to_a_tap(pad, slept):
+    """A tap is one shot in semi-auto, which is the common case; a hold is what
+    tells a full-auto mode from a semi-auto one, and that is asked for.
+    """
+    assert trigger("right").ok is True
+    assert slept == [gamepad.DEFAULT_PRESS_SECONDS]
+
+
+def test_our_trigger_methods_are_the_ones_vgamepad_offers():
+    """The float API is called by name from this module, so a rename upstream
+    would break it silently. Skipped, not failed, where vgamepad is absent.
+    """
+    vg = pytest.importorskip("vgamepad")
+    for name in ("left_trigger_float", "right_trigger_float"):
+        assert callable(getattr(vg.VX360Gamepad, name)), name
 
 
 # --------------------------------------------------------------------------
