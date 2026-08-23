@@ -105,6 +105,7 @@ in its notes.
 | `client_move(x, y, seconds)` | walk the character with the left stick. Analog, and the only tract that moves the character at all. No focus needed |
 | `client_look(x, y, seconds)` | turn the camera with the right stick. No focus needed |
 | `client_press(button, seconds)` | one gamepad button, from a closed table of fourteen names. No focus needed |
+| `client_trigger(which, value, seconds)` | pull an **analog** trigger — `"left"` or `"right"`, travel in `[0, 1]`. This is how the weapon fires: DayZ binds FIRE to the right trigger and RAISE/AIM to the left, and neither is a button. No focus needed |
 | `client_chat(text, color)` | put a line in chat — delivered **server-side by the bridge**, so no keyboard, no window, no focus |
 | `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
 | `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |

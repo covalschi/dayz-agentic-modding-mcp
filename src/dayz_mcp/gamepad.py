@@ -654,7 +654,13 @@ def trigger(which, value=TRIGGER_LIMIT, seconds=DEFAULT_PRESS_SECONDS) -> Result
 
 
 def neutral() -> Result:
-    """Force everything on the pad back to rest: both sticks, every button.
+    """Force everything on the pad back to rest: both sticks, every button, and
+    both analog triggers.
+
+    All three, because `pad.reset()` puts the whole device at rest and the
+    escape hatch is worth nothing if its description makes a reader think one
+    kind of held input is outside it. A trigger is the one this matters most
+    for: left down, it is a weapon firing forever with nobody watching.
 
     The manual escape hatch, for when something is held and nobody knows what.
     It does not CREATE a device -- nothing can be engaged on a pad that was

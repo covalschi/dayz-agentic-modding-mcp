@@ -961,3 +961,18 @@ def test_moving_names_it_too_when_the_move_is_what_plugged_it_in(pad):
     moved = gamepad.move(0.0, 0.0, 0.01)
     assert moved.data["opened"] is True
     assert "ms-gamebar" in moved.data["windows_note"]
+
+
+def test_neutral_puts_the_triggers_back_too(pad):
+    """`neutral` always did -- it calls the device's own reset -- but its
+    description said "both sticks, every button", and an escape hatch nobody
+    believes covers a held trigger is an escape hatch nobody reaches for.
+    """
+    # Through the module, so the device is actually open: `neutral` on a pad
+    # that was never created is a no-op by design, and a test that skipped this
+    # would pass without touching the thing it is about.
+    assert gamepad.open_pad().ok is True
+    pad.left_trigger_float(1.0)
+    pad.right_trigger_float(0.5)
+    assert gamepad.neutral().ok is True
+    assert (pad.lt, pad.rt) == (0.0, 0.0)
