@@ -135,6 +135,32 @@ PLUG_IN_NOTICE = (
     "is not left with a phantom controller plugged in."
 )
 
+#: The other thing WINDOWS does when a controller appears, and the reason this
+#: is worth a sentence rather than a shrug: it tries to open Xbox Game Bar. On a
+#: machine that HAS Game Bar nothing is seen. On one that does not -- an LTSC or
+#: Server install, or a machine somebody stripped the Xbox packages from -- the
+#: shell cannot resolve the `ms-gamebar` URI and puts up a dialog offering to
+#: search the Microsoft Store, over and over, once per attach.
+#:
+#: Nothing on this side can prevent it: the shell reacts to the device arriving,
+#: not to anything this server sends, and the same dialog appears for a physical
+#: Xbox pad on the same machine. So it is NAMED instead, with the remedy, on the
+#: one call that plugs the device in -- because an unexplained Windows dialog
+#: during an automated run reads as this tool malfunctioning.
+GAME_BAR_NOTICE = (
+    "If Windows puts up \"Get an app to open this ms-gamebar link\", that is the "
+    "shell reacting to a controller appearing, not this server failing -- it "
+    "happens for a physical Xbox pad too, on any machine without Xbox Game Bar "
+    "installed (LTSC, Server, or the Xbox packages removed). Two remedies, both "
+    "the machine owner's to apply and both reversible: turn off Settings > Gaming "
+    "> Xbox Game Bar > \"Allow your controller to open Xbox Game Bar\" (registry: "
+    "HKCU\\Software\\Microsoft\\GameBar\\UseNexusForGameBarEnabled = 0), or give the "
+    "URI a handler that does nothing, which is what silences it when Game Bar is "
+    "not installed at all: create HKCU\\Software\\Classes\\ms-gamebar (and "
+    "ms-gamebarservices, ms-gamingoverlay) each with a URL Protocol value and a "
+    "shell\\open\\command default pointing at a no-op."
+)
+
 # One device per SESSION, not per call. Creating a virtual device per call is
 # slow, churns a kernel driver, and makes the game watch a controller connect
 # and disconnect over and over. The lock covers this reference, the timestamps
@@ -301,6 +327,7 @@ def _device_data(created: bool) -> dict:
     }
     if created:
         data["side_effect"] = PLUG_IN_NOTICE
+        data["windows_note"] = GAME_BAR_NOTICE
     return data
 
 
@@ -466,6 +493,7 @@ def _with_open_notice(data: dict, created: bool) -> dict:
     data["opened"] = created
     if created:
         data["side_effect"] = PLUG_IN_NOTICE
+        data["windows_note"] = GAME_BAR_NOTICE
     return data
 
 

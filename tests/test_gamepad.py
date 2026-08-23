@@ -806,3 +806,34 @@ def test_a_real_pad_accepts_neutral_reports(monkeypatch):
     assert closed.data == {"pad": "closed", "was_open": True, "released": True,
                            "open_seconds": closed.data["open_seconds"]}
     assert gamepad.status().data["pad"] == "closed"
+
+
+def test_the_windows_game_bar_dialog_is_named_where_it_will_be_seen(pad):
+    """Reported from another machine: Windows kept putting up "Get an app to
+    open this ms-gamebar link" while the MCP was in use.
+
+    Nothing on this side causes it and nothing on this side can prevent it --
+    the shell reacts to a controller ARRIVING, and does the same for a physical
+    Xbox pad on a machine without Game Bar installed. But an unexplained Windows
+    dialog during an automated run reads as this tool malfunctioning, so the one
+    call that plugs the device in says what it is and how to silence it.
+    """
+    first = gamepad.open_pad()
+    note = first.data["windows_note"]
+    assert "ms-gamebar" in note
+    # A remedy, not just a diagnosis -- and both of them belong to the machine's
+    # owner, so the answer has to be specific enough to act on without guessing.
+    assert "UseNexusForGameBarEnabled" in note
+    assert "Xbox Game Bar" in note
+
+    # Same rule as the plug-in notice: nothing was plugged in the second time,
+    # so nothing is said the second time.
+    assert "windows_note" not in gamepad.open_pad().data
+
+
+def test_moving_names_it_too_when_the_move_is_what_plugged_it_in(pad):
+    """A caller that never touched open_pad still meets the dialog."""
+    gamepad.close_pad()
+    moved = gamepad.move(0.0, 0.0, 0.01)
+    assert moved.data["opened"] is True
+    assert "ms-gamebar" in moved.data["windows_note"]
