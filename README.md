@@ -125,6 +125,17 @@ in its notes.
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
 
+**Windows and the `ms-gamebar` dialog.** The first time a virtual controller is
+attached, Windows tries to open Xbox Game Bar. On a machine that has it, nothing is
+seen; on one that does not — LTSC, Server, or the Xbox packages removed — the shell
+cannot resolve the URI and puts up *"Get an app to open this ms-gamebar link"*, once
+per attach. Nothing here causes it and nothing here can prevent it: the shell reacts
+to the device arriving, and does the same for a physical Xbox pad. So the call that
+plugs the pad in says so, with two remedies the machine's owner can apply — turning
+off *Settings → Gaming → Xbox Game Bar → "Allow your controller to open Xbox Game
+Bar"* (`HKCU\Software\Microsoft\GameBar\UseNexusForGameBarEnabled = 0`), or giving
+the URI a handler that does nothing.
+
 **Signatures, and why the engine's own message sends you the wrong way.** Under
 `verifySignatures = 2` a stand refuses every client with code 118 and *"missing
 `dtain.pbo`"* — a vanilla file name, with no mention of signatures at all. The
