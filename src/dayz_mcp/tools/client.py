@@ -746,6 +746,29 @@ def client_press(button: str, seconds: float = gamepad.DEFAULT_PRESS_SECONDS) ->
     return gamepad.press(button, seconds)
 
 
+def client_trigger(which: str, value: float = 1.0,
+                   seconds: float = gamepad.DEFAULT_PRESS_SECONDS) -> Result:
+    """Pull one ANALOG trigger. NO FOCUS NEEDED. This is how the weapon fires.
+
+    DayZ binds the right trigger to FIRE and the left trigger to RAISE/AIM, and
+    neither is reachable through `client_press`: triggers are axes, not
+    buttons. Without this, a pad can walk the character and drive every menu
+    but can never make the weapon under test discharge -- so a firearm mod's
+    fire animation, recoil, muzzle flash and ejection could not be observed at
+    all.
+
+    `which` is "left" or "right"; `value` is travel in [0, 1] (clamped, and the
+    clamp is reported), `seconds` how long to hold it. A tap is a single shot
+    in semi-auto; a hold of a second or two is what distinguishes a full-auto
+    mode from a semi-auto one. The trigger is back at rest when this returns on
+    every exit path.
+    """
+    _pid, refusal = _require_live_client()
+    if refusal:
+        return refusal
+    return gamepad.trigger(which, value, seconds)
+
+
 # ---------------------------------------------------------------------------
 # text -- two different cases, and the server's job is to say which is which
 # ---------------------------------------------------------------------------

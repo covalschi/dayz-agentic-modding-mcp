@@ -69,6 +69,7 @@ for _fn in (
     tools.client_start, tools.client_status, tools.client_stop,
     tools.client_shot,
     tools.client_move, tools.client_look, tools.client_press,
+    tools.client_trigger,
     tools.client_chat, tools.client_type,
     tools.client_verdict,
     # The index. Build first, then ask -- and knowledge_status stands between
