@@ -88,7 +88,7 @@ in its notes.
 | `bridge_clear(force, probe_window)` | discard the command stuck in the mailbox, naming what it threw away. Refuses while the bridge looks alive unless `force=True` |
 | `world_ready(timeout)` | wait until the bridge inside the game is actually claiming commands. Call it once after the boot job finishes, before the first world command — see "server ready is not bridge ready" below |
 | `world_state(class_name, radius, pos)` | snapshot of the world from the bridge's once-a-second publish: players, position, health, hands. Free with no arguments; with `class_name` it also counts objects of that class nearby (one command round trip) |
-| `world_spawn(class_name, where, pos, quantity)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, or in their inventory |
+| `world_spawn(class_name, where, pos, quantity, slot)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, in their inventory, or attached to the item they are holding (`where="attachment"`, optional `slot` naming the CfgSlots slot) |
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |

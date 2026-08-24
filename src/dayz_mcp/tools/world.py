@@ -391,15 +391,22 @@ def world_state(class_name: str = "", radius: float = 30.0, pos: str = "",
 
 
 def world_spawn(class_name: str, where: str = "ground", pos: str = "",
-                quantity: float | None = None,
+                quantity: float | None = None, slot: str = "",
                 timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
-    """Create an item: on the ground, in the player's hands, or in their
-    inventory.
+    """Create an item: on the ground, in the player's hands, in their
+    inventory, or attached to the item they are holding.
 
-    `where` is "ground" (default), "hands" or "inventory". A ground spawn takes
-    `pos` as "x y z" and falls back to the player's own position when it is
-    omitted; with neither a position nor a player, the mod says so in words
-    rather than doing nothing.
+    `where` is "ground" (default), "hands", "inventory" or "attachment". A
+    ground spawn takes `pos` as "x y z" and falls back to the player's own
+    position when it is omitted; with neither a position nor a player, the mod
+    says so in words rather than doing nothing.
+
+    "attachment" hangs the new item on whatever is IN HANDS, which is the only
+    way from here to reach a battery slot, an optic, a module bay or a data
+    carrier -- in game those are a drag inside the inventory screen. `slot`
+    names the CfgSlots slot (e.g. "BatteryD") when a host has more than one
+    that would take the item; left empty the engine picks the first that fits.
+    Giving `slot` with any other `where` is refused rather than ignored.
 
     Ground spawns are created with ECE_PLACE_ON_SURFACE **and ECE_NOLIFETIME**.
     Without the second flag the item lives by the lifetime in its own config and
@@ -413,6 +420,7 @@ def world_spawn(class_name: str, where: str = "ground", pos: str = "",
         "where": where,
         "pos": pos or None,
         "quantity": quantity,
+        "slot": slot or None,
     }), timeout)
 
 

@@ -799,13 +799,20 @@ class DZMCP_BridgeCore
         return true;
     }
 
-    // spawn: class (required), where = ground|hands|inventory, pos, quantity.
+    // spawn: class (required), where = ground|hands|inventory|attachment,
+    // pos, quantity, slot.
     //
     // Ground spawning falls back to the player's own position when no pos is
     // given, and refuses in words when there is neither.
+    //
+    // "attachment" hangs the new item on the item ALREADY IN HANDS. Without it
+    // a whole family of mods is untestable from here: batteries, optics,
+    // module bays, data carriers -- everything that only comes alive once
+    // something is plugged into it. Attaching is otherwise a drag inside the
+    // inventory screen, which is not something a caller can ask for.
     protected void VerbSpawn(map<string, string> args)
     {
-        if (RefuseUnknownArgs(args, "|class|where|pos|quantity|", "class, where, pos, quantity"))
+        if (RefuseUnknownArgs(args, "|class|where|pos|quantity|slot|", "class, where, pos, quantity, slot"))
             return;
 
         string className = ArgOr(args, "class", "");
@@ -816,9 +823,15 @@ class DZMCP_BridgeCore
         }
 
         string where = ArgOr(args, "where", "ground");
-        if (where != "ground" && where != "hands" && where != "inventory")
+        if (where != "ground" && where != "hands" && where != "inventory" && where != "attachment")
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "spawn: where must be ground, hands or inventory, not '" + where + "'");
+            FinishCommand(DZMCP_STATUS_FAILED, "spawn: where must be ground, hands, inventory or attachment, not '" + where + "'");
+            return;
+        }
+
+        if (HasArg(args, "slot") && where != "attachment")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "spawn: slot only means something with where=attachment, and it was given with where=" + where);
             return;
         }
 
@@ -832,6 +845,13 @@ class DZMCP_BridgeCore
             return;
 
         Man player = DZMCP_World.FirstPlayer();
+
+        if (where == "attachment")
+        {
+            SpawnAsAttachment(player, className, args);
+            return;
+        }
+
         EntityAI created;
         if (where == "hands")
             created = DZMCP_World.SpawnInHands(player, className);
@@ -846,6 +866,57 @@ class DZMCP_BridgeCore
 
         ApplyQuantity(created, args);
         FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " in " + where);
+    }
+
+    // The host is whatever is in hands. That is the one item a caller can name
+    // without a second lookup, and it is the item they were already working on
+    // if they got here.
+    protected void SpawnAsAttachment(Man player, string className, map<string, string> args)
+    {
+        EntityAI host = player.GetEntityInHands();
+        if (!host)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "spawn where=attachment hangs the new item on the one in hands, and the hands are empty -- spawn the host with where=hands first");
+            return;
+        }
+
+        string slotName = ArgOr(args, "slot", "");
+        EntityAI created;
+
+        if (slotName == "")
+        {
+            created = host.GetInventory().CreateAttachment(className);
+        }
+        else
+        {
+            int slotId = InventorySlots.GetSlotIdFromString(slotName);
+            if (slotId == InventorySlots.INVALID)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "no slot is named '" + slotName + "' -- the name must be the one from CfgSlots, like BatteryD, not the display name");
+                return;
+            }
+            created = host.GetInventory().CreateAttachmentEx(className, slotId);
+        }
+
+        if (!created)
+        {
+            // Three quite different causes, and the caller cannot see which
+            // from here, so name all three rather than pick one.
+            string why = "the engine attached nothing to " + host.GetType();
+            why += ": class '" + className + "' may not exist, the host may have no slot that fits it";
+            if (slotName != "")
+                why += " (asked for slot " + slotName + ")";
+            why += ", or that slot may already be taken";
+            FinishCommand(DZMCP_STATUS_FAILED, why);
+            return;
+        }
+
+        ApplyQuantity(created, args);
+
+        string detail = "attached " + created.GetType() + " to " + host.GetType();
+        if (slotName != "")
+            detail += " in slot " + slotName;
+        FinishCommand(DZMCP_STATUS_DONE, detail);
     }
 
     protected void SpawnOnGround(string className, map<string, string> args)
