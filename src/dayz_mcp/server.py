@@ -70,7 +70,7 @@ for _fn in (
     tools.client_shot,
     tools.client_move, tools.client_look, tools.client_press,
     tools.client_trigger,
-    tools.client_chat, tools.client_type,
+    tools.client_chat, tools.client_type, tools.client_key,
     tools.client_verdict,
     # The index. Build first, then ask -- and knowledge_status stands between
     # them because it is the one that says whether an answer can be trusted

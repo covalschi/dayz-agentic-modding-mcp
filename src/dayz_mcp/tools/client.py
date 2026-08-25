@@ -923,6 +923,36 @@ def client_type(text: str, submit: bool = False) -> Result:
     return ok(data)
 
 
+def client_key(name: str, hold_ms: int = 0) -> Result:
+    """Press -- or HOLD -- one named key in the client.
+
+    REQUIRES THE ACTIVE WINDOW, and takes it, exactly like `client_type`.
+
+    What this reaches that nothing else does is a key a mod polls rather than
+    reads as text: push-to-talk, a hold-to-open wheel, a modifier. `hold_ms`
+    keeps the key down for that long, because a tap and a hold are different
+    events -- a mod that samples the key once a frame can miss a press and a
+    release that happen inside the same frame, and then the feature looks
+    broken when it is the test that was too fast.
+
+    For letters and words use `client_type`; for movement and menus use the
+    gamepad, which needs no foreground at all.
+    """
+    running = session.client()
+    if not running.ok:
+        return running
+    pid = running.data["pid"]
+
+    pressed = winui.press_key(pid, name, hold_ms)
+    if not pressed.ok:
+        return pressed
+
+    data = dict(pressed.data)
+    data["foreground_taken"] = True
+    data["side_effect"] = FOREGROUND_NOTICE
+    return ok(data)
+
+
 # ---------------------------------------------------------------------------
 # the client's own verdict
 # ---------------------------------------------------------------------------

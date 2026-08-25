@@ -126,6 +126,12 @@ NAMED_KEYS = {
     "right": (0x4D, True),
     "up": (0x48, True),
     "down": (0x50, True),
+    # Modifier keys, for mods that hold one rather than tap it. Caps Lock is
+    # DayZ's own push-to-talk, which is why it is here at all.
+    "capslock": (0x3A, False),
+    "lshift": (0x2A, False),
+    "lctrl": (0x1D, False),
+    "lalt": (0x38, False),
 }
 
 _PAUSE_MODE = re.compile(r"(?m)^\s*pauseMode\s*=\s*(-?\d+)")
@@ -883,20 +889,38 @@ def type_text(pid: int, text: str) -> Result:
     return ok({"typed": text, "characters": len(text)})
 
 
-def press_key(pid: int, name: str) -> Result:
-    """Press one named key in the client. Requires -- and verifies -- the foreground."""
+def press_key(pid: int, name: str, hold_ms: int = 0) -> Result:
+    """Press one named key in the client. Requires -- and verifies -- the foreground.
+
+    `hold_ms` holds the key down for that long before releasing it. A tap is
+    not the same event as a hold: a mod that polls the key state once a frame
+    can miss a press and release that happen inside one frame, and push-to-talk
+    is exactly that kind of mod.
+    """
     key = name.strip().lower()
     if key not in NAMED_KEYS:
         return fail(
             f"unknown key {name!r}",
             hint="known keys: " + ", ".join(sorted(NAMED_KEYS)),
         )
+    if hold_ms < 0 or hold_ms > 10_000:
+        return fail(
+            f"hold_ms {hold_ms} is outside 0..10000",
+            hint="a hold longer than ten seconds is almost certainly a mistake",
+        )
     refusal = _require_focus(pid)
     if refusal:
         return refusal
+
     scan, extended = NAMED_KEYS[key]
-    _tap(scan, extended=extended)
-    return ok({"key": key})
+    if hold_ms <= 0:
+        _tap(scan, extended=extended)
+        return ok({"key": key, "held_ms": 0})
+
+    _key_event(scan, up=False, extended=extended)
+    time.sleep(hold_ms / 1000.0)
+    _key_event(scan, up=True, extended=extended)
+    return ok({"key": key, "held_ms": hold_ms})
 
 
 def click(pid: int, x: int, y: int) -> Result:
