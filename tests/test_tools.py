@@ -138,7 +138,7 @@ def test_build_runs_as_a_job_and_reports_packing_results(tmp_path, monkeypatch):
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False, manifest_dir=None: [
             PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
         ],
     )
@@ -155,7 +155,7 @@ def test_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch
     tools.project_open(str(root))
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [PackResult(name="MyMod", error="stale pbo")],
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False, manifest_dir=None: [PackResult(name="MyMod", error="stale pbo")],
     )
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
     job_id = tools.mod_build().data["job_id"]
@@ -723,7 +723,8 @@ def test_mod_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, m
     tools.project_open(str(root))
     monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
 
-    def boom(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+    def boom(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False,
+             manifest_dir=None):
         raise RuntimeError("simulated packer crash")
 
     monkeypatch.setattr("dayz_mcp.tools.build.pack_all", boom)
@@ -770,7 +771,8 @@ def test_mod_build_refuses_a_second_build_while_one_is_running(tmp_path, monkeyp
     started = threading.Event()
     release = threading.Event()
 
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False,
+                      manifest_dir=None):
         started.set()
         assert release.wait(timeout=10), "test never released the worker"
         return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
@@ -808,7 +810,7 @@ def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
     note = "private key present but signer executable not found at C:/tools/Bin/DsUtils/DSSignFile.exe"
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False, manifest_dir=None: [
             PackResult(
                 name="MyMod",
                 pbo=str(root / "@MyMod/addons/MyMod.pbo"),
@@ -824,6 +826,33 @@ def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
     assert waited.data["status"] == "done"
     assert "MyMod" in waited.data["summary"]
     assert note in waited.data["summary"]
+
+
+def test_mod_build_records_pack_manifests_next_to_the_job_store(tmp_path, monkeypatch):
+    """mod_build must hand the packer a manifest directory under the server's
+    own bookkeeping (<root>/.dayz-mcp, beside the job store) -- never inside
+    the mod tree, which is packed into the published artifact."""
+    session.reset()
+    root = make_project(tmp_path)
+    tools.project_open(str(root))
+    seen = {}
+
+    def fake_pack_all(names, root_, tools_root, log_dir, exclude=None, sources=None, stage=False,
+                      manifest_dir=None):
+        seen["manifest_dir"] = manifest_dir
+        return [PackResult(name="MyMod", pbo=str(root_ / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
+
+    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", fake_pack_all)
+    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
+
+    waited = tools.job_wait(tools.mod_build().data["job_id"], timeout=30)
+
+    assert waited.data["status"] == "done"
+    assert seen.get("manifest_dir") is not None, "mod_build did not ask for manifest tracking"
+    manifest_dir = Path(seen["manifest_dir"]).resolve()
+    bookkeeping = (root / ".dayz-mcp").resolve()
+    assert bookkeeping in [manifest_dir, *manifest_dir.parents]
+    assert (root / "MyMod").resolve() not in manifest_dir.parents
 
 
 # --- Review round 1, Finding 3 (Important): tools must not run inline on the
@@ -1089,7 +1118,8 @@ def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path
     started = threading.Event()
     release = threading.Event()
 
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False,
+                      manifest_dir=None):
         started.set()
         assert release.wait(timeout=10), "test never released the worker"
         return [
@@ -1149,7 +1179,8 @@ def test_switching_away_and_back_does_not_mark_a_running_job_as_lost(tmp_path, m
     started = threading.Event()
     release = threading.Event()
 
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
+    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False,
+                      manifest_dir=None):
         started.set()
         assert release.wait(timeout=10), "test never released the worker"
         return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]

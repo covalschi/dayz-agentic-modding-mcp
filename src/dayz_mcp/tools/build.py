@@ -93,6 +93,10 @@ def mod_build(skip_lint: bool = False) -> Result:
             results = pack_all(
                 prof.build.mods, prof.root, Path(tools_root), log_dir,
                 exclude=prof.build.exclude, sources=sources, stage=prof.build.stage,
+                # Next to the job bookkeeping (store.root is <root>/.dayz-mcp/jobs),
+                # never in the mod tree: the manifest is this server's own record
+                # of what the last pack saw, and the mod tree is what gets packed.
+                manifest_dir=store.root.parent / "pack-manifests",
             )
             for log in sorted(log_dir.glob("pack-*.log")):
                 store.add_artifact(job.id, log)

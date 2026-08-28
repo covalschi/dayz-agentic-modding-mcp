@@ -624,6 +624,16 @@ it; they do not replace it.
   not a real packing failure -- rebuild and it will pass. A mature tool in
   this space moved to a content hash for exactly this reason; that is future
   work here, not done in this phase (see `packer.py`, `pack_one`).
+
+  What mtimes can never show -- a file **moved** with its timestamp preserved
+  (`mv` between script layers) or **deleted** outright, either of which
+  FileBank's own freshness check silently keeps the old pbo over -- is
+  covered separately: `mod_build` records a manifest of source paths and
+  sizes under `.dayz-mcp/pack-manifests/` at every successful pack, and when
+  the set no longer matches (or there is no record to check against) it
+  deletes the destination pbo first so FileBank has to rewrite it. If that
+  delete is blocked, usually by a running server, the build fails with the
+  reason instead of shipping the old layout.
 * **A mod source folder is packed whole.** `mod_build` refuses to pack a mod
   whose source directory contains anything matching `build.exclude` (the
   seven-pattern default is listed above) rather than silently shipping it

@@ -1362,6 +1362,245 @@ def test_pack_one_removes_a_stale_signature_when_the_signer_is_missing(tmp_path,
     assert not stale.exists()
 
 
+# --- Requirement: the freshness story must also see the SET of source paths,
+# not just their mtimes. Two real misses (openzone-pda, 2026-08-28): a file
+# MOVED between script layers with `mv` keeps its mtime, and a file DELETED
+# leaves every remaining mtime untouched -- in both cases every source looks
+# older than the pbo, FileBank's internal staleness check silently skips the
+# rewrite, the mtime stale-guard sees nothing wrong, and the build reports
+# success over a pbo that still holds the old layout. The fix records a
+# manifest of relative paths + sizes next to the job bookkeeping and, when it
+# changes, deletes the destination pbo first so FileBank cannot skip. ---
+
+
+def _backdated_two_file_source(root: Path, name: str = "MyMod") -> Path:
+    """A mod source whose every file mtime is far in the past -- the state a
+    `mv` or a delete leaves behind, where nothing looks newer than the pbo."""
+    src = root / name
+    (src / "scripts" / "3_Game").mkdir(parents=True)
+    cfg = src / "config.cpp"
+    cfg.write_text("class CfgMods {};", encoding="utf-8")
+    layer_file = src / "scripts" / "3_Game" / "a.c"
+    layer_file.write_text("class A {}", encoding="utf-8")
+    old = time.time() - 5000
+    for p in (cfg, layer_file):
+        os.utime(p, (old, old))
+    return src
+
+
+def _filebank_with_internal_skip(root: Path, calls: list, name: str = "MyMod"):
+    """Mimics the behaviour reproduced against the real FileBank (see
+    packer.py's staging comment): when the destination pbo already exists and
+    no source looks newer -- which our backdated fixtures guarantee -- it
+    reports success WITHOUT rewriting anything. Each call records whether the
+    pbo existed at that moment; a written pbo carries the call number so a
+    test can tell a genuine rewrite from a silent keep."""
+
+    def run(cmd, cwd, log_path, timeout=None):
+        out_dir = root / f"@{name}" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pbo = out_dir / f"{name}.pbo"
+        existed = pbo.exists()
+        calls.append(existed)
+        if not existed:
+            pbo.write_bytes(f"pbo build {len(calls)}".encode())
+        return 0, "FileBank ok"
+
+    return run
+
+
+def test_source_manifest_maps_relative_posix_paths_to_sizes(tmp_path):
+    from dayz_mcp.packer import source_manifest
+
+    (tmp_path / "config.cpp").write_text("abc", encoding="utf-8")
+    sub = tmp_path / "scripts"
+    sub.mkdir()
+    (sub / "a.c").write_text("12345", encoding="utf-8")
+    job_dir = tmp_path / ".dayz-mcp"
+    job_dir.mkdir()
+    (job_dir / "job.json").write_text("{}", encoding="utf-8")
+
+    m = source_manifest(tmp_path, ignore=[".dayz-mcp"])
+
+    assert m == {"config.cpp": 3, "scripts/a.c": 5}
+
+
+def test_pack_one_repacks_when_a_source_file_moved_with_its_mtime_preserved(tmp_path, monkeypatch):
+    """`mv` between script layers preserves the file's mtime, so every source
+    still looks older than the pbo: FileBank silently keeps the old bytes and
+    the mtime guard has nothing to catch. The recorded manifest must notice
+    the path change and force a genuine rewrite."""
+    import json
+
+    root = tmp_path / "root"
+    root.mkdir()
+    src = _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+
+    first = pack_one("MyMod", root, tools, root / "b1.log", manifest_path=manifest)
+    assert first.error == "", first.error
+    pbo = Path(first.pbo)
+    assert pbo.read_bytes() == b"pbo build 1"
+    assert manifest.exists(), "a successful pack must record the source manifest"
+
+    dst_dir = src / "scripts" / "4_World"
+    dst_dir.mkdir()
+    (src / "scripts" / "3_Game" / "a.c").rename(dst_dir / "a.c")  # mtime preserved
+
+    second = pack_one("MyMod", root, tools, root / "b2.log", manifest_path=manifest)
+
+    assert second.error == "", second.error
+    assert calls[-1] is False, "the old pbo was left in place for FileBank to silently keep"
+    assert pbo.read_bytes() == b"pbo build 2"
+    recorded = json.loads(manifest.read_text(encoding="utf-8"))
+    assert "scripts/4_World/a.c" in recorded
+    assert "scripts/3_Game/a.c" not in recorded
+
+
+def test_pack_one_repacks_when_a_source_file_was_deleted(tmp_path, monkeypatch):
+    """Deleting a file changes no remaining mtime at all, so without the
+    manifest the deleted file simply stays inside the pbo (confirmed on a real
+    project by scanning the pbo bytes)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+
+    first = pack_one("MyMod", root, tools, root / "b1.log", manifest_path=manifest)
+    assert first.error == "", first.error
+
+    (src / "scripts" / "3_Game" / "a.c").unlink()
+
+    second = pack_one("MyMod", root, tools, root / "b2.log", manifest_path=manifest)
+
+    assert second.error == "", second.error
+    assert calls[-1] is False, "the old pbo was left in place for FileBank to silently keep"
+    assert Path(second.pbo).read_bytes() == b"pbo build 2"
+
+
+def test_pack_one_leaves_the_pbo_alone_when_the_source_set_is_unchanged(tmp_path, monkeypatch):
+    """The other direction, pinned so 'force a repack' cannot degenerate into
+    'always delete the pbo': with an unchanged source set the destination must
+    be left in place -- deleting it unconditionally would destroy the artifact
+    every time a running server holds it open, exactly the case the stale-pbo
+    refusal exists to *report*."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+
+    first = pack_one("MyMod", root, tools, root / "b1.log", manifest_path=manifest)
+    assert first.error == "", first.error
+
+    second = pack_one("MyMod", root, tools, root / "b2.log", manifest_path=manifest)
+
+    assert second.error == "", second.error
+    assert calls[-1] is True, "an unchanged source set must not delete the pbo"
+    assert Path(second.pbo).read_bytes() == b"pbo build 1"
+
+
+def test_pack_one_repacks_when_there_is_no_recorded_manifest_for_an_existing_pbo(tmp_path, monkeypatch):
+    """The transition case: a pbo built before manifests existed (or whose
+    manifest was lost) has unknown provenance -- a move or delete may already
+    be baked into it. The only safe answer is one forced rewrite, which also
+    establishes the baseline for every later comparison."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    (out_dir / "MyMod.pbo").write_bytes(b"built before manifests existed")
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+
+    result = pack_one("MyMod", root, tools, root / "b.log", manifest_path=manifest)
+
+    assert result.error == "", result.error
+    assert calls == [False], "a pbo without a manifest must be rewritten, not trusted"
+    assert Path(result.pbo).read_bytes() == b"pbo build 1"
+    assert manifest.exists()
+
+
+def test_pack_one_errors_when_a_needed_repack_cannot_delete_the_pbo(tmp_path, monkeypatch):
+    """When the source set changed but the old pbo cannot be deleted (on
+    Windows a running server holding it open does exactly this), reporting
+    success would ship the old layout -- the same lie the stale-pbo refusal
+    exists to prevent, reached through a change mtimes cannot show. The
+    refusal must name the pbo and point at the usual culprit; the signature
+    beside the pbo still describes it exactly and must survive, and the
+    recorded manifest must not advance past a build that did not happen."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    out_dir = root / "@MyMod" / "addons"
+    out_dir.mkdir(parents=True)
+    pbo = out_dir / "MyMod.pbo"
+    pbo.write_bytes(b"old pbo a server still holds open")
+    sig = out_dir / "MyMod.pbo.TheKey.bisign"
+    sig.write_bytes(b"still describes the pbo above")
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")  # recorded set differs from the tree
+
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+    real_unlink = os.unlink
+
+    def unlink_refused_for_the_pbo(path, *args, **kwargs):
+        if Path(path).name == "MyMod.pbo":
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink_refused_for_the_pbo)
+
+    result = pack_one("MyMod", root, tools, root / "b.log", manifest_path=manifest)
+
+    assert result.error != "", "success was reported over a pbo with the old layout inside"
+    assert "MyMod.pbo" in result.error
+    assert "hold" in result.error, f"the refusal must point at the running server: {result.error}"
+    assert calls == [], "FileBank must not run when the destination cannot be replaced"
+    assert pbo.read_bytes() == b"old pbo a server still holds open"
+    assert sig.exists(), "a signature that still describes the pbo on disk was destroyed"
+    assert manifest.read_text(encoding="utf-8") == "{}", "the manifest advanced past a failed build"
+
+
+def test_pack_one_stale_refusal_still_fires_with_manifest_tracking_on(tmp_path, monkeypatch):
+    """The manifest check must not swallow the mtime one: a source EDITED in
+    place (same path, same size, newer mtime) while a running server keeps
+    FileBank from rewriting is still the classic stale-pbo case, and its
+    refusal message must stay intact."""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = _backdated_two_file_source(root)
+    tools = _stub_filebank_tools(tmp_path)
+    manifest = tmp_path / "bookkeeping" / "MyMod.json"
+    calls: list = []
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _filebank_with_internal_skip(root, calls))
+
+    first = pack_one("MyMod", root, tools, root / "b1.log", manifest_path=manifest)
+    assert first.error == "", first.error
+
+    future = time.time() + 1000
+    os.utime(src / "config.cpp", (future, future))  # edited in place: set and sizes unchanged
+
+    second = pack_one("MyMod", root, tools, root / "b2.log", manifest_path=manifest)
+
+    assert "stale pbo" in second.error
+    assert calls[-1] is True, "an unchanged source set must not delete the pbo"
+
+
 def test_pack_one_keeps_the_signature_when_the_build_did_not_happen(tmp_path, monkeypatch):
     """The limit of the rule. On the stale-pbo refusal the OLD pbo is still on
     disk untouched, so its signature still describes it exactly -- deleting it

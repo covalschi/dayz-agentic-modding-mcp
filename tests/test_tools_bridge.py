@@ -363,7 +363,7 @@ def test_bridge_build_does_not_block_a_normal_mod_build(tmp_path, monkeypatch):
     monkeypatch.setattr("dayz_mcp.tools.bridge.pack_one", slow_pack_one)
     monkeypatch.setattr(
         "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
+        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False, manifest_dir=None: [
             PackResult(name="MyMod", pbo="x.pbo", size=1, signed=True)
         ],
     )

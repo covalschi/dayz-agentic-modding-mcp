@@ -17,11 +17,16 @@ A build that FAILS leaves both the pbo and its signature alone. Usually that is
 exactly right, because nothing was rewritten. It is deliberately NOT a promise
 that the two still match: FileBank can rewrite the pbo and the run still be
 refused as stale, e.g. when a source file is saved during a multi-minute pack.
-Read a failed build as "state unknown, rebuild", not as "unchanged".
+Read a failed build as "state unknown, rebuild", not as "unchanged". The one
+exception: when manifest tracking (below) detects that the SET of source files
+changed, the old pbo and its signatures are deleted before FileBank runs, so a
+failure after that point leaves neither -- which is still "state unknown,
+rebuild", just with less on disk.
 """
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import shutil
 import tempfile
@@ -175,10 +180,25 @@ def find_keys(keys_dir: Path) -> tuple[Path | None, Path | None]:
     return priv, pub
 
 
+def _iter_source_files(src: Path, ignore: Sequence[str] = ()):
+    """Every file under `src`, skipping anything matching `ignore` by name
+    (not descending into a matching directory, same discipline as
+    find_excluded). The one definition of which files count as "the source"
+    for freshness purposes: newest_source_mtime and source_manifest are the
+    two halves of one staleness story, and measuring different trees would
+    let a defect slip between them.
+    """
+    for dirpath, dirnames, filenames in os.walk(src):
+        if ignore:
+            dirnames[:] = [d for d in dirnames if not any(fnmatch.fnmatch(d, pat) for pat in ignore)]
+        for f in filenames:
+            if ignore and any(fnmatch.fnmatch(f, pat) for pat in ignore):
+                continue
+            yield Path(dirpath) / f
+
+
 def newest_source_mtime(src: Path, ignore: Sequence[str] = ()) -> float:
-    """Newest mtime among files under `src`, skipping anything matching
-    `ignore` by name (not descending into a matching directory, same
-    discipline as find_excluded).
+    """Newest mtime among files under `src` (per _iter_source_files).
 
     `ignore` matters for a mod whose source is (or contains) the profile
     root: the mod's own build output and this server's job-store directory
@@ -190,17 +210,55 @@ def newest_source_mtime(src: Path, ignore: Sequence[str] = ()) -> float:
     and report every single such build as stale. See pack_one's callers.
     """
     newest = 0.0
-    for dirpath, dirnames, filenames in os.walk(src):
-        if ignore:
-            dirnames[:] = [d for d in dirnames if not any(fnmatch.fnmatch(d, pat) for pat in ignore)]
-        for f in filenames:
-            if ignore and any(fnmatch.fnmatch(f, pat) for pat in ignore):
-                continue
-            try:
-                newest = max(newest, (Path(dirpath) / f).stat().st_mtime)
-            except OSError:
-                continue
+    for p in _iter_source_files(src, ignore):
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            continue
     return newest
+
+
+def source_manifest(src: Path, ignore: Sequence[str] = ()) -> dict[str, int]:
+    """Relative posix path -> size for every file under `src` (per
+    _iter_source_files).
+
+    The half of freshness that mtimes cannot carry. A file MOVED with its
+    mtime preserved, or DELETED outright, changes no surviving mtime at all:
+    every source then looks older than the pbo, FileBank's own internal
+    staleness check silently keeps the old bytes while reporting success (see
+    the staging comment in pack_one), and the mtime guard sees a perfectly
+    "fresh" pbo with the old layout still inside. Both happened on a real
+    project the same day. Comparing this mapping against the one recorded at
+    the last successful pack catches adds, moves, deletions and size changes
+    alike; sizes ride along because they are free and catch a content change
+    that kept the mtime (a restored backup, a `git checkout`).
+    """
+    src = Path(src)
+    manifest: dict[str, int] = {}
+    for p in _iter_source_files(src, ignore):
+        try:
+            manifest[p.relative_to(src).as_posix()] = p.stat().st_size
+        except OSError:
+            # A file that cannot be measured cannot be vouched for either;
+            # leaving it out makes the comparison err toward repacking.
+            continue
+    return manifest
+
+
+def _read_manifest(path: Path) -> dict[str, int] | None:
+    """The manifest recorded at the last successful pack, or None when there
+    is nothing usable to compare against -- absent, unreadable and malformed
+    all mean the same thing here: the existing pbo's contents cannot be
+    vouched for, and the caller must repack rather than trust it."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not all(isinstance(k, str) and isinstance(v, int) for k, v in data.items()):
+        return None
+    return data
 
 
 def pack_one(
@@ -212,6 +270,7 @@ def pack_one(
     exclude: list[str] | None = None,
     src: Path | None = None,
     stage: bool = False,
+    manifest_path: Path | None = None,
 ) -> PackResult:
     root = Path(root)
     src = Path(src) if src is not None else root / name
@@ -333,6 +392,22 @@ def pack_one(
                 # did not already catch.
                 return PackResult(name, error=f"{cfg} failed CfgConvert's syntax check: {tail[-300:]}")
 
+    # The mtime comparison at the end of this function can only see EDITS.
+    # A file moved with its mtime preserved (`mv` between script layers) or
+    # deleted outright leaves every surviving mtime untouched -- and FileBank,
+    # whose own internal staleness check silently skips rewriting a pbo whose
+    # sources all look older than it (reproduced against the real binary, see
+    # the staging comment below), then reports success over a pbo that still
+    # holds the old layout. Both misses happened on a real project the same
+    # day: a moved file compiled at its old path inside the pbo, a deleted
+    # one stayed inside it. So callers that can keep bookkeeping pass
+    # `manifest_path`, and the set of source paths+sizes is compared against
+    # what the last successful pack recorded. Measured on the ORIGINAL `src`
+    # with the same `ignore` as the mtime check, for the same reasons.
+    manifest_now: dict[str, int] | None = None
+    if manifest_path is not None:
+        manifest_now = source_manifest(src, ignore=own_artifacts)
+
     staging_dir: Path | None = None
     staging_note = ""
     pack_src = src
@@ -385,12 +460,42 @@ def pack_one(
                 + ", ".join(reserved_out)
             )
 
+    pbo = out_dir / f"{name}.pbo"
     try:
+        # When the recorded set no longer matches the tree -- or there is no
+        # record to check against, which is what a pbo built before manifest
+        # tracking (or with its manifest lost) looks like -- the destination
+        # is deleted first: FileBank cannot silently skip a rewrite whose
+        # destination does not exist. An unchanged set deletes nothing, so
+        # the stale-pbo refusal below keeps its territory: a running server
+        # holding the file during an ordinary edit still gets reported by it,
+        # not destroyed here.
+        if manifest_now is not None and pbo.exists() and manifest_now != _read_manifest(manifest_path):
+            try:
+                pbo.unlink()
+            except OSError as exc:
+                return PackResult(
+                    name,
+                    pbo=str(pbo),
+                    error="cannot repack: the set of source files changed since the last pack "
+                          "(files added, moved or deleted -- a change mtimes cannot show, so "
+                          "FileBank would silently keep the old contents), and the existing "
+                          f"{pbo.name} could not be deleted to force a rewrite: {exc} "
+                          "(a running server usually holds it open)",
+                )
+            # The pbo is gone, so every signature beside it describes a file
+            # that no longer exists -- the same rule the post-pack cleanup
+            # below applies. Deliberately only after the unlink SUCCEEDED:
+            # when it fails, the old pbo is still on disk untouched and its
+            # signature still describes it correctly, exactly the reasoning
+            # the stale-pbo path uses to keep signatures.
+            for old_sig in out_dir.glob(f"{name}.pbo.*.bisign"):
+                old_sig.unlink(missing_ok=True)
+
         code, tail = run_blocking(filebank_cmd(filebank, name, pack_src, out_dir), root, log_path, timeout=1800)
         if code != 0:
             return PackResult(name, error=f"FileBank exit {code}: {tail[-300:]}")
 
-        pbo = out_dir / f"{name}.pbo"
         if not pbo.exists():
             return PackResult(name, error=f"{pbo} was not produced")
 
@@ -427,6 +532,27 @@ def pack_one(
                 error="stale pbo: it is older than the sources, so packing did not really happen "
                       "(a running server usually holds the old file open)",
             )
+
+        # Only now, with the stale check's vouching, is the manifest recorded
+        # -- and never on a failed build: a manifest that advanced past a pack
+        # that did not really happen would stop the NEXT build from forcing
+        # the rewrite this one failed to produce. Failing to write it is not
+        # worth failing the build over, since the miss errs toward repacking;
+        # but it must not be silent either, or the unconditional repack it
+        # causes next time would read as FileBank misbehaving.
+        manifest_note = ""
+        if manifest_path is not None and manifest_now is not None:
+            try:
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(
+                    json.dumps(manifest_now, ensure_ascii=False, sort_keys=True, indent=1),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                manifest_note = (
+                    f"could not record the source manifest at {manifest_path}: {exc}; "
+                    "the next build will repack unconditionally"
+                )
 
         # A new pbo is on disk, so every signature next to it describes a file
         # that no longer exists. Removing them is UNCONDITIONAL, and that is
@@ -491,10 +617,10 @@ def pack_one(
         else:
             signing_note = f"no signing keys: {keys_dir} holds no *.biprivatekey, so the pbo is unsigned"
 
-        # cfgconvert_note and staging_note (soft-degrades / disclosures set
-        # above) and signing_note are independent concerns; any of them can
-        # legitimately apply at once.
-        note = "; ".join(x for x in (cfgconvert_note, staging_note, signing_note) if x)
+        # cfgconvert_note, staging_note, manifest_note (soft-degrades /
+        # disclosures set above) and signing_note are independent concerns;
+        # any of them can legitimately apply at once.
+        note = "; ".join(x for x in (cfgconvert_note, staging_note, manifest_note, signing_note) if x)
 
         return PackResult(name, pbo=str(pbo), size=pbo.stat().st_size, signed=signed, note=note)
     finally:
@@ -510,6 +636,7 @@ def pack_all(
     exclude: list[str] | None = None,
     sources: dict[str, Path] | None = None,
     stage: bool = False,
+    manifest_dir: Path | None = None,
 ) -> list[PackResult]:
     out: list[PackResult] = []
     for name in names:
@@ -518,6 +645,7 @@ def pack_all(
             pack_one(
                 name, root, tools, Path(log_dir) / f"pack-{name}.log",
                 exclude=exclude, src=mod_src, stage=stage,
+                manifest_path=(Path(manifest_dir) / f"{name}.json") if manifest_dir is not None else None,
             )
         )
     return out
