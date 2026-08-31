@@ -938,10 +938,9 @@ def client_key(name: str, hold_ms: int = 0) -> Result:
     For letters and words use `client_type`; for movement and menus use the
     gamepad, which needs no foreground at all.
     """
-    running = session.client()
-    if not running.ok:
-        return running
-    pid = running.data["pid"]
+    pid, refusal = _require_live_client()
+    if refusal:
+        return refusal
 
     pressed = winui.press_key(pid, name, hold_ms)
     if not pressed.ok:

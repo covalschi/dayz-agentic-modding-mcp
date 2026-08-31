@@ -749,7 +749,20 @@ def registered_client_tools() -> set[str]:
     }
 
 
-def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
+# The tools allowed to take the foreground, and the one reason any of them may:
+# Windows delivers a keystroke to whatever window is in front, so a tool that
+# synthesises one has to put the client there first. Everything else -- eyes,
+# gamepad, chat, lifecycle, the verdict -- works with the client in the
+# background, and that is what makes a run survivable while the owner uses the
+# machine.
+#
+# Adding a name here is a deliberate act. The sweep below fails until it is, and
+# that failure is the point: it is how a focus grab added to some new tool gets
+# noticed instead of quietly costing the owner their foreground.
+FOREGROUND_TOOLS = {"client_type", "client_key"}
+
+
+def test_only_keystroke_tools_ask_for_the_foreground(tmp_path, monkeypatch):
     """The invariant the whole phase rests on, proved by watching who calls
     `focus` rather than by reading docstrings. Eyes, gamepad, chat, lifecycle
     and the verdict all work with the client in the background; only field
@@ -800,14 +813,26 @@ def test_exactly_one_client_tool_asks_for_the_foreground(tmp_path, monkeypatch):
         assert result.ok is True, (name, result.error)
         swept.add(name)
 
-    missed = registered_client_tools() - swept - {"client_type"}
+    missed = registered_client_tools() - swept - FOREGROUND_TOOLS
     assert not missed, f"these client tools escaped the foreground sweep: {sorted(missed)}"
-    assert asked == [], "a tool other than client_type asked for the foreground"
+    assert asked == [], f"a tool outside {sorted(FOREGROUND_TOOLS)} asked for the foreground"
 
-    # And the one that is allowed to, does.
+    # And the ones that are allowed to, do. Asserted rather than assumed: a
+    # keystroke tool that stopped taking the foreground would type into
+    # whatever window is in front, which is the owner's, and say nothing.
     session.set_client_pid(777, client.CLIENT_IMAGE)
     monkeypatch.setattr(winui, "type_text", lambda pid, text: ok({"typed": text, "characters": 1}))
     assert client.client_type("a").ok is True
+    assert asked == [777]
+
+    # client_key reaches the foreground through winui.press_key's own
+    # _require_focus, so press_key is left REAL here and only the key stroke
+    # itself is stubbed -- patching press_key would prove nothing about who
+    # takes the foreground.
+    asked.clear()
+    monkeypatch.setattr(winui, "find_window", lambda pid: 1)
+    monkeypatch.setattr(winui, "_tap", lambda scan, extended=False: None)
+    assert client.client_key("space").ok is True
     assert asked == [777]
 
 
