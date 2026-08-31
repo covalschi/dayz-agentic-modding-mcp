@@ -887,7 +887,7 @@ def test_only_keystroke_tools_ask_for_the_foreground(tmp_path, monkeypatch):
     # And the ones that are allowed to, do. Asserted rather than assumed: a
     # keystroke tool that stopped taking the foreground would type into
     # whatever window is in front, which is the owner's, and say nothing.
-    session.set_client_pid(777, client.CLIENT_IMAGE)
+    session.set_client_pid(777, client.DIAG_IMAGE)
     monkeypatch.setattr(winui, "type_text", lambda pid, text: ok({"typed": text, "characters": 1}))
     assert client.client_type("a").ok is True
     assert asked == [777]
@@ -917,7 +917,7 @@ def test_the_client_pid_never_becomes_something_server_stop_can_kill(tmp_path, m
     monkeypatch.setattr(lifecycle, "is_alive", lambda pid, image="": False)
     monkeypatch.setattr(lifecycle, "stop", lambda pid: killed.append(pid) or True)
 
-    session.set_client_pid(UNREACHABLE_PID, client.CLIENT_IMAGE)
+    session.set_client_pid(UNREACHABLE_PID, client.DIAG_IMAGE)
 
     assert session.known_pid(UNREACHABLE_PID) is False
     refused = tools.server_stop(pid=UNREACHABLE_PID)
@@ -1225,3 +1225,64 @@ def test_an_unsigned_client_mod_is_named_before_the_client_is_started(tmp_path, 
     assert not result.ok
     assert "MyMod.pbo" in result.error
     assert "bisign" in (result.error + result.hint).lower()
+
+
+# ---------------------------------------------------------------------------
+# which client build a stand can be joined by
+#
+# The engine refuses the wrong pairing at connect time, and the refusal reaches
+# a caller as "the player count stayed at 0" -- so these are the tests that
+# keep a boot-plus-timeout diagnosis from coming back.
+# ---------------------------------------------------------------------------
+
+
+class _Machine:
+    def __init__(self, server: str) -> None:
+        self.server = server
+
+
+class _Prof:
+    def __init__(self, server: str) -> None:
+        self.machine = _Machine(server)
+
+
+def test_dedicated_stand_needs_the_retail_client() -> None:
+    assert client._client_image_for(_Prof("E:/games/DayZServer")) == client.RETAIL_IMAGE
+
+
+def test_diag_stand_needs_the_diag_client() -> None:
+    assert client._client_image_for(_Prof("")) == client.DIAG_IMAGE
+
+
+def test_no_profile_falls_back_to_diag() -> None:
+    assert client._client_image_for(None) == client.DIAG_IMAGE
+
+
+def test_battleye_off_is_read_as_off(tmp_path) -> None:
+    cfg = tmp_path / "serverDZ.cfg"
+    cfg.write_text("hostname = \"x\";\nBattlEye = 0;\n", encoding="utf-8")
+    assert client._battleye_on(cfg) is False
+
+
+def test_battleye_on_is_read_as_on(tmp_path) -> None:
+    cfg = tmp_path / "serverDZ.cfg"
+    cfg.write_text("BattlEye = 1;\n", encoding="utf-8")
+    assert client._battleye_on(cfg) is True
+
+
+def test_commented_out_battleye_does_not_count(tmp_path) -> None:
+    """The line that is not in force must not decide the answer."""
+    cfg = tmp_path / "serverDZ.cfg"
+    cfg.write_text("// BattlEye = 1;\nBattlEye = 0;\n", encoding="utf-8")
+    assert client._battleye_on(cfg) is False
+
+
+def test_absent_battleye_is_read_as_on(tmp_path) -> None:
+    """Silence means the engine default, which is on -- never a quiet 'off'."""
+    cfg = tmp_path / "serverDZ.cfg"
+    cfg.write_text("hostname = \"x\";\n", encoding="utf-8")
+    assert client._battleye_on(cfg) is True
+
+
+def test_unreadable_config_is_read_as_on(tmp_path) -> None:
+    assert client._battleye_on(tmp_path / "nothing-here.cfg") is True

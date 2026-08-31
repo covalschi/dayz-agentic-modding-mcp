@@ -49,6 +49,7 @@ person who owns the machine.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import replace
@@ -81,11 +82,69 @@ from .project import require_project
 from .world import WORLD_TIMEOUT_SECONDS
 from .world import _run as _world_command
 
-# The client runs the same executable as the server. Recorded and checked
-# anyway, for the same reason server_start records it: Windows recycles pids,
-# and a tracked pid that has since been handed to something else must not be
-# reported as a running client (nor killed as one).
-CLIENT_IMAGE = GAME_PROBE
+# The client comes in TWO BUILDS AND THEY DO NOT MIX. The engine refuses the
+# pairing itself, at connect time, with
+#
+#     CONNECTING FAILED (0x00020017)
+#     Client is using Diag exe while the server is not.
+#
+# which costs a boot and a full connect timeout to discover, and which arrives
+# as "the player count stayed at 0" -- a symptom that says nothing about the
+# cause.
+#
+# WHICH BUILD IS RIGHT IS NOT A SETTING, because it is not a choice. It follows
+# from the fact that already decides the SERVER's image in lifecycle.py:
+# `machine.server` names a separate DayZServer install, so the stand runs the
+# retail dedicated binary and the client must be retail too; without it the
+# stand is DayZDiag_x64.exe out of the game directory and the client must be
+# the diag build. A knob here could only be used to re-create the one
+# combination the engine forbids, so there is none.
+DIAG_IMAGE = GAME_PROBE
+RETAIL_IMAGE = "DayZ_x64.exe"
+
+
+def _battleye_on(cfg: Path) -> bool:
+    """Does this server config turn BattlEye on?
+
+    Absent means ON: the engine's own default is BattlEye enabled, so a config
+    that never mentions it gets a client that needs the launcher. Reading the
+    silence as "off" would turn a named refusal back into the unexplained
+    connect timeout this whole distinction exists to remove.
+
+    Comments are stripped first -- `// BattlEye = 1;` above a real `BattlEye =
+    0;` is exactly how these files are written.
+    """
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+
+    live = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+    found = re.search(r"\bBattlEye\s*=\s*(\d+)", live, re.IGNORECASE)
+    if not found:
+        return True
+    return found.group(1) != "0"
+
+
+def _client_image_for(prof) -> str:  # noqa: ANN001 - the loaded profile, or None
+    """Which client build this stand can be joined by."""
+    return RETAIL_IMAGE if (prof and prof.machine.server) else DIAG_IMAGE
+
+
+def _tracked_image() -> str:
+    """The image to check a tracked pid against.
+
+    RECORDED first, derived only as a fallback. The profile can be reloaded
+    (project_open) between starting a client and stopping it, and a derived
+    name would then guard the pid against the wrong image -- which reads as
+    "the client is gone" for a client that is running perfectly well, and
+    leaves it running with nothing tracking it.
+
+    Recorded and checked at all for the reason server_start records its own:
+    Windows recycles pids, and a tracked pid since handed to something else
+    must not be reported as a running client -- nor killed as one.
+    """
+    return session.client_image() or _client_image_for(session.profile())
 
 # Where the client connects. The stand is on THIS machine by definition -- the
 # eyes (a window handle) and the hands (a virtual device on this machine's own
@@ -359,7 +418,7 @@ def _require_live_client() -> tuple[int, Result | None]:
             hint="start one with client_start and wait for its job to finish; only a "
                  "client started through client_start is tracked",
         )
-    if not is_alive(pid, image=CLIENT_IMAGE):
+    if not is_alive(pid, image=_tracked_image()):
         session.set_client_pid(0)
         return 0, fail(
             f"the client this session started (pid {pid}) is no longer running",
@@ -380,6 +439,15 @@ def client_start(
     """Start the game client and connect it to the test stand. Returns a job id.
 
     Three things worth knowing before calling, all of them observable:
+
+    IT PICKS THE CLIENT BUILD FROM THE STAND, and does not offer the choice.
+    A stand booted from a separate DayZServer install can only be joined by the
+    retail client; a stand booted from DayZDiag_x64.exe only by the diag one.
+    The engine refuses the other pairing at connect time ("Client is using Diag
+    exe while the server is not"), and that refusal reaches a caller here as
+    "the player count stayed at 0" -- a boot and a full connect timeout spent
+    on a mismatch that was knowable before launch. `machine.server` decides it,
+    the same setting that already decides the server's own image.
 
     IT LAUNCHES WINDOWED, always. A fullscreen D3D window does not yield the
     foreground -- an attempt to cover one simply hung -- so a fullscreen client
@@ -439,7 +507,7 @@ def client_start(
                 )
 
     running = session.client_pid()
-    if running and is_alive(running, image=CLIENT_IMAGE):
+    if running and is_alive(running, image=_tracked_image()):
         return fail(
             f"a client is already running for this session (pid {running})",
             hint="stop it with client_stop, or ask client_status what it is doing",
@@ -470,6 +538,39 @@ def client_start(
                  "at the server browser with nothing to join and no error anywhere",
         )
 
+    # Which build, and does it exist. Derived from the stand, never chosen:
+    # see the note beside DIAG_IMAGE.
+    image = _client_image_for(prof)
+    exe = Path(game) / image
+    if not exe.exists():
+        return fail(
+            f"this stand needs the {'retail' if image == RETAIL_IMAGE else 'diag'} client "
+            f"({image}), and it is not in the game directory: {exe}",
+            hint="a stand booted from a separate DayZServer install can only be joined by "
+                 "the retail client, and a stand booted from DayZDiag_x64.exe only by the "
+                 "diag one -- the engine refuses the other pairing at connect time. Check "
+                 "machine.game points at the DayZ installation, not at the tools",
+        )
+
+    # BattlEye and the retail client cannot both be satisfied from here. The
+    # retail build only initialises BattlEye when it is launched through
+    # DayZ_BE.exe, and that launcher starts the game as a SEPARATE process --
+    # so the pid this tool would track is the launcher's, and every tool that
+    # follows keys off that pid: the window to capture, the window to focus,
+    # the process to stop, the .RPT to judge. Rather than track the wrong
+    # process and report about it confidently, this says so.
+    #
+    # A test stand has no use for BattlEye anyway: it kicks clients over
+    # unsigned pbos, which is what a mod under development has.
+    if image == RETAIL_IMAGE and _battleye_on(stand_root() / prof.machine.config):
+        return fail(
+            f"the stand's {prof.machine.config} has BattlEye enabled, and the retail "
+            "client this stand needs would have to be launched through DayZ_BE.exe, "
+            "which starts the game as a separate process this tool could not track",
+            hint="set BattlEye = 0; in the stand's server config. A stand running "
+                 "unsigned mod pbos is not a stand BattlEye can be used on",
+        )
+
     profiles = client_profiles_dir()
     profiles.mkdir(parents=True, exist_ok=True)
     background = _background_setting()
@@ -478,7 +579,7 @@ def client_start(
     # only the client half of the profile's split goes on this command line.
     client_mods, _server_mods = mod_list()
     cmd = [
-        str(Path(game) / CLIENT_IMAGE),
+        str(exe),
         f"-connect={STAND_ADDRESS}",
         f"-port={port}",
         f"-mod={client_mods}",
@@ -506,7 +607,7 @@ def client_start(
         # above and then makes spawn() raise.
         try:
             pid = spawn(cmd, Path(game))
-            session.set_client_pid(pid, CLIENT_IMAGE)
+            session.set_client_pid(pid, image)
             deadline = time.time() + timeout
             ever_readable = False
             last_seen = None
@@ -518,7 +619,7 @@ def client_start(
                 if dump is not None:
                     store.fail(job.id, _crash_reason(pid, dump))
                     return
-                if not is_alive(pid, image=CLIENT_IMAGE):
+                if not is_alive(pid, image=image):
                     store.fail(
                         job.id,
                         f"the client process (pid {pid}) died before it connected -- "
@@ -623,9 +724,10 @@ def client_stop() -> Result:
     one appears. Stopping the client is the end of the input session, so it is
     where the device is given back.
 
-    Takes no pid on purpose: the client runs the same executable as the server,
-    so a pid argument could not be checked against the image the way
-    server_stop's is, and "stop this pid" would become a general process killer.
+    Takes no pid on purpose. On a diag stand the client and the server are the
+    same executable, so a pid argument could not be checked against the image
+    the way server_stop's is; and even where they differ, "stop this pid" would
+    become a general process killer.
     """
     pid = session.client_pid()
     pad = gamepad.close_pad()
@@ -633,7 +735,7 @@ def client_stop() -> Result:
 
     if not pid:
         return ok({**data, "stopped": False, "reason": "no client was started by this session"})
-    if not is_alive(pid, image=CLIENT_IMAGE):
+    if not is_alive(pid, image=_tracked_image()):
         session.set_client_pid(0)
         return ok({**data, "stopped": True, "pid": pid, "note": "it had already exited"})
     stopped = stop(pid)
@@ -655,7 +757,7 @@ def client_status() -> Result:
     if guard:
         return guard
     pid = session.client_pid()
-    running = bool(pid and is_alive(pid, image=CLIENT_IMAGE))
+    running = bool(pid and is_alive(pid, image=_tracked_image()))
 
     window: dict = {}
     if running:
