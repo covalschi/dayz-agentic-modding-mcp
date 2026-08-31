@@ -92,15 +92,26 @@ def with_stand_and_game(
     extra_mods: list[str] | None = None,
     server_only: list[str] | None = None,
     config: str | None = None,
+    server_dir: Path | None = None,
+    dedicated_image: bool = True,
 ) -> None:
     """Like with_stand, but also fabricates a fake game install so server_start's
     `find_game` succeeds deterministically, regardless of what is actually
-    installed on the machine running the tests."""
+    installed on the machine running the tests.
+
+    `server_dir` additionally writes machine.server and fabricates a dedicated
+    install there. `dedicated_image=False` creates the directory WITHOUT the
+    server executable, which is the shape server_start must refuse."""
     (stand / "profiles").mkdir(parents=True, exist_ok=True)
     game_dir.mkdir(parents=True, exist_ok=True)
     (game_dir / "DayZDiag_x64.exe").write_bytes(b"")
 
     lines = ["[machine]", f'stand_root = "{stand.as_posix()}"', f'game = "{game_dir.as_posix()}"']
+    if server_dir is not None:
+        server_dir.mkdir(parents=True, exist_ok=True)
+        if dedicated_image:
+            (server_dir / "DayZServer_x64.exe").write_bytes(b"")
+        lines.append(f'server = "{server_dir.as_posix()}"')
     if port is not None:
         lines.append(f"port = {port}")
     if config is not None:
@@ -412,6 +423,83 @@ def test_server_start_uses_the_configured_port(tmp_path, monkeypatch):
     job_id = tools.server_start(timeout=5).data["job_id"]
     tools.job_wait(job_id, timeout=5)
     assert "-port=27016" in captured["cmd"]
+
+
+# --- machine.server: running the stand from the dedicated server install ---
+
+
+def _boot_capturing(tmp_path, monkeypatch, **stand_kwargs) -> dict:
+    """Boot far enough to see the command line and the working directory."""
+    session.reset()
+    root = make_project(tmp_path)
+    stand, game = tmp_path / "stand", tmp_path / "game"
+    with_stand_and_game(root, stand, game, **stand_kwargs)
+    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
+    tools.project_open(str(root))
+
+    captured = {}
+
+    def fake_spawn(cmd, cwd):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return 123
+
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
+
+    captured["result"] = tools.server_start(timeout=5)
+    if captured["result"].ok:
+        tools.job_wait(captured["result"].data["job_id"], timeout=5)
+    return captured
+
+
+def test_server_start_runs_the_client_diag_image_when_machine_server_is_unset(
+    tmp_path, monkeypatch
+):
+    """The historical shape. A profile written before machine.server existed
+    must boot exactly as it did, out of the client install."""
+    got = _boot_capturing(tmp_path, monkeypatch)
+    assert got["result"].ok, got["result"].error
+    assert got["cmd"][0].endswith("DayZDiag_x64.exe")
+    assert Path(got["cmd"][0]).parent == tmp_path / "game"
+    assert Path(got["cwd"]) == tmp_path / "game"
+
+
+def test_server_start_runs_the_dedicated_image_when_machine_server_is_set(
+    tmp_path, monkeypatch
+):
+    """Both the image and the working directory move: DayZDiag forces
+    $currentdir to its own directory, and the dedicated server resolves
+    mpmissions and any proxy DLL beside the executable the same way."""
+    got = _boot_capturing(tmp_path, monkeypatch, server_dir=tmp_path / "dedicated")
+    assert got["result"].ok, got["result"].error
+    assert got["cmd"][0].endswith("DayZServer_x64.exe")
+    assert Path(got["cmd"][0]).parent == tmp_path / "dedicated"
+    assert Path(got["cwd"]) == tmp_path / "dedicated"
+
+
+def test_server_start_refuses_a_machine_server_without_the_dedicated_image(
+    tmp_path, monkeypatch
+):
+    """A directory that is not a server install must be named as such. The
+    engine's answer is a process that never appears, which reads as the mod
+    failing to boot rather than as a mistyped path."""
+    got = _boot_capturing(
+        tmp_path, monkeypatch, server_dir=tmp_path / "dedicated", dedicated_image=False
+    )
+    assert not got["result"].ok
+    assert "DayZServer_x64.exe" in got["result"].error
+    assert "223350" in got["result"].hint
+    assert "cmd" not in got, "it must refuse before spawning anything"
+
+
+def test_server_image_recorded_for_liveness_is_the_one_that_was_launched(
+    tmp_path, monkeypatch
+):
+    """is_alive compares the recorded image, so recording the client's would
+    make a live dedicated server look dead to every later tool."""
+    _boot_capturing(tmp_path, monkeypatch, server_dir=tmp_path / "dedicated")
+    assert session.server_image() == "DayZServer_x64.exe"
 
 
 # --- Extra requirement 5: server_status ---

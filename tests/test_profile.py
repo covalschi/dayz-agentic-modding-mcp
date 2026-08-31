@@ -283,6 +283,22 @@ def test_machine_port_non_numeric_is_rejected(tmp_path):
     assert "integer" in r.error
 
 
+def test_machine_server_defaults_to_empty(tmp_path):
+    """Empty means "run the stand from machine.game", which is what every
+    profile written before this key existed still means."""
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.machine.server == ""
+
+
+def test_machine_server_parses(tmp_path):
+    local = """
+    [machine]
+    server = "C:/Games/DayZServer"
+    """
+    p = load_profile(write(tmp_path, BASE, local)).data
+    assert p.machine.server == "C:/Games/DayZServer"
+
+
 def test_machine_config_defaults_to_serverDZ_cfg(tmp_path):
     p = load_profile(write(tmp_path, BASE)).data
     assert p.machine.config == "serverDZ.cfg"

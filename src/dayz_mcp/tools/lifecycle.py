@@ -19,10 +19,16 @@ from .project import require_project
 # not a disguised long wait -- long operations belong behind a job_id.
 STATUS_PULSE_MAX = 10.0
 
-# The executable server_start spawns -- also the vanilla probe file paths.py
-# uses to recognise a game install, hence the shared import rather than a
-# second copy of the literal.
+# The executable server_start spawns out of the CLIENT install -- also the
+# vanilla probe file paths.py uses to recognise a game install, hence the shared
+# import rather than a second copy of the literal.
 SERVER_IMAGE = GAME_PROBE
+
+# ...and the one it spawns out of the DEDICATED SERVER install, when
+# machine.server names one. A separate Steam app (223350) with its own
+# directory, which is the whole point: see MachineCfg.server for what sharing
+# one directory costs.
+DEDICATED_IMAGE = "DayZServer_x64.exe"
 
 # The diagnostic client gets its own throwaway -profiles directory, one per
 # client-compile job, so a compile check never writes into (or reads from) the
@@ -657,6 +663,25 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
     if not game:
         return fail("game not found", hint="set machine.game in dayz-mcp.local.toml")
 
+    # WHERE THE SERVER RUNS FROM, decided once and used by everything below --
+    # the command line, the mission check, the working directory, and the image
+    # every later liveness check compares against. Unset machine.server keeps
+    # the historical shape (the client install's diagnostic executable), so a
+    # profile that never heard of this reads exactly as it did before.
+    #
+    # Refused here rather than at spawn, because the engine's answer to a
+    # missing executable is a process that never appears, and the caller would
+    # read that as a boot failure of the mod.
+    srv_dir = Path(prof.machine.server) if prof.machine.server else Path(game)
+    srv_image = DEDICATED_IMAGE if prof.machine.server else SERVER_IMAGE
+    if not (srv_dir / srv_image).is_file():
+        return fail(
+            f"machine.server points at {srv_dir}, which holds no {srv_image}",
+            hint="point machine.server at a DayZ Server install (Steam app 223350, "
+                 "\"DayZ Server\" in the Tools section), or remove the key to run the "
+                 "stand from the client install's diagnostic executable as before",
+        )
+
     stand = _stand()
     # The filename is a profile setting (machine.config), not a literal: this
     # project's own stand hangs forever after world-compile if booted with the
@@ -725,13 +750,13 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
     # Checked BEFORE the job exists, because this is a refusal and not a boot
     # outcome: a server started without its mission comes up looking healthy in
     # every way a job could report.
-    absent = missing_mission(Path(game), cfg)
+    absent = missing_mission(srv_dir, cfg)
     if absent:
         return fail(
             f"the server config asks for mission {absent!r}, and the engine will not find "
             f"it: it looks for mpmissions beside the executable being run, which is "
-            f"{Path(game) / 'mpmissions'}",
-            hint=f"put {absent!r} under {Path(game) / 'mpmissions'} -- a directory symlink "
+            f"{srv_dir / 'mpmissions'}",
+            hint=f"put {absent!r} under {srv_dir / 'mpmissions'} -- a directory symlink "
                  f"to the DayZServer install's own mpmissions is the usual way "
                  f"(mklink /D). Without it the server starts, binds its port and logs no "
                  f"error, and then refuses every player with 'Mission script has no main "
@@ -756,7 +781,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
         transport_note = f" | WARNING: could not clear bridge transport: {'; '.join(transport_left)}"
     port = prof.machine.port
     cmd = [
-        str(Path(game) / SERVER_IMAGE), "-server", f"-config={cfg}",
+        str(srv_dir / srv_image), "-server", f"-config={cfg}",
         f"-port={port}", f"-mod={client_mods}", f"-profiles={profiles}",
     ]
     if server_mods:
@@ -788,17 +813,17 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
         # Old script_*.log files are left alone: unlinking a file a live server
         # still holds open raises PermissionError on Windows. The `since` cutoff
         # below is what tells this run's log apart from theirs.
-        pid = spawn(cmd, Path(game))
+        pid = spawn(cmd, srv_dir)
     except Exception as exc:  # noqa: BLE001 - the caller must hear this, not stderr
         store.fail(job.id, f"{type(exc).__name__}: {exc}")
         return Result(
             False, {"job_id": job.id, "since": since},
             f"the server could not be started: {type(exc).__name__}: {exc}",
-            hint="check that machine.game points at a real DayZ installation and that "
-                 f"{SERVER_IMAGE} there is a runnable image -- a partial download passes "
+            hint=f"check that {srv_dir} is a real DayZ installation and that "
+                 f"{srv_image} there is a runnable image -- a partial download passes "
                  "the existence check and fails here",
         )
-    session.set_server_pid(pid, SERVER_IMAGE)
+    session.set_server_pid(pid, srv_image)
 
     def run() -> None:
         # An uncaught exception here must still resolve the job, not just print a
@@ -823,7 +848,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 # died on its own command line is the one failure still
                 # detectable here.
                 time.sleep(max(0.0, min(NO_READY_LINE_SETTLE_SECONDS, timeout)))
-                if not is_alive(pid, image=SERVER_IMAGE):
+                if not is_alive(pid, image=srv_image):
                     store.fail(job.id, "the server process died moments after starting")
                     return
                 # With no ready line there used to be nothing left to do but
@@ -865,7 +890,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                                     f"{transport_note}{extras_note}",
                         )
                         return
-                    if not is_alive(pid, image=SERVER_IMAGE):
+                    if not is_alive(pid, image=srv_image):
                         store.fail(job.id, "the server process died before it bound its port")
                         return
                     time.sleep(2)
@@ -903,7 +928,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
             deadline = time.time() + timeout
             port_bound = False
             while time.time() < deadline:
-                if not is_alive(pid, image=SERVER_IMAGE):
+                if not is_alive(pid, image=srv_image):
                     store.fail(job.id, "the server process died before it was ready")
                     return
                 # Watched, not waited on. With a ready line declared, THAT is the

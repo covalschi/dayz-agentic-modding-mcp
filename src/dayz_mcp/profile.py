@@ -69,6 +69,19 @@ class ExpectCfg:
 class MachineCfg:
     game: str = ""
     tools: str = ""
+    # The DEDICATED SERVER install (Steam app 223350), when the stand should run
+    # from there rather than from the client install's diagnostic executable.
+    # Optional, and leaving it unset changes nothing: one directory serves both
+    # halves, which is what a Diag stand has always been.
+    #
+    # It exists because some things must sit BESIDE the server binary -- this
+    # project's radio proxy is a `hid.dll` next to the executable -- and in a
+    # shared directory the retail client loads that same file. There it patches
+    # nothing (the proxy gates on -server), but it is an unsigned DLL in the
+    # directory someone plays retail DayZ from, BattlEye says so in the
+    # launcher, and every OTHER project's server started from that directory is
+    # patched too. Giving the server its own install ends all three at once.
+    server: str = ""
     stand_root: str = ""
     port: int = 2302
     config: str = "serverDZ.cfg"
@@ -408,6 +421,7 @@ def load_profile(path: str | Path) -> Result:
         machine = MachineCfg(
             game=str(lm.get("game", "")),
             tools=str(lm.get("tools", "")),
+            server=str(lm.get("server", "")),
             stand_root=str(lm.get("stand_root", "")),
             port=port_val,
             config=config_val,

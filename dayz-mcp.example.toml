@@ -6,6 +6,16 @@
 #   [machine]
 #   config = "serverDZ.cfg"  # the server config file inside stand_root
 #
+# Optionally, the stand can be booted from a DEDICATED SERVER install (Steam
+# app 223350) instead of the client install's diagnostic executable:
+#   [machine]
+#   server = "C:/Steam/steamapps/common/DayZServer"
+# Omit it and nothing changes -- one directory serves both halves, as before.
+# Set it when something has to live BESIDE the server binary (a proxy DLL, a
+# different mpmissions set) and you would rather it were not in the directory
+# you play retail DayZ from. The mission named in the server config must exist
+# under that install's own mpmissions.
+#
 # To let the stand load the bridge mod (bridge_build packs it from this
 # server's own repository, and prints this path in its job summary), the same
 # local file carries:

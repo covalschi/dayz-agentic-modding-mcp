@@ -46,6 +46,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | Key | Meaning |
 |---|---|
 | `machine.game` | the game installation; discovered automatically if absent |
+| `machine.server` | a **dedicated server** installation (Steam app 223350) to boot the stand from, instead of the diagnostic executable inside `machine.game`. Optional, and absent nothing changes. Set it when something must live beside the server binary — a proxy DLL, a different `mpmissions` — and that directory is also the one you play retail DayZ from. The mission named in the server config has to exist under **that** install's `mpmissions` |
 | `machine.tools` | DayZ Tools; discovered automatically if absent |
 | `machine.blender` | the Blender **executable**, for `asset_export` only; discovered automatically if absent, and needed by nothing else |
 | `machine.stand_root` | the prepared test stand. The server boots against it and its logs are read from `<stand_root>/profiles`. Defaults to `<root>/testenv` |
