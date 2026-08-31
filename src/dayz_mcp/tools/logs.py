@@ -7,6 +7,7 @@ from ..verdict import build_verdict
 from . import session
 from .lifecycle import newest_client_profile, server_profiles_dir
 from .project import require_project
+from ..clock import belongs_to_run
 
 # What to change when there is no log to judge -- different for each source,
 # and getting this wrong is expensive: the client hint used to name
@@ -59,7 +60,7 @@ def log_verdict(source: str = "server", since: float | None = None) -> Result:
         return fail(f"no {source} log found", hint=NO_LOG_HINT.get(source, NO_LOG_HINT["server"]))
     if since is not None:
         mtime = log.stat().st_mtime
-        if mtime < since:
+        if not belongs_to_run(mtime, since):
             return fail(
                 f"the newest {source} log predates the run being judged "
                 f"(log last modified at {mtime:.1f}, run started at {since:.1f})",

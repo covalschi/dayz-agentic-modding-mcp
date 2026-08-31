@@ -55,6 +55,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .. import gamepad, winui
+from ..clock import belongs_to_run
 from ..bridge.channel import Channel
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
@@ -317,6 +318,11 @@ def _crash_dump_since(profiles: Path, since: float) -> Path | None:
 
     `since` is the job's own start, so the dumps of every earlier run -- and
     this profile directory accumulates them -- are not read as this one's.
+
+    The comparison is not exact, and clock.py holds the measurement that says
+    why: a dump written just after this job began can carry a timestamp just
+    before it, and refusing it would leave the wait running to its full timeout
+    over evidence already on disk.
     """
     newest = _newest(profiles, "*.mdmp")
     if newest is None:
@@ -325,7 +331,7 @@ def _crash_dump_since(profiles: Path, since: float) -> Path | None:
         written = newest.stat().st_mtime
     except OSError:  # being written, or gone again -- either way, not evidence
         return None
-    return newest if written >= since else None
+    return newest if belongs_to_run(written, since) else None
 
 
 def _crash_reason(pid: int, dump: Path) -> str:

@@ -13,6 +13,7 @@ from ..paths import GAME_PROBE
 from ..procs import is_alive, process_mods_tail, spawn, stop, udp_port_holders
 from . import session
 from .project import require_project
+from ..clock import belongs_to_run
 
 # server_status pulses the newest log twice this many seconds apart to see whether
 # it is actually growing. Kept small and capped so the tool is a quick health check,
@@ -270,7 +271,7 @@ def mission_module_compiled(profiles: Path, since: float) -> bool:
     """
     for log in profiles.glob("script_*.log"):
         try:
-            if log.stat().st_mtime < since:
+            if not belongs_to_run(log.stat().st_mtime, since):
                 continue
             if MISSION_MODULE_LINE in log.read_text(encoding="utf-8", errors="replace"):
                 return True
@@ -939,7 +940,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 if not port_bound and pid in udp_port_holders(port):
                     port_bound = True
                 for log in profiles.glob("script_*.log"):
-                    if log.stat().st_mtime < since:
+                    if not belongs_to_run(log.stat().st_mtime, since):
                         continue
                     if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
                         store.add_artifact(job.id, log)

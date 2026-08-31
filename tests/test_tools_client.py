@@ -143,13 +143,28 @@ def started_client(tmp_path, monkeypatch, *, players=1, pause_mode=2):
 
 
 def wait_for_job(job_id: str, seconds: float = 5.0):
+    """The job once it has settled -- and a NAMED failure when it has not.
+
+    Returning a still-running job made every timeout arrive at the caller as
+    `assert job.status == "failed"` seeing "running": a sentence that describes
+    neither what went wrong nor that anything hung at all. It cost a bisect to
+    find out that the job had simply never finished, so the wait now says so
+    itself, with what the job was doing and how long it was given.
+    """
     deadline = time.time() + seconds
     while time.time() < deadline:
         job = session.jobs().get(job_id)
         if job is not None and job.status in ("done", "failed"):
             return job
         time.sleep(0.02)
-    return session.jobs().get(job_id)
+
+    job = session.jobs().get(job_id)
+    status = job.status if job is not None else "no such job"
+    raise AssertionError(
+        f"job {job_id} never settled: still {status!r} after {seconds}s. "
+        "Its thread is stuck in client_start's wait loop -- something it polls "
+        "for is not happening"
+    )
 
 
 def start_and_crash(tmp_path, monkeypatch, dump_name: str | None):
@@ -1282,3 +1297,31 @@ def test_adopting_ignores_processes_that_were_already_there(monkeypatch) -> None
     monkeypatch.setattr(client, "pids_of", lambda image: {7, 8, 9})
     monkeypatch.setattr(client, "BE_HANDOFF_POLL", 0)
     assert client._adopt_launched_game("DayZ_x64.exe", {7, 8, 9}, time.time() + 0.05) == 0
+
+
+def test_a_dump_written_a_hair_before_the_job_started_still_counts(tmp_path) -> None:
+    """The clock skew this cost a bisect to find.
+
+    Windows hands time.time() a precise clock and file timestamps a coarser
+    one, so a dump written AFTER a job began can carry an mtime a millisecond
+    or two BEFORE it. Refusing that dump is refusing the evidence of exactly
+    the failure the check exists for -- a client that dies while starting.
+    """
+    dumps = tmp_path / "clientprofile"
+    dumps.mkdir()
+    dump = dumps / "DayZDiag_x64_2026-08-31_04-48-37.mdmp"
+    dump.write_bytes(b"MDMP")
+
+    written = dump.stat().st_mtime
+    assert client._crash_dump_since(dumps, written + 0.001) == dump
+
+
+def test_a_dump_from_an_earlier_run_is_still_refused(tmp_path) -> None:
+    """The tolerance must not be wide enough to adopt somebody else's crash."""
+    dumps = tmp_path / "clientprofile"
+    dumps.mkdir()
+    dump = dumps / "DayZDiag_x64_2026-08-02_13-40-26.mdmp"
+    dump.write_bytes(b"MDMP")
+
+    written = dump.stat().st_mtime
+    assert client._crash_dump_since(dumps, written + 60.0) is None
