@@ -154,6 +154,34 @@ def process_mods_tail(pid: int) -> str:
     return ";".join(n for n in names if n)
 
 
+def pids_of(image: str) -> set[int]:
+    """Every running process with this image name.
+
+    Used to tell which process a LAUNCHER started: there is no portable way to
+    ask "what did you spawn", so the answer is the difference between the set
+    before and the set after. That is exact as long as nobody else starts the
+    same executable in the same second -- and on a stand, nobody does.
+    """
+    if not image or os.name != "nt":
+        return set()
+
+    out = subprocess.run(  # noqa: S603
+        ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+
+    found: set[int] = set()
+    for row in csv.reader(out.splitlines()):
+        # A filter that matches nothing prints a sentence, not CSV rows.
+        if len(row) < 2 or row[0].lower() != image.lower():
+            continue
+        try:
+            found.add(int(row[1]))
+        except ValueError:
+            continue
+    return found
+
+
 def is_alive(pid: int, image: str = "") -> bool:
     """True if `pid` is a running process.
 

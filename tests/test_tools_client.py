@@ -1258,31 +1258,27 @@ def test_no_profile_falls_back_to_diag() -> None:
     assert client._client_image_for(None) == client.DIAG_IMAGE
 
 
-def test_battleye_off_is_read_as_off(tmp_path) -> None:
-    cfg = tmp_path / "serverDZ.cfg"
-    cfg.write_text("hostname = \"x\";\nBattlEye = 0;\n", encoding="utf-8")
-    assert client._battleye_on(cfg) is False
+def test_adopting_the_game_the_launcher_started(monkeypatch) -> None:
+    """The new pid, not the launcher's."""
+    seen = [{7}, {7}, {7, 99}]
+
+    def fake(image: str) -> set[int]:
+        return seen.pop(0) if seen else {7, 99}
+
+    monkeypatch.setattr(client, "pids_of", fake)
+    monkeypatch.setattr(client, "BE_HANDOFF_POLL", 0)
+    got = client._adopt_launched_game("DayZ_x64.exe", {7}, time.time() + 5)
+    assert got == 99
 
 
-def test_battleye_on_is_read_as_on(tmp_path) -> None:
-    cfg = tmp_path / "serverDZ.cfg"
-    cfg.write_text("BattlEye = 1;\n", encoding="utf-8")
-    assert client._battleye_on(cfg) is True
+def test_adopting_gives_up_rather_than_guessing(monkeypatch) -> None:
+    """Nothing new ever appears: 0, never somebody else's pid."""
+    monkeypatch.setattr(client, "pids_of", lambda image: {7})
+    monkeypatch.setattr(client, "BE_HANDOFF_POLL", 0)
+    assert client._adopt_launched_game("DayZ_x64.exe", {7}, time.time() + 0.05) == 0
 
 
-def test_commented_out_battleye_does_not_count(tmp_path) -> None:
-    """The line that is not in force must not decide the answer."""
-    cfg = tmp_path / "serverDZ.cfg"
-    cfg.write_text("// BattlEye = 1;\nBattlEye = 0;\n", encoding="utf-8")
-    assert client._battleye_on(cfg) is False
-
-
-def test_absent_battleye_is_read_as_on(tmp_path) -> None:
-    """Silence means the engine default, which is on -- never a quiet 'off'."""
-    cfg = tmp_path / "serverDZ.cfg"
-    cfg.write_text("hostname = \"x\";\n", encoding="utf-8")
-    assert client._battleye_on(cfg) is True
-
-
-def test_unreadable_config_is_read_as_on(tmp_path) -> None:
-    assert client._battleye_on(tmp_path / "nothing-here.cfg") is True
+def test_adopting_ignores_processes_that_were_already_there(monkeypatch) -> None:
+    monkeypatch.setattr(client, "pids_of", lambda image: {7, 8, 9})
+    monkeypatch.setattr(client, "BE_HANDOFF_POLL", 0)
+    assert client._adopt_launched_game("DayZ_x64.exe", {7, 8, 9}, time.time() + 0.05) == 0

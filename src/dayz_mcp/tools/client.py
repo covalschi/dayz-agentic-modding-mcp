@@ -49,7 +49,6 @@ person who owns the machine.
 """
 from __future__ import annotations
 
-import re
 import threading
 import time
 from dataclasses import replace
@@ -60,7 +59,7 @@ from ..bridge.channel import Channel
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..paths import GAME_PROBE
-from ..procs import is_alive, spawn, stop, udp_port_holders
+from ..procs import is_alive, pids_of, spawn, stop, udp_port_holders
 from ..verdict import build_verdict
 from . import session
 from .lifecycle import (
@@ -102,28 +101,45 @@ from .world import _run as _world_command
 DIAG_IMAGE = GAME_PROBE
 RETAIL_IMAGE = "DayZ_x64.exe"
 
+# The retail client has to be started through its own BattlEye launcher, and
+# this is a fact about the CLIENT, not about the stand. Measured here: with
+# `BattlEye = 0;` in the server config -- so nothing on the server asks for it
+# -- a directly launched DayZ_x64.exe reached the world load, was refused at
+# connect with a BattlEye message, and the bridge never saw a player. The same
+# build launched through DayZ_BE.exe joined the same stand.
+#
+# The launcher starts the game as a SEPARATE process and keeps running beside
+# it, so the pid returned by spawn() is the launcher's. Every tool downstream
+# keys off the tracked pid -- the window to capture, the window to focus, the
+# process to stop, the .RPT to judge -- so the launched game has to be adopted
+# before anything is recorded.
+BE_LAUNCHER = "DayZ_BE.exe"
 
-def _battleye_on(cfg: Path) -> bool:
-    """Does this server config turn BattlEye on?
+# How long the launcher gets to produce a game process. Generous: it verifies
+# its own files first, and a slow disk has been seen to take a while.
+BE_HANDOFF_SECONDS = 60.0
+BE_HANDOFF_POLL = 0.5
 
-    Absent means ON: the engine's own default is BattlEye enabled, so a config
-    that never mentions it gets a client that needs the launcher. Reading the
-    silence as "off" would turn a named refusal back into the unexplained
-    connect timeout this whole distinction exists to remove.
 
-    Comments are stripped first -- `// BattlEye = 1;` above a real `BattlEye =
-    0;` is exactly how these files are written.
+def _adopt_launched_game(image: str, before: set[int], deadline: float) -> int:
+    """The pid of the game the BattlEye launcher started, or 0.
+
+    A launcher cannot be asked what it spawned, so this watches for a process
+    with the game's image that was not there before the launcher ran. On a
+    stand nobody else is starting DayZ, so the new one is ours.
+
+    Waits to the deadline rather than giving up when the launcher exits: the
+    launcher handing off and disappearing is a normal path, and treating it as
+    a failure would report a client that is starting perfectly well as dead.
     """
-    try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return True
-
-    live = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
-    found = re.search(r"\bBattlEye\s*=\s*(\d+)", live, re.IGNORECASE)
-    if not found:
-        return True
-    return found.group(1) != "0"
+    while time.time() < deadline:
+        fresh = pids_of(image) - before
+        if fresh:
+            # Lowest pid when several appear at once, so the choice is at least
+            # deterministic; on a stand there is only ever one.
+            return min(fresh)
+        time.sleep(BE_HANDOFF_POLL)
+    return 0
 
 
 def _client_image_for(prof) -> str:  # noqa: ANN001 - the loaded profile, or None
@@ -168,7 +184,8 @@ CONNECT_POLL_SECONDS = 2.0
 # the list and is not cosmetic: a fullscreen D3D window will not yield the
 # foreground at all (an attempt to cover one hung), so a client launched
 # fullscreen is a client nothing can be verified against.
-OWNED_LAUNCH_ARGS = ("-connect", "-port", "-mod", "-profiles", "-window", "-nolauncher")
+OWNED_LAUNCH_ARGS = ("-connect", "-port", "-mod", "-profiles", "-window",
+                     "-nolauncher", "-exe")
 
 # Said in the answer of the one tool that takes the screen away, the same way
 # gamepad.py announces that a controller has been plugged in: a side effect on
@@ -449,6 +466,16 @@ def client_start(
     on a mismatch that was knowable before launch. `machine.server` decides it,
     the same setting that already decides the server's own image.
 
+    THE RETAIL CLIENT GOES THROUGH ITS BATTLEYE LAUNCHER, and that is a fact
+    about the client rather than about the stand. Measured here: with
+    `BattlEye = 0;` in the server config, so nothing on the server asks for it,
+    a directly launched DayZ_x64.exe still reached the world load, was refused
+    at connect with a BattlEye message, and the bridge never saw a player --
+    while the same build launched through DayZ_BE.exe joined the same stand.
+    The launcher starts the game as a separate process, so this adopts the
+    process it spawned and tracks THAT: everything downstream keys off the
+    tracked pid.
+
     IT LAUNCHES WINDOWED, always. A fullscreen D3D window does not yield the
     foreground -- an attempt to cover one simply hung -- so a fullscreen client
     can be neither typed into nor left behind while the owner works. The window
@@ -552,23 +579,17 @@ def client_start(
                  "machine.game points at the DayZ installation, not at the tools",
         )
 
-    # BattlEye and the retail client cannot both be satisfied from here. The
-    # retail build only initialises BattlEye when it is launched through
-    # DayZ_BE.exe, and that launcher starts the game as a SEPARATE process --
-    # so the pid this tool would track is the launcher's, and every tool that
-    # follows keys off that pid: the window to capture, the window to focus,
-    # the process to stop, the .RPT to judge. Rather than track the wrong
-    # process and report about it confidently, this says so.
-    #
-    # A test stand has no use for BattlEye anyway: it kicks clients over
-    # unsigned pbos, which is what a mod under development has.
-    if image == RETAIL_IMAGE and _battleye_on(stand_root() / prof.machine.config):
+    # The retail client goes through its BattlEye launcher. See BE_LAUNCHER for
+    # why that is not optional and not a property of the stand's config.
+    launcher = Path(game) / BE_LAUNCHER
+    via_launcher = image == RETAIL_IMAGE and launcher.exists()
+    if image == RETAIL_IMAGE and not via_launcher:
         return fail(
-            f"the stand's {prof.machine.config} has BattlEye enabled, and the retail "
-            "client this stand needs would have to be launched through DayZ_BE.exe, "
-            "which starts the game as a separate process this tool could not track",
-            hint="set BattlEye = 0; in the stand's server config. A stand running "
-                 "unsigned mod pbos is not a stand BattlEye can be used on",
+            f"this stand needs the retail client, and {BE_LAUNCHER} is not in the game "
+            f"directory: {launcher}",
+            hint="the retail client is refused at connect without its BattlEye "
+                 "launcher, whatever the server config says about BattlEye. Verify "
+                 "the DayZ installation through Steam",
         )
 
     profiles = client_profiles_dir()
@@ -578,8 +599,13 @@ def client_start(
     # -serverMod mods are dedicated-server only; a client never loads them, so
     # only the client half of the profile's split goes on this command line.
     client_mods, _server_mods = mod_list()
-    cmd = [
-        str(exe),
+    #  -exe comes FIRST and is the launcher's own argument, not the game's;
+    # everything after it is handed to the game untouched.
+    argv0 = [str(exe)]
+    if via_launcher:
+        argv0 = [str(launcher), "-exe", image]
+
+    cmd = argv0 + [
         f"-connect={STAND_ADDRESS}",
         f"-port={port}",
         f"-mod={client_mods}",
@@ -606,7 +632,27 @@ def client_start(
         # whose executable is not a runnable image passes the existence probe
         # above and then makes spawn() raise.
         try:
+            # Snapshot BEFORE the spawn: the adopted pid is the one that was
+            # not there a moment ago.
+            before = pids_of(image) if via_launcher else set()
+
             pid = spawn(cmd, Path(game))
+
+            if via_launcher:
+                launcher_pid = pid
+                pid = _adopt_launched_game(
+                    image, before, time.time() + BE_HANDOFF_SECONDS
+                )
+                if not pid:
+                    store.fail(
+                        job.id,
+                        f"{BE_LAUNCHER} (pid {launcher_pid}) did not start "
+                        f"{image} within {BE_HANDOFF_SECONDS:.0f}s -- the launcher "
+                        "verifies its files first and shows its own window, so "
+                        "check whether it is waiting for something",
+                    )
+                    return
+
             session.set_client_pid(pid, image)
             deadline = time.time() + timeout
             ever_readable = False
