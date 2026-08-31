@@ -229,6 +229,49 @@ def _newest(folder: Path, pattern: str) -> Path | None:
     return items[0] if items else None
 
 
+def _crash_dump_since(profiles: Path, since: float) -> Path | None:
+    """A minidump written by THIS run, or None.
+
+    A client that fails to start does not reliably die, and that is the whole
+    reason this exists. An engine error message leaves the process alive behind
+    a modal dialog it holds until someone clicks it: `is_alive` then answers
+    truthfully, the player count never moves, and the wait runs to the full
+    timeout before blaming the bridge for a silence the client caused. The dump
+    beside the profile is the event itself, and it is on disk within seconds.
+
+    `since` is the job's own start, so the dumps of every earlier run -- and
+    this profile directory accumulates them -- are not read as this one's.
+    """
+    newest = _newest(profiles, "*.mdmp")
+    if newest is None:
+        return None
+    try:
+        written = newest.stat().st_mtime
+    except OSError:  # being written, or gone again -- either way, not evidence
+        return None
+    return newest if written >= since else None
+
+
+def _crash_reason(pid: int, dump: Path) -> str:
+    """Why the start failed, told apart by which kind of dump was written.
+
+    The two are not the same event to act on: one has a window on screen
+    waiting for a click, the other has nothing left running.
+    """
+    if dump.name.startswith("ErrorMessage_"):
+        return (
+            f"the client (pid {pid}) stopped on an engine error message while starting and "
+            f"wrote {dump.name}. The process is still alive because the dialog is waiting to "
+            "be clicked -- which is why the player count would never have moved and this "
+            "would otherwise have run to the full timeout. client_shot shows the message "
+            "itself; client_verdict reads the .RPT behind it"
+        )
+    return (
+        f"the client (pid {pid}) crashed while starting and wrote {dump.name} -- "
+        "client_verdict reads its .RPT, which is where the reason will be"
+    )
+
+
 def _background_setting() -> dict:
     """What the client's UPDATE IN BACKGROUND setting is, in a shape that can
     be reported whether or not it could be read.
@@ -468,6 +511,13 @@ def client_start(
             ever_readable = False
             last_seen = None
             while True:
+                # BEFORE the liveness check, not after: a crash that did kill
+                # the process has both signals, and the dump is the one that
+                # names the event instead of only its outcome.
+                dump = _crash_dump_since(profiles, job.started)
+                if dump is not None:
+                    store.fail(job.id, _crash_reason(pid, dump))
+                    return
                 if not is_alive(pid, image=CLIENT_IMAGE):
                     store.fail(
                         job.id,

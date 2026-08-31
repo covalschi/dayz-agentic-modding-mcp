@@ -10,6 +10,7 @@ exactly one tool in the set takes the foreground, and it is proved by watching
 who calls `winui.focus`, not by reading prose.
 """
 import json
+import os
 import textwrap
 import time
 from pathlib import Path
@@ -151,9 +152,75 @@ def wait_for_job(job_id: str, seconds: float = 5.0):
     return session.jobs().get(job_id)
 
 
+def start_and_crash(tmp_path, monkeypatch, dump_name: str | None):
+    """A client that never connects, writing `dump_name` the moment it launches.
+
+    The dump is written from inside spawn rather than beforehand, because that
+    is both what really happens and what the check has to tolerate: the job
+    record exists by then, so the file's timestamp is genuinely inside the run.
+    Pass None for a client that simply never joins, which must still time out.
+    """
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch, players=0)
+    dumps = stand / "clientprofile"
+    dumps.mkdir(parents=True, exist_ok=True)
+
+    def spawn_then_fail(cmd, cwd):
+        if dump_name is not None:
+            (dumps / dump_name).write_bytes(b"MDMP")
+        return 777
+
+    monkeypatch.setattr(client, "spawn", spawn_then_fail)
+    started = client.client_start(timeout=30)
+    assert started.ok is True, started.error
+    return dumps, wait_for_job(started.data["job_id"])
+
+
 # ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
+
+
+def test_client_start_reports_a_crash_instead_of_waiting_out_the_timeout(
+    tmp_path, monkeypatch
+):
+    """The failure this check exists for: a client that dies on startup used to
+    be indistinguishable from a slow one, so the job ran the whole timeout and
+    then described the silence rather than the crash."""
+    _dumps, job = start_and_crash(tmp_path, monkeypatch, "DayZDiag_x64_2026-08-31_04-48-37.mdmp")
+    assert job.status == "failed"
+    assert "crashed while starting" in job.error
+    assert "DayZDiag_x64_2026-08-31_04-48-37.mdmp" in job.error
+
+
+def test_client_start_names_an_error_dialog_as_such(tmp_path, monkeypatch):
+    """The worse half of the same failure. An engine error message keeps the
+    process ALIVE behind a modal dialog, so every liveness check passes and
+    only the timeout ends it -- with a message accusing the bridge."""
+    _dumps, job = start_and_crash(
+        tmp_path, monkeypatch, "ErrorMessage_DayZDiag_x64_2026-08-31_04-48-37.mdmp"
+    )
+    assert job.status == "failed"
+    assert "engine error message" in job.error
+    assert "still alive" in job.error
+    assert "client_shot" in job.error
+
+
+def test_client_start_ignores_dumps_left_by_earlier_runs(tmp_path, monkeypatch):
+    """This profile directory accumulates dumps -- there were five in the real
+    one when this was written. Reading an old one as this run's would turn every
+    start after any past crash into an instant false failure."""
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch, players=1)
+    dumps = stand / "clientprofile"
+    dumps.mkdir(parents=True, exist_ok=True)
+    old = dumps / "DayZDiag_x64_2026-08-02_13-40-26.mdmp"
+    old.write_bytes(b"MDMP")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+
+    started = client.client_start(timeout=5)
+    assert started.ok is True, started.error
+    job = wait_for_job(started.data["job_id"])
+    assert job.status == "done", job.error
+    assert "connected" in job.summary
 
 
 def test_every_client_tool_refuses_without_a_project():
