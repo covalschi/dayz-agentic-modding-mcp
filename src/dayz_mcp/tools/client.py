@@ -671,6 +671,21 @@ def client_start(
                 if dump is not None:
                     store.fail(job.id, _crash_reason(pid, dump))
                     return
+                # BEFORE the liveness check for the same reason the dump
+                # is: a client stuck on a message box is ALIVE, and every
+                # other signal here reads it as merely slow.
+                popup = winui.modal_dialog(pid)
+                if popup is not None:
+                    title, body = popup
+                    said = (
+                        f"the client (pid {pid}) is holding up a dialog and cannot "
+                        f"go further: {title!r}"
+                    )
+                    if body:
+                        said += f" -- {body}"
+                    store.fail(job.id, said)
+                    return
+
                 if not is_alive(pid, image=image):
                     store.fail(
                         job.id,

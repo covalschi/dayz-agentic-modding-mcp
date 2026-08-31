@@ -226,6 +226,9 @@ if IS_WINDOWS:  # pragma: no cover - the import itself is the platform guard
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, WNDENUMPROC, wintypes.LPARAM]
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.BringWindowToTop.argtypes = [wintypes.HWND]
@@ -307,6 +310,81 @@ def find_window(pid: int) -> int | None:
     callback = WNDENUMPROC(collect)
     user32.EnumWindows(callback, 0)
     return found[0] if found else None
+
+
+#: The window class Windows gives every standard message box. The engine's
+#: error popups are plain MessageBox calls, so this is what they are.
+DIALOG_CLASS = "#32770"
+
+
+def _window_text(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(2048)
+    user32.GetWindowTextW(hwnd, buf, len(buf))
+    return buf.value
+
+
+def _window_class(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, len(buf))
+    return buf.value
+
+
+def modal_dialog(pid: int) -> tuple[str, str] | None:
+    """`(title, body)` of a message box this process is holding up, or None.
+
+    THIS IS THE FAILURE NEITHER OF THE OTHER TWO SIGNALS CAN SEE. A client that
+    cannot compile its scripts does not crash and does not exit: it puts up
+    "Can't compile ... script module!" with Abort/Retry/Ignore and waits for a
+    human. So `is_alive` keeps answering yes, no minidump is ever written, the
+    player count never moves, and the wait runs to its full timeout before
+    reporting a silence -- while the engine has been showing the reason on
+    screen the entire time, naming the file and the line.
+
+    Measured on a live client (2026-08-31): the popup is a top-level visible
+    window of the game's own pid, class #32770, titled "Compile error", with
+    the message in a Static child and Abort/Retry/Ignore buttons beside it. All
+    of it readable from outside without touching the process.
+
+    The body is the concatenation of the Static children, because that is where
+    MessageBox puts the text; the buttons are skipped by class so the answer is
+    the message rather than the message plus "&Abort&Retry&Ignore".
+    """
+    if not IS_WINDOWS or pid <= 0:
+        return None
+
+    hits: list[int] = []
+
+    def collect(hwnd, _lparam):  # noqa: ANN001 - a Windows callback signature
+        owner_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value != pid:
+            return True
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        if _window_class(hwnd) == DIALOG_CLASS:
+            hits.append(int(hwnd))
+            return False
+        return True
+
+    # Kept in a local so the trampoline outlives the call, as in find_window.
+    callback = WNDENUMPROC(collect)
+    user32.EnumWindows(callback, 0)
+    if not hits:
+        return None
+
+    dialog = hits[0]
+    parts: list[str] = []
+
+    def gather(child, _lparam):  # noqa: ANN001
+        if _window_class(child).lower() == "static":
+            text = _window_text(child).strip()
+            if text:
+                parts.append(text)
+        return True
+
+    kids = WNDENUMPROC(gather)
+    user32.EnumChildWindows(dialog, kids, 0)
+    return _window_text(dialog), " ".join(" ".join(parts).split())
 
 
 def foreground_hwnd() -> int:

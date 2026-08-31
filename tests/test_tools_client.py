@@ -1325,3 +1325,40 @@ def test_a_dump_from_an_earlier_run_is_still_refused(tmp_path) -> None:
 
     written = dump.stat().st_mtime
     assert client._crash_dump_since(dumps, written + 60.0) is None
+
+
+def test_a_client_stuck_on_a_dialog_fails_at_once(tmp_path, monkeypatch) -> None:
+    """The failure neither the dump nor the liveness check can see.
+
+    A client that cannot compile its scripts does not crash and does not exit --
+    it puts up Abort/Retry/Ignore and waits for a human. Measured on a live one:
+    is_alive keeps saying yes, no minidump is ever written, the player count
+    never moves, and the wait used to run its full timeout and then report the
+    silence rather than the message on screen.
+    """
+    started_client(tmp_path, monkeypatch, players=0)
+    monkeypatch.setattr(
+        winui, "modal_dialog",
+        lambda pid: ("Compile error", 'Can\'t compile "Mission" script module!'),
+    )
+
+    started = client.client_start(timeout=30)
+    assert started.ok is True, started.error
+    job = wait_for_job(started.data["job_id"])
+
+    assert job.status == "failed"
+    assert "holding up a dialog" in job.error
+    assert "Compile error" in job.error
+    assert 'Can\'t compile "Mission" script module!' in job.error
+
+
+def test_no_dialog_means_the_wait_carries_on(tmp_path, monkeypatch) -> None:
+    """The check must not invent one: a client that is merely still loading has
+    to keep being waited for."""
+    started_client(tmp_path, monkeypatch, players=1)
+    monkeypatch.setattr(winui, "modal_dialog", lambda pid: None)
+
+    started = client.client_start(timeout=30)
+    job = wait_for_job(started.data["job_id"])
+    assert job.status == "done"
+    assert "connected" in job.summary
