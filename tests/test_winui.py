@@ -14,6 +14,7 @@ import zlib
 import pytest
 
 from dayz_mcp import winui
+from dayz_mcp.winui import crop_bgra
 
 WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows window APIs")
 
@@ -158,6 +159,26 @@ def test_the_png_is_readable_by_a_real_decoder():
     assert img.size == (2, 1)
     assert img.convert("RGBA").getpixel((0, 0)) == (0x30, 0x20, 0x10, 255)
     assert img.convert("RGBA").getpixel((1, 0)) == (0xFF, 0x00, 0x00, 255)
+
+
+# --------------------------------------------------------------------------
+# cropping -- pixels only; the caller decides what the rectangle means
+# --------------------------------------------------------------------------
+
+
+def test_crop_takes_the_rectangle_and_clamps_to_the_frame():
+    width, height = 4, 3
+    pixels = bytes(range(width * height * 4))
+    out, w, h = crop_bgra(pixels, width, height, (1, 1, 2, 1))
+    assert (w, h) == (2, 1)
+    assert out == pixels[(1 * width + 1) * 4:(1 * width + 3) * 4]
+    out, w, h = crop_bgra(pixels, width, height, (2, 2, 10, 10))
+    assert (w, h) == (2, 1)
+
+
+def test_a_rectangle_outside_the_frame_is_an_error():
+    with pytest.raises(ValueError):
+        crop_bgra(bytes(4 * 4 * 3), 4, 3, (5, 0, 2, 2))
 
 
 # --------------------------------------------------------------------------

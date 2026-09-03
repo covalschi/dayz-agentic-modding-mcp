@@ -694,7 +694,30 @@ def _capture(
         user32.ReleaseDC(hwnd, window_dc)
 
 
-def shot(pid: int, path: str | Path) -> Result:
+def crop_bgra(bgra: bytes, width: int, height: int,
+              rect: tuple[int, int, int, int]) -> tuple[bytes, int, int]:
+    """The `rect` (x, y, w, h) of a top-down BGRA frame, clamped to the frame.
+
+    Pixels only: the caller decides what the rectangle means. A rectangle
+    that leaves nothing inside the frame is an error rather than an empty
+    image, because an empty PNG reports success and shows nothing.
+    """
+    x, y, w, h = (int(v) for v in rect)
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(width, x + w)
+    y1 = min(height, y + h)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"rectangle {rect} has nothing inside a {width}x{height} frame")
+    stride = width * 4
+    rows = bytearray()
+    for row in range(y0, y1):
+        start = row * stride + x0 * 4
+        rows += bgra[start:start + (x1 - x0) * 4]
+    return bytes(rows), x1 - x0, y1 - y0
+
+
+def shot(pid: int, path: str | Path, rect: tuple[int, int, int, int] | None = None) -> Result:
     """Capture the client's window to a PNG. Focus is NOT required.
 
     Measured, so it does not have to be guessed at: the frame is live with the
@@ -707,6 +730,13 @@ def shot(pid: int, path: str | Path) -> Result:
     fails a dark frame, because night is dark, but a caller that reads 0.0
     knows it captured nothing, which `PrintWindow`'s own return value would not
     have told it.
+
+    `rect` crops to `(x, y, w, h)` in the captured frame's own pixels, after
+    the capture is validated and before the PNG is written and `lit_fraction`
+    is measured -- so both then describe the cropped region alone. A
+    rectangle with nothing inside the frame is refused rather than written as
+    an empty image (`crop_bgra`); `data["rect"]` is only present when a crop
+    actually happened.
     """
     if not IS_WINDOWS:
         return _no_windows()
@@ -747,6 +777,14 @@ def shot(pid: int, path: str | Path) -> Result:
                  "capturing it",
         )
 
+    cropped = None
+    if rect is not None:
+        try:
+            pixels, width, height = crop_bgra(pixels, width, height, rect)
+        except ValueError as exc:
+            return fail(str(exc), hint="the rectangle comes from the widget tree; walk it again")
+        cropped = [int(v) for v in rect]
+
     frame = lit_fraction(pixels)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -759,6 +797,8 @@ def shot(pid: int, path: str | Path) -> Result:
         "lit_fraction": round(frame, 4),
         "foreground": foreground_pid() == pid,
     }
+    if cropped is not None:
+        data["rect"] = cropped
     if frame < BLACK_FRAME_FRACTION:
         # Only when it is actually black: a field that is always there and
         # almost always empty stops being read.
