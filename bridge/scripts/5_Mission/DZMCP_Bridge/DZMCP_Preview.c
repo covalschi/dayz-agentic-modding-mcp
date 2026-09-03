@@ -144,6 +144,11 @@ class DZMCP_Preview
         for (int i = 0; i < fixture.ops.Count(); i++)
         {
             DZMCP_FixtureOp op = fixture.ops.Get(i);
+            if (!op)
+            {
+                why = "fixture op " + i + " is not an object";
+                return false;
+            }
             string opWhy;
             if (!ApplyOp(op, opWhy))
             {
@@ -261,8 +266,27 @@ class DZMCP_Preview
         op.color.Split(" ", parts);
         if (parts.Count() != 4)
         {
-            why = "color must be four fractions 'a r g b', not '" + op.color + "'";
+            why = "color must be four fractions 0..1 'a r g b', not '" + op.color + "'";
             return false;
+        }
+        // Mirrors DZMCP_World.TextToPos: a native ToFloat() on garbage
+        // silently answers 0, which is a legal fraction and therefore
+        // indistinguishable from a real one -- so every token is checked
+        // numeric, and in range, before any of them is trusted.
+        for (int i = 0; i < parts.Count(); i++)
+        {
+            string part = parts.Get(i);
+            if (!DZMCP_World.IsNumeric(part))
+            {
+                why = "color must be four fractions 0..1 'a r g b', not '" + op.color + "'";
+                return false;
+            }
+            float value = part.ToFloat();
+            if (value < 0 || value > 1)
+            {
+                why = "color must be four fractions 0..1 'a r g b', not '" + op.color + "'";
+                return false;
+            }
         }
         node.SetColor(ARGBF(parts.Get(0).ToFloat(), parts.Get(1).ToFloat(), parts.Get(2).ToFloat(), parts.Get(3).ToFloat()));
         return true;
