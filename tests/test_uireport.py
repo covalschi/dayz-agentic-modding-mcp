@@ -22,6 +22,17 @@ def test_the_report_is_one_file_with_boxes_relative_to_the_host():
     assert "http" not in html.split("<body")[-1]  # no external resources
 
 
+def test_a_host_starting_off_the_left_or_top_edge_places_boxes_against_the_clamped_crop():
+    """crop_bgra clamps a negative host origin to 0 -- the PNG beside this
+    report starts there, not at the host's own (possibly negative) x/y -- so
+    a box has to be placed against that same clamped origin, or it drifts."""
+    meta = {"layout": "a/b.layout", "host": (-20, -5, 400, 300), "emulated": False}
+    nodes = [{"path": "0", "class": "TextWidget", "name": "Label", "visible": True, "shown": True,
+              "rect": "10 15 200 20", "depth": 1, "text": "", "text_size": (200, 20)}]
+    html = render_html("shot.png", nodes, [], [], meta)
+    assert "left:10px" in html and "top:15px" in html
+
+
 def test_write_report_writes_the_three_files(tmp_path):
     report = write_report(tmp_path, "shot.png", NODES, ISSUES, [], META)
     assert report == tmp_path / "report.html"

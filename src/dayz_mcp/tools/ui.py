@@ -273,7 +273,10 @@ def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
                 return None, f"fixture path must stay inside the project: {path}"
             if not path.is_file():
                 return None, f"fixture file not found: {path}"
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                return None, f"fixture file could not be read: {path}: {exc}"
         try:
             fixture = json.loads(text)
         except ValueError as exc:

@@ -437,6 +437,18 @@ def test_a_fixture_path_that_climbs_out_of_the_project_is_refused(live, tmp_path
     assert live.sent == []
 
 
+def test_a_fixture_file_that_cannot_be_decoded_is_reported_not_raised(live):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "bad.json").write_bytes(b"\xff\xfe\x00\x01")
+
+    result = ui.ui_load("a.layout", fixture="preview/bad.json")
+
+    assert not result.ok
+    assert "could not be read" in result.error
+    assert live.sent == []
+
+
 def test_ui_load_reports_the_host_rectangle(live):
     live.state = BridgeState(tick=9, session_id="client-1", world={
         "ui_root": "preview", "ui_total": 1, "ui_nodes": [node_line(path="")],

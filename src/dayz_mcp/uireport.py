@@ -40,6 +40,11 @@ document.querySelectorAll('.issue').forEach(el=>{el.addEventListener('click',()=
 def render_html(shot: str | None, nodes: list[dict], issues: list[dict], notes: list[str], meta: dict) -> str:
     host = meta.get("host") or (0, 0, 0, 0)
     hx, hy = int(host[0]), int(host[1])
+    # The PNG beside this report is the CLAMPED crop (crop_bgra clamps its
+    # own origin to the captured frame, never negative), so a box has to be
+    # placed against that same clamped origin -- not against a host
+    # rectangle that can start off-frame, to the left of or above it.
+    ox, oy = max(0, hx), max(0, hy)
     worst = {}
     for issue in issues:
         worst[issue["path"]] = "error" if issue["severity"] == "error" or worst.get(issue["path"]) == "error" else "warn"
@@ -52,7 +57,7 @@ def render_html(shot: str | None, nodes: list[dict], issues: list[dict], notes: 
         cls = worst.get(n["path"], "")
         boxes.append(f'<div class="box {cls}" data-path="{html.escape(n["path"])}" '
                      f'title="{html.escape(n["class"])} {html.escape(n["name"])}" '
-                     f'style="left:{x - hx}px;top:{y - hy}px;width:{w}px;height:{h}px"></div>')
+                     f'style="left:{x - ox}px;top:{y - oy}px;width:{w}px;height:{h}px"></div>')
     items = []
     for issue in issues:
         items.append(f'<div class="issue {issue["severity"]}" data-path="{html.escape(issue["path"])}" '
