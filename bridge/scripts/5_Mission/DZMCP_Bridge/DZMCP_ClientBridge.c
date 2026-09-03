@@ -140,9 +140,11 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     //   depth  how deep to go; the root is depth 0
     //   limit  how many nodes to RECORD. The number VISITED is reported whole
     //          either way, so a page never reads as the whole interface.
+    //   offset how many visited nodes to skip before recording -- a page
+    //          after the first
     protected void VerbUiTree(map<string, string> args)
     {
-        if (RefuseUnknownArgs(args, "|root|depth|limit|", "root, depth, limit"))
+        if (RefuseUnknownArgs(args, "|root|depth|limit|offset|", "root, depth, limit, offset"))
             return;
 
         string which = ArgOr(args, "root", "menu");
@@ -163,6 +165,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         DZMCP_UiWalk walk = new DZMCP_UiWalk();
         walk.maxDepth = ReadBoundedInt(args, "depth", DZMCP_Ui.DEPTH_MAX, 1, DZMCP_Ui.DEPTH_MAX);
         walk.limit = ReadBoundedInt(args, "limit", DZMCP_Ui.NODES_MAX, 1, DZMCP_Ui.NODES_MAX);
+        walk.offset = ReadBoundedInt(args, "offset", 0, 0, 100000);
 
         DZMCP_Ui.Walk(root, "", 0, walk);
 
@@ -185,7 +188,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     // because a label's text is the one field nobody knows exactly in advance.
     protected void VerbUiFind(map<string, string> args)
     {
-        if (RefuseUnknownArgs(args, "|root|name|class|text|depth|limit|", "root, name, class, text, depth, limit"))
+        if (RefuseUnknownArgs(args, "|root|name|class|text|depth|limit|offset|", "root, name, class, text, depth, limit, offset"))
             return;
 
         string which = ArgOr(args, "root", "menu");
@@ -219,6 +222,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         // "visited" count mean something different from ui_tree's, and two
         // counts with one name is how a number stops being comparable.
         walk.limit = DZMCP_Ui.NODES_MAX;
+        walk.offset = ReadBoundedInt(args, "offset", 0, 0, 100000);
         DZMCP_Ui.Walk(root, "", 0, walk);
 
         int limit = ReadBoundedInt(args, "limit", DZMCP_Ui.NODES_MAX, 1, DZMCP_Ui.NODES_MAX);
@@ -433,7 +437,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     // the description was built with, so there is one definition of the shape
     // and not two.
     //
-    // Fields: path | class | name | visibility | rect | depth | text
+    // Fields: path | class | name | visibility | rect | depth | text | text size
     //
     // SIX FIELDS IS A WHOLE LINE, not a truncated one, and demanding seven
     // made this verb answer "matched 0" to every question ever asked of it.

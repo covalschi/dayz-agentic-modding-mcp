@@ -38,6 +38,7 @@ class DZMCP_UiWalk
     int total;      // how many nodes were VISITED, whatever was recorded
     int limit;      // how many may be recorded
     int maxDepth;   // how deep to go; the root is depth 0
+    int offset;     // how many visited nodes to skip before recording -- a page after the first
     ref array<string> lines;
 
     void DZMCP_UiWalk()
@@ -45,6 +46,7 @@ class DZMCP_UiWalk
         total = 0;
         limit = 0;
         maxDepth = 0;
+        offset = 0;
         lines = new array<string>();
     }
 }
@@ -132,7 +134,7 @@ class DZMCP_Ui
             return;
 
         walk.total++;
-        if (walk.lines.Count() < walk.limit)
+        if (walk.total > walk.offset && walk.lines.Count() < walk.limit)
             walk.lines.Insert(Describe(node, path, depth));
 
         Widget child = node.GetChildren();
@@ -177,7 +179,7 @@ class DZMCP_Ui
             shown = "1";
 
         string rect = "" + Math.Round(x) + " " + Math.Round(y) + " " + Math.Round(w) + " " + Math.Round(h);
-        return path + "|" + node.ClassName() + "|" + DZMCP_Text.Sanitize(node.GetName(), TEXT_LEN) + "|" + visible + shown + "|" + rect + "|" + depth + "|" + TextOf(node);
+        return path + "|" + node.ClassName() + "|" + DZMCP_Text.Sanitize(node.GetName(), TEXT_LEN) + "|" + visible + shown + "|" + rect + "|" + depth + "|" + TextOf(node) + "|" + Metrics(node);
     }
 
     // The node's text, or "" when the engine gives no way to read it.
@@ -219,6 +221,21 @@ class DZMCP_Ui
         }
 
         return "";
+    }
+
+    // The rendered text's size in screen pixels, for widgets that derive from
+    // TextWidget: labels, multiline and rich text, multiline edit boxes.
+    // EditBoxWidget and ButtonWidget extend UIWidget (enwidgets.c:347, :381)
+    // and have no GetTextSize, so they report "" -- absence, not zero.
+    static string Metrics(Widget node)
+    {
+        TextWidget text;
+        if (!Class.CastTo(text, node))
+            return "";
+        int sx = 0;
+        int sy = 0;
+        text.GetTextSize(sx, sy);
+        return "" + sx + " " + sy;
     }
 
     // Resolve an index path -- "0.3.1" -- against a root. Null when any step

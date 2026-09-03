@@ -111,8 +111,11 @@ def live(tmp_path, monkeypatch):
 
 
 def node_line(path="0.1", cls="ButtonWidget", name="ok_button", vis="11",
-              rect="100 200 40 20", depth="2", text="OK"):
-    return "|".join([path, cls, name, vis, rect, depth, text])
+              rect="100 200 40 20", depth="2", text="OK", metrics=None):
+    parts = [path, cls, name, vis, rect, depth, text]
+    if metrics is not None:
+        parts.append(metrics)
+    return "|".join(parts)
 
 
 # ------------------------------------------------------------------ parsing
@@ -123,8 +126,15 @@ def test_a_node_line_becomes_its_fields():
     assert parsed == {
         "path": "0.1", "class": "ButtonWidget", "name": "ok_button",
         "visible": True, "shown": True, "rect": "100 200 40 20",
-        "depth": 2, "text": "OK",
+        "depth": 2, "text": "OK", "text_size": None,
     }
+
+
+def test_an_eight_field_line_carries_the_text_size():
+    parsed = ui._node(node_line(cls="TextWidget", metrics="120 18"))
+    assert parsed["text_size"] == (120, 18)
+    assert ui._node(node_line(metrics=""))["text_size"] is None
+    assert ui._node(node_line())["text_size"] is None
 
 
 def test_visible_and_shown_are_two_answers_not_one():
@@ -179,7 +189,14 @@ def test_a_client_that_never_published_names_the_profile_key(live):
 def test_the_tree_request_carries_its_page_size(live):
     ui.ui_tree(root="screen", depth=4, limit=25)
     assert live.sent[-1].verb == "ui_tree"
-    assert live.sent[-1].args == {"root": "screen", "depth": "4", "limit": "25"}
+    assert live.sent[-1].args == {"root": "screen", "depth": "4", "limit": "25", "offset": "0"}
+
+
+def test_the_tree_request_carries_its_offset(live):
+    ui.ui_tree(offset=300)
+    assert live.sent[-1].args["offset"] == "300"
+    ui.ui_find(name="x", offset=25)
+    assert live.sent[-1].args["offset"] == "25"
 
 
 def test_every_argument_crosses_the_wire_as_a_string(live):
@@ -206,6 +223,14 @@ def test_a_complete_listing_is_not_marked_truncated(live):
         "ui_total": 1, "ui_nodes": [node_line()],
     })
     assert ui.ui_tree().data["truncated"] is False
+
+
+def test_truncation_accounts_for_the_offset(live):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_total": 302, "ui_nodes": [node_line(path="0"), node_line(path="0.1")],
+    })
+    assert ui.ui_tree(offset=300).data["truncated"] is False
+    assert ui.ui_tree(offset=0).data["truncated"] is True
 
 
 # ---------------------------------------------------------------------- find

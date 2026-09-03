@@ -51,8 +51,10 @@ from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire
 NODES_MAX = 300
 DEPTH_MAX = 32
 
-#: Fields of one described node, in the order the mod writes them.
-_FIELDS = 7
+#: Fields of one described node: seven before the text size was added, eight
+#: with it. Both parse, so a bridge built before the change still reads.
+_FIELDS_MIN = 7
+_FIELDS_MAX = 8
 
 
 def _client_channel() -> Channel:
@@ -95,7 +97,7 @@ def _not_loaded(channel: Channel) -> Result:
     )
 
 
-def _run(verb: str, args: dict, timeout: float) -> Result:
+def _run(verb: str, args: dict, timeout: float, offset: int = 0) -> Result:
     """One command to the client half, and its own answer back.
 
     Deliberately the same shape as the world tools' `_run`, and deliberately
@@ -151,7 +153,7 @@ def _run(verb: str, args: dict, timeout: float) -> Result:
         "args": wire,
     }
     if state.status == "done":
-        return _with_ui(ok(payload), channel)
+        return _with_ui(ok(payload), channel, offset)
     if state.status == "failed":
         return Result(False, payload, state.detail or f"{verb} failed",
                       hint="the mod's own words are in the error above; a refusal is a "
@@ -163,7 +165,7 @@ def _run(verb: str, args: dict, timeout: float) -> Result:
     )
 
 
-def _with_ui(answered: Result, channel: Channel) -> Result:
+def _with_ui(answered: Result, channel: Channel, offset: int = 0) -> Result:
     """Add the client's published UI block, and the nodes parsed out of it."""
     state = channel.read_state()
     if state is None:
@@ -183,35 +185,37 @@ def _with_ui(answered: Result, channel: Channel) -> Result:
     answered.data["nodes"] = nodes
     answered.data["count"] = len(nodes)
     answered.data["total"] = block.get("ui_total", -1)
+    answered.data["offset"] = offset
     answered.data["truncated"] = (
-        isinstance(answered.data["total"], int) and answered.data["total"] > len(nodes)
+        isinstance(answered.data["total"], int)
+        and answered.data["total"] > offset + len(nodes)
     )
     return answered
 
 
 def _node(line: str) -> dict:
-    """One `path|class|name|vis|rect|depth|text` line as a dict.
-
-    A line that does not have every field is passed through under `raw` rather
-    than dropped: a reader that silently discarded what it could not parse
-    would report a smaller interface than the one the client found.
-    """
     parts = line.split("|")
-    if len(parts) != _FIELDS:
+    if len(parts) < _FIELDS_MIN or len(parts) > _FIELDS_MAX:
         return {"raw": line}
     flags = parts[3]
+    text_size = None
+    if len(parts) == _FIELDS_MAX and parts[7].strip():
+        halves = parts[7].split()
+        if len(halves) == 2 and all(h.lstrip("-").isdigit() for h in halves):
+            text_size = (int(halves[0]), int(halves[1]))
     return {
         "path": parts[0],
         "class": parts[1],
         "name": parts[2],
-        # Two separate answers, because they differ exactly when a node is
-        # visible in itself but sits inside a hidden parent -- which is the
-        # ordinary state of half a menu and would otherwise read as "shown".
         "visible": flags[:1] == "1",
         "shown": flags[1:2] == "1",
         "rect": parts[4],
         "depth": int(parts[5]) if parts[5].lstrip("-").isdigit() else parts[5],
         "text": parts[6],
+        # Engine pixels of the rendered text, for widgets that derive from
+        # TextWidget (labels, multiline, rich text, multiline edit boxes).
+        # EditBoxWidget and ButtonWidget extend UIWidget and report nothing.
+        "text_size": text_size,
     }
 
 
@@ -265,24 +269,27 @@ def ui_menu() -> Result:
 
 
 def ui_tree(root: str = "menu", depth: int = DEPTH_MAX, limit: int = NODES_MAX,
-            timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+            offset: int = 0, timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """The client's widget tree: what is on screen, as the engine holds it.
 
     `root` is `"menu"` (the open scripted menu, the default) or `"screen"` (the
     whole workspace). Each node comes back with its path, class, name,
-    visibility, screen rectangle, depth and -- where the engine allows it to be
-    read -- its text.
+    visibility, screen rectangle, depth, text and -- for widgets that derive
+    from `TextWidget` -- the rendered text size in engine pixels.
 
-    The answer is A PAGE: `total` is how many nodes the walk visited and `count`
-    is how many it listed, and `truncated` says when they differ. A shorter list
-    that did not say so would read as the whole interface.
+    The answer is A PAGE: `total` is how many nodes the walk visited, `count`
+    is how many this page listed, and `offset` is how many were skipped before
+    it (0 by default, a page after the first). `truncated` says whether more
+    remain after this page -- `total > offset + count`. A shorter list that did
+    not say so would read as the whole interface.
     """
-    return _run("ui_tree", _args(root=root, depth=depth, limit=limit), timeout)
+    return _run("ui_tree", _args(root=root, depth=depth, limit=limit, offset=offset),
+                timeout, offset)
 
 
 def ui_find(name: str = "", class_name: str = "", text: str = "",
             root: str = "menu", depth: int = DEPTH_MAX, limit: int = NODES_MAX,
-            timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+            offset: int = 0, timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """Find widgets by name, class or text, without fetching the whole tree.
 
     `name` and `class_name` match exactly; `text` matches as a substring,
@@ -302,8 +309,10 @@ def ui_find(name: str = "", class_name: str = "", text: str = "",
     return _run(
         "ui_find",
         _args(**{"name": name or None, "class": class_name or None,
-                 "text": text or None, "root": root, "depth": depth, "limit": limit}),
+                 "text": text or None, "root": root, "depth": depth, "limit": limit,
+                 "offset": offset}),
         timeout,
+        offset,
     )
 
 

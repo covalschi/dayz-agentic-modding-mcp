@@ -114,8 +114,8 @@ in its notes.
 | `client_type(text, submit)` | type into a client-side input field with real keystrokes. **The only tool here that takes the foreground**, and it says so in its answer |
 | `client_verdict(since)` | judge the live client by its own `.RPT` — an errors-and-crashes verdict; see below |
 | `ui_menu()` | what the client's interface is doing: open menu class, cursor, dialog. Free — republished every tick |
-| `ui_tree(root, depth, limit)` | the client's **widget tree**: path, class, name, visibility, screen rectangle, depth and text. A page, and it says so |
-| `ui_find(name, class_name, text, root)` | the same walk, filtered in the client so the whole tree never has to travel |
+| `ui_tree(root, depth, limit, offset)` | the client's **widget tree**: path, class, name, visibility, screen rectangle, depth, text and text size (engine pixels, TextWidget family only). A page, and it says so |
+| `ui_find(name, class_name, text, root, offset)` | the same walk, filtered in the client so the whole tree never has to travel |
 | `ui_click(path, expect_name, expect_class, via)` | press a widget. `via="script"` goes through the open menu's handler with no focus; `via="cursor"` puts the real mouse on its rectangle |
 | `ui_text(path, text, expect_name)` | write into an edit box, and read the value back out of the widget |
 | `mod_lint(mod, strict)` | judge the Enforce Script without packing or booting anything. `mod_build` runs it first and refuses on what it refuses; .layout files: quotes inside text, unquoted keys, unknown classes, ItemPreview priority (refuse), bare edit boxes, unclipped scrolls, duplicate names (warn) |
