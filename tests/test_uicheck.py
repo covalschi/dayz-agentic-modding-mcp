@@ -80,33 +80,82 @@ def test_hidden_nodes_are_ignored():
     assert check(nodes, HOST)[0] == []
 
 
-def test_under_scrollbar_is_off_until_the_bar_is_measured(monkeypatch):
-    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
-             node("0", "ScrollWidget", "Scroll", "10 10 300 200"),
-             node("0.0", "PanelWidget", "Content", "10 10 300 900"),
-             node("0.0.0", "TextWidget", "Line", "10 10 300 20")]
-    monkeypatch.setattr(uicheck, "SCROLLBAR_PX", None)
-    issues, notes = check(nodes, HOST)
-    assert rules(issues) == []
-    assert any("under_scrollbar" in n for n in notes)
-    monkeypatch.setattr(uicheck, "SCROLLBAR_PX", 16)
-    issues, notes = check(nodes, HOST)
+def test_under_scrollbar_uses_the_measured_bar_width_scaled():
+    """F3: the scrollbar is 10 layout units wide -- 10 px at scale 1.0, 15 px
+    (round(10 * 1.4815)) at 1600/1080. The SAME content right edge (87 px)
+    clears the narrower bar but runs under the wider one, which is the point:
+    the rule is not just "10 px", it is "10 layout units, scaled"."""
+    def tree(right_edge):
+        return [node("", "FrameWidget", "Root", "0 0 1000 600"),
+                node("0", "ScrollWidget", "Scroll", "0 0 100 50"),
+                node("0.0", "PanelWidget", "Content", "0 0 100 200"),
+                node("0.0.0", "TextWidget", "Line", f"0 0 {right_edge} 20")]
+
+    # scale 1.0: the bar is the last 10 px (limit 90) -- 85 stops clear of
+    # it, 95 runs under it.
+    assert check(tree(85), HOST, scale=1.0)[0] == []
+    issues, _ = check(tree(95), HOST, scale=1.0)
+    assert rules(issues) == [("under_scrollbar", "Line")]
+
+    # scale 1.4815 (1600/1080): the bar widens to 15 px (limit 85) -- 85
+    # still clears it, but 87 (which cleared the 10 px bar above) now runs
+    # under the wider one.
+    assert check(tree(85), HOST, scale=1.4815)[0] == []
+    issues, _ = check(tree(87), HOST, scale=1.4815)
     assert rules(issues) == [("under_scrollbar", "Line")]
 
 
 def test_a_bare_edit_box_needs_the_source_to_be_judged():
+    """F4: Widget.ClassName() reports "Widget" for BOTH a FrameWidgetClass
+    and a PanelWidgetClass -- the engine nodes below share that class on
+    purpose, so a check that judged framing off the engine class alone could
+    not tell Root and Frame apart. With a source layout, `check` decides by
+    the SOURCE class instead: Root (FrameWidgetClass) does not frame Bare,
+    but Frame (PanelWidgetClass) does frame Framed, despite both reporting
+    the same "Widget" to the engine."""
     layout = ("FrameWidgetClass Root {\n size 1 1\n {\n"
               "  EditBoxWidgetClass Bare {\n   size 100 20\n  }\n"
               "  EditBoxWidgetClass Styled {\n   size 100 20\n   style Default\n  }\n"
               "  PanelWidgetClass Frame {\n   size 120 30\n   style rover_sim_colorable\n  }\n"
               "  EditBoxWidgetClass Framed {\n   size 100 20\n  }\n }\n}\n")
-    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+    nodes = [node("", "Widget", "Root", "0 0 1000 600"),
              node("0", "EditBoxWidget", "Bare", "10 10 100 20"),
              node("1", "EditBoxWidget", "Styled", "10 40 100 20"),
-             node("2", "PanelWidget", "Frame", "5 95 120 30"),
+             node("2", "Widget", "Frame", "5 95 120 30"),
              node("3", "EditBoxWidget", "Framed", "10 100 100 20")]
     issues, notes = check(nodes, HOST)
     assert rules(issues) == []
     assert any("editbox_bare" in n for n in notes)
     issues, _ = check(nodes, HOST, source=parse_layout(layout))
     assert rules(issues) == [("editbox_bare", "Bare")]
+
+
+def test_a_spacers_full_width_child_may_overhang_by_the_padding_scaled():
+    """F5: a WrapSpacer's full-width (size 1) children overhang it by the
+    padding (2 layout units, default) on the right -- an engine behaviour,
+    not a layout bug. At scale 1.4815 that is round(2 * 1.4815) = 3 px."""
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "Spacer", "10 10 300 100"),
+             node("0.0", "PanelWidget", "Row", "10 10 303 20")]
+    assert check(nodes, HOST, scale=1.4815)[0] == []
+
+
+def test_a_border_panel_enclosing_its_parent_is_not_overflow():
+    """F7: our layouts draw a button's border with a child panel 1 layout
+    unit larger than its parent on every side (position -1 -1, size w+2
+    h+2) -- the engine reports it poking out by 1-2 px on each side, and
+    that is a border, not an overflowing child."""
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "ButtonWidget", "Btn", "50 50 100 30"),
+             node("0.0", "PanelWidget", "Border", "49 49 102 32")]
+    assert check(nodes, HOST, scale=1.0)[0] == []
+
+
+def test_overflow_beyond_the_border_and_spacer_tolerances_still_flags():
+    """Neither new tolerance is a blank cheque: a child poking out by more
+    than either one still overflows."""
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "PanelWidget", "Card", "10 10 200 100"),
+             node("0.0", "TextWidget", "Label", "10 10 205 20")]
+    issues, _ = check(nodes, HOST, scale=1.0)
+    assert rules(issues) == [("overflow", "Label")]

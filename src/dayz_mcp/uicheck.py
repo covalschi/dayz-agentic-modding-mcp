@@ -6,9 +6,18 @@ owner's three complaints -- frames crossing, text under the scrollbar, edit
 boxes without a frame -- plus the two shapes a broken self-sizing spacer
 takes (zero height, or a hundred thousand units of it).
 
-A rule that needs a number nobody has measured yet stays OFF and says so in
-the notes: SCROLLBAR_PX is None until the probe layout is measured on the
-stand (spec M3). Silence would read as "clean".
+`scale` is the layout-unit-to-pixel ratio of the window the tree was read
+from -- s = H/1080, exact (spec F1, measured 2026-09-03) -- and it is what
+turns a measurement taken in layout units (the scrollbar's width, a border
+panel's 1-unit overhang) into the screen pixels this module compares
+rectangles in. 1.0 (the default) is correct for a 1080-row window.
+
+Every number these rules once waited on is measured now: the scrollbar is 10
+layout units wide, drawn OVER the content (spec F3), and the engine cannot
+tell a panel from a frame by class name alone -- Widget.ClassName() reports
+"Widget" for both PanelWidgetClass and FrameWidgetClass (spec F4) -- so
+`check` uses the SOURCE layout's own class, when one was given, to judge
+what draws a frame behind an edit box.
 """
 from __future__ import annotations
 
@@ -26,9 +35,10 @@ OVERFLOW_TOLERANCE_PX = 1
 OVERLAP_MIN_PX = 2
 #: A node this many times taller or wider than the host is a runaway spacer.
 RUNAWAY_FACTOR = 4
-#: Width of the engine's vertical scrollbar in screen pixels. None = not yet
-#: measured (spec M3); the under_scrollbar rule is off and says so.
-SCROLLBAR_PX: int | None = None
+#: Width of the engine's vertical scrollbar, in LAYOUT UNITS -- 10 px at 1080
+#: rows, 14 at 1600 (measured 2026-09-03, spec F3). Scaled to screen pixels
+#: by `check`'s own `scale` argument before it is compared against a rect.
+SCROLLBAR_UNITS = 10
 
 #: Engine class names (Widget.ClassName()) that carry content rather than
 #: paint a background. Spec M7 confirms what a PanelWidgetClass reports.
@@ -38,8 +48,18 @@ CONTENT_CLASSES = frozenset({
     "TextListboxWidget", "CheckBoxWidget", "SliderWidget", "XComboBoxWidget",
     "ItemPreviewWidget", "PlayerPreviewWidget", "MapWidget",
 })
-#: What may draw a frame behind an edit box.
-FRAMING_CLASSES = frozenset({"PanelWidget", "ImageWidget", "Widget"})
+#: What the ENGINE reports for a widget that draws a frame -- the fallback
+#: for a framing candidate (a parent, an earlier sibling) that has no
+#: counterpart in the source layout, e.g. one a fixture added at runtime.
+#: "PanelWidget" is deliberately absent: spec F4 measured Widget.ClassName()
+#: answering "Widget" for BOTH PanelWidgetClass and FrameWidgetClass, so the
+#: engine alone can never report "PanelWidget" -- only a source class can
+#: (see FRAMING_SOURCE_CLASSES, which `check` prefers whenever it can).
+FRAMING_CLASSES = frozenset({"Widget", "ImageWidget"})
+#: Source classes (LayoutNode.cls) that draw a frame behind an edit box, for
+#: a framing candidate whose own node in the SOURCE layout is known -- the
+#: reliable read, since the engine's class name conflates panel and frame.
+FRAMING_SOURCE_CLASSES = frozenset({"PanelWidgetClass", "ImageWidgetClass"})
 SCROLL_CLASS = "ScrollWidget"
 EDITBOX_CLASS = "EditBoxWidget"
 
@@ -84,8 +104,27 @@ def _cross(a, b) -> tuple[int, int]:
     return max(0, dx), max(0, dy)
 
 
+def _border_overhang(parent: tuple, child: tuple) -> tuple[int, int, int, int] | None:
+    """How far `child` pokes out past `parent` on each of the four sides
+    (left, top, right, bottom) when it encloses `parent` on EVERY side --
+    None if it does not enclose it on all four.
+
+    This is the shape our own layouts draw a button's border in (spec F7): a
+    child panel `position -1 -1, size w+2 h+2`, one unit larger than its
+    parent all the way round. `check` treats a small enough overhang of this
+    exact shape as a border, not an overflow.
+    """
+    px, py, pw, ph = parent
+    cx, cy, cw, ch = child
+    left, top = px - cx, py - cy
+    right, bottom = (cx + cw) - (px + pw), (cy + ch) - (py + ph)
+    if left < 0 or top < 0 or right < 0 or bottom < 0:
+        return None
+    return left, top, right, bottom
+
+
 def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
-          source: LayoutNode | None = None) -> tuple[list[Issue], list[str]]:
+          source: LayoutNode | None = None, scale: float = 1.0) -> tuple[list[Issue], list[str]]:
     issues: list[Issue] = []
     notes: list[str] = []
     shown = {n["path"]: n for n in nodes if "path" in n and n.get("shown", True) and rect_of(n)}
@@ -115,7 +154,14 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         parent = shown.get(parent_path) if parent_path is not None else None
         if parent:
             prect = rect_of(parent)
-            if parent["class"] == SCROLL_CLASS:
+            border = _border_overhang(prect, rect)
+            if border is not None and max(border) <= round(2 * scale) + 1:
+                # F7: our own button-border panel (position -1 -1, size w+2
+                # h+2 in layout units) -- drawn that way on purpose, and it
+                # is not a CONTENT_CLASSES widget, so it never overlaps
+                # either.
+                pass
+            elif parent["class"] == SCROLL_CLASS:
                 # Content longer than the viewport is what a scroll widget is for;
                 # only the horizontal edges are held.
                 px, py, pw, ph = prect
@@ -123,6 +169,14 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                 if not inside_h:
                     issues.append(Issue("overflow", ERROR, path, name, cls,
                                         f"{rect} pokes out of its scroll viewport {prect} sideways", parent_path))
+            elif parent["class"].endswith("SpacerWidget"):
+                # F5: a WrapSpacer's full-width (size 1) children overhang it
+                # by the padding (2 layout units, default) on the right --
+                # an engine behaviour, not a layout bug.
+                tolerance = round(2 * scale) + OVERFLOW_TOLERANCE_PX
+                if not _contains(prect, rect, tolerance):
+                    issues.append(Issue("overflow", ERROR, path, name, cls,
+                                        f"{rect} pokes out of its parent {parent['name']!r} {prect}", parent_path))
             elif not _contains(prect, rect, OVERFLOW_TOLERANCE_PX):
                 issues.append(Issue("overflow", ERROR, path, name, cls,
                                     f"{rect} pokes out of its parent {parent['name']!r} {prect}", parent_path))
@@ -138,7 +192,7 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                 unjudged = "editbox_bare: no source layout was given, so edit boxes were not judged"
                 if not source and unjudged not in notes:
                     notes.append(unjudged)
-            elif src.prop("style") is None and not _framed(n, shown, children, parent_path):
+            elif src.prop("style") is None and not _framed(n, shown, children, parent_path, source_by_path):
                 issues.append(Issue("editbox_bare", ERROR, path, name, cls,
                                     "no style and no panel behind it -- the field draws no frame"))
 
@@ -151,41 +205,59 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                     issues.append(Issue("overlap", ERROR, a["path"], a["name"], a["class"],
                                         f"crosses {b['name']!r} by {dx}x{dy} px", b["path"]))
 
-    if SCROLLBAR_PX is None:
-        if any(n["class"] == SCROLL_CLASS for n in shown.values()):
-            notes.append("under_scrollbar: off -- the scrollbar width has not been measured (SCROLLBAR_PX is None)")
-    else:
-        for path, scroll in shown.items():
-            if scroll["class"] != SCROLL_CLASS:
+    # F3: drawn OVER the content -- the content is never narrowed for it --
+    # and only when the content is taller than the viewport, so the rule
+    # runs unconditionally rather than gating on whether a ScrollWidget is
+    # even present.
+    bar_px = round(SCROLLBAR_UNITS * scale)
+    for path, scroll in shown.items():
+        if scroll["class"] != SCROLL_CLASS:
+            continue
+        sx, sy, sw, sh = rect_of(scroll)
+        content = [k for k in children.get(path, [])]
+        if not any(rect_of(k)[3] > sh for k in content):
+            continue  # no bar is drawn when the content fits (measured F3)
+        limit = sx + sw - bar_px
+        for dpath, d in shown.items():
+            if not dpath.startswith(path + ".") or d["class"] not in CONTENT_CLASSES:
                 continue
-            sx, sy, sw, sh = rect_of(scroll)
-            content = [k for k in children.get(path, [])]
-            if not any(rect_of(k)[3] > sh for k in content):
-                continue  # no bar is drawn when the content fits (measured)
-            limit = sx + sw - SCROLLBAR_PX
-            for dpath, d in shown.items():
-                if not dpath.startswith(path + ".") or d["class"] not in CONTENT_CLASSES:
-                    continue
-                dx, dy, dw, dh = rect_of(d)
-                if dx + dw > limit + OVERFLOW_TOLERANCE_PX:
-                    issues.append(Issue("under_scrollbar", ERROR, dpath, d["name"], d["class"],
-                                        f"right edge {dx + dw} px runs under the scrollbar, which starts at {limit} px", path))
+            dx, dy, dw, dh = rect_of(d)
+            if dx + dw > limit + OVERFLOW_TOLERANCE_PX:
+                issues.append(Issue("under_scrollbar", ERROR, dpath, d["name"], d["class"],
+                                    f"right edge {dx + dw} px runs under the scrollbar, which starts at {limit} px", path))
 
     issues.sort(key=lambda i: (i.severity != ERROR, i.path, i.rule))
     return issues, notes
 
 
-def _framed(node: dict, shown: dict, children: dict, parent_path: str | None) -> bool:
+def _framed(node: dict, shown: dict, children: dict, parent_path: str | None,
+            source_by_path: dict) -> bool:
     """A panel behind the edit box: the parent itself, or an earlier sibling
-    whose rectangle encloses it."""
+    whose rectangle encloses it.
+
+    "Draws a frame" is decided by the candidate's own node in the SOURCE
+    layout when one is known there (PanelWidgetClass or ImageWidgetClass) --
+    the reliable read, since the engine's own ClassName() cannot tell a panel
+    from a frame apart, both report "Widget" (spec F4). A candidate absent
+    from the source -- most often one a fixture added at runtime, which never
+    has a counterpart in the STATIC file `source_by_path` was built from --
+    falls back to FRAMING_CLASSES against the engine's own class instead of
+    being silently ignored.
+    """
+    def frames(candidate_path: str, engine_cls: str) -> bool:
+        src = source_by_path.get(candidate_path)
+        if src is not None:
+            return src.cls in FRAMING_SOURCE_CLASSES
+        return engine_cls in FRAMING_CLASSES
+
     rect = rect_of(node)
     if parent_path is not None:
         parent = shown.get(parent_path)
-        if parent and parent["class"] in FRAMING_CLASSES:
+        if parent and frames(parent_path, parent["class"]):
             return True
         for sibling in children.get(parent_path, []):
             if sibling is node:
                 break
-            if sibling["class"] in FRAMING_CLASSES and _contains(rect_of(sibling), rect):
+            if frames(sibling["path"], sibling["class"]) and _contains(rect_of(sibling), rect):
                 return True
     return False
