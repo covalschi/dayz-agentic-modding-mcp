@@ -124,6 +124,14 @@ def with_pause_mode(stand: Path, value) -> None:
 def started_client(tmp_path, monkeypatch, *, players=1, pause_mode=2):
     """The common arrangement: a live stand, a connected client, fast polling.
 
+    THE COUNT RISES ON SPAWN, it is not a constant. Readiness is a rise above
+    the count that was there before the launch -- because the absolute count
+    lies right after a previous client is stopped, when the server has not
+    noticed the disconnect yet. A fixture that published `players` from the
+    start could not express that at all: it made "nobody connected yet" and
+    "our client is in" the same reading, which is exactly the confusion the
+    baseline exists to end.
+
     Returns (root, stand, game, spawned) where `spawned` collects command lines.
     """
     root, stand, game = make_project(tmp_path)
@@ -134,11 +142,12 @@ def started_client(tmp_path, monkeypatch, *, players=1, pause_mode=2):
 
     def fake_spawn(cmd, cwd):
         spawned.append(list(cmd))
+        publish_state(stand, players)
         return 777
 
     monkeypatch.setattr(client, "spawn", fake_spawn)
     monkeypatch.setattr(client, "CONNECT_POLL_SECONDS", 0.02)
-    publish_state(stand, players)
+    publish_state(stand, 0)
     return root, stand, game, spawned
 
 

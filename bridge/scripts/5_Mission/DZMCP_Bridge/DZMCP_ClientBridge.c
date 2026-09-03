@@ -434,18 +434,35 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     // and not two.
     //
     // Fields: path | class | name | visibility | rect | depth | text
+    //
+    // SIX FIELDS IS A WHOLE LINE, not a truncated one, and demanding seven
+    // made this verb answer "matched 0" to every question ever asked of it.
+    // The description ends with the text field, most widgets have no text of
+    // their own -- the label is a child TextWidget -- so most lines end in a
+    // trailing separator with nothing after it, and Split gives back six
+    // parts. Measured on a live client 2026-08-31: 505 nodes walked, 0
+    // matched, for a name ui_tree had just printed.
+    //
+    // It failed in the worst possible direction: not an error, an empty
+    // result. "That widget is not on screen" and "I dropped every line before
+    // looking" read identically to the caller.
     protected bool LineMatches(string line, string wantName, string wantClass, string wantText)
     {
         array<string> parts = new array<string>();
         line.Split("|", parts);
-        if (parts.Count() < 7)
+        if (parts.Count() < 6)
             return false;
+
+        // Absent because the widget has none -- the same thing as empty.
+        string text = "";
+        if (parts.Count() >= 7)
+            text = parts.Get(6);
 
         if (wantClass != "" && parts.Get(1) != wantClass)
             return false;
         if (wantName != "" && parts.Get(2) != wantName)
             return false;
-        if (wantText != "" && parts.Get(6).IndexOf(wantText) < 0)
+        if (wantText != "" && text.IndexOf(wantText) < 0)
             return false;
         return true;
     }

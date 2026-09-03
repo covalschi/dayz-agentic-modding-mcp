@@ -11,6 +11,7 @@ from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..paths import GAME_PROBE
 from ..procs import is_alive, process_mods_tail, spawn, stop, udp_port_holders
+from .. import winui
 from . import session
 from .project import require_project
 from ..clock import belongs_to_run
@@ -254,6 +255,42 @@ def missing_mission(game: Path, config: Path) -> str:
 #: line -- the same properties that made the port bind worth watching, and
 #: unlike the port it says the SCRIPTS are up.
 MISSION_MODULE_LINE = "Module: Mission"
+
+
+def _compile_dialog(pid: int) -> str:
+    """The message box this server is stuck on, as a sentence, or "".
+
+    THE THIRD FAILURE, and the only one the other two signals cannot see. A
+    server whose scripts do not compile does NOT die and does NOT crash: the
+    engine puts up "Can't compile "World" script module!" with the file and
+    the line, offers Abort/Retry/Ignore, and waits for a human. So `is_alive`
+    keeps answering yes, the port is never bound, no ready line is ever
+    written, no minidump is produced -- and the boot job spends its entire
+    timeout (420 s by default) before reporting a silence, while the engine
+    had the answer on screen within seconds of the spawn.
+
+    Measured 2026-09-01 on this stand: two boots in a row were killed by hand
+    at the dialog, each after a compile error that named its file and line --
+    `oz_module.c(385): Can't find variable 'OZ_FactionInvites'` the first
+    time, `oz_pdamodule.c(1523): ... 'OZ_PdaRolePush'` the second. Neither
+    reached any log this tool reads.
+
+    client_compile_check has watched for this since 2026-08-31; the server
+    boot did not, which is why this exists. The dialog's own text IS the best
+    message available -- it names the file and the line -- so it is passed
+    through verbatim instead of being reconstructed from a log.
+
+    Safe against the diag server's own console, which is a #32770 too:
+    `winui.modal_dialog` keys off a BUTTON child, and a console has none.
+    """
+    popup = winui.modal_dialog(pid)
+    if popup is None:
+        return ""
+    title, body = popup
+    said = f"the server stopped on a dialog: {title!r}"
+    if body:
+        said += f" -- {body}"
+    return said
 
 
 def mission_module_compiled(profiles: Path, since: float) -> bool:
@@ -879,6 +916,10 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 port_bound = False
                 scripts_up = False
                 while time.time() < deadline:
+                    stopper = _compile_dialog(pid)
+                    if stopper:
+                        store.fail(job.id, stopper)
+                        return
                     port_bound = port_bound or pid in udp_port_holders(port)
                     scripts_up = scripts_up or mission_module_compiled(profiles, since)
                     if port_bound and scripts_up:
@@ -931,6 +972,10 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
             while time.time() < deadline:
                 if not is_alive(pid, image=srv_image):
                     store.fail(job.id, "the server process died before it was ready")
+                    return
+                stopper = _compile_dialog(pid)
+                if stopper:
+                    store.fail(job.id, stopper)
                     return
                 # Watched, not waited on. With a ready line declared, THAT is the
                 # readiness verdict: it says the mod finished loading, which the
@@ -1113,7 +1158,29 @@ def client_compile_check(extra_mods: str = "", wait_seconds: float = 120) -> Res
             # loads them, so only the client half of the split is used here.
             client_mods, _server_mods = mod_list(extra_mods)
             pid = spawn(client_cmd(Path(game), client_mods, profiles), Path(game))
-            time.sleep(wait_seconds)
+
+            # WATCHED, not slept through. A client that cannot compile puts up
+            # a message box naming the file and the line, and then waits for a
+            # human forever: it does not exit and does not crash. A flat sleep
+            # therefore spends its entire budget staring at an answer that has
+            # been on the screen the whole time -- measured 2026-08-31, a full
+            # 150 s wait for a dialog that appeared at about 20.
+            #
+            # The dialog's own text is also the best failure message this tool
+            # can produce (it names the file and the line), so it is used
+            # verbatim rather than reconstructed from the log.
+            popup = None
+            deadline = time.time() + wait_seconds
+            while time.time() < deadline:
+                popup = winui.modal_dialog(pid)
+                if popup is not None:
+                    break
+                # Gone on its own: the log holds the reason, stop waiting for
+                # a window that will never appear.
+                if not is_alive(pid):
+                    break
+                time.sleep(0.5)
+
             rpt = _newest(profiles, "*.RPT")
             slog = _newest(profiles, "script_*.log")
             stop(pid)
@@ -1122,6 +1189,15 @@ def client_compile_check(extra_mods: str = "", wait_seconds: float = 120) -> Res
             for art in (rpt, slog):
                 if art:
                     store.add_artifact(job.id, art)
+
+            if popup is not None:
+                title, body = popup
+                said = f"the client stopped on a dialog: {title!r}"
+                if body:
+                    said += f" -- {body}"
+                store.fail(job.id, said)
+                return
+
             got = judge(rpt_lines, log_lines, prof.expect)
             if got["status"] == "ok":
                 store.finish(job.id, 0, summary="client compiles")

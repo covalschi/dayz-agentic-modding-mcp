@@ -345,6 +345,19 @@ def modal_dialog(pid: int) -> tuple[str, str] | None:
     the message in a Static child and Abort/Retry/Ignore buttons beside it. All
     of it readable from outside without touching the process.
 
+    THE CLASS ALONE IS NOT THE SIGNATURE, and believing it was cost a false
+    abort: DayZDiag_x64 puts up its own CONSOLE as a #32770 too -- the
+    server's is titled "DayZ Console version (64bit) ... : port 2302", and
+    the client raises the same thing for a moment early in startup. A check
+    that stopped at the class called a healthy client 2.2 s into its boot
+    "holding up a dialog", named the title "DayZ", and failed the job.
+
+    So the signature is a BUTTON CHILD. Every MessageBox has at least one --
+    it is the only way out of one -- and the console window has none:
+    measured 2026-08-31 on a live console, its whole child list is a single
+    RichEdit20A. That is the difference between a window waiting for a human
+    and a window merely printing at one.
+
     The body is the concatenation of the Static children, because that is where
     MessageBox puts the text; the buttons are skipped by class so the answer is
     the message rather than the message plus "&Abort&Retry&Ignore".
@@ -374,9 +387,14 @@ def modal_dialog(pid: int) -> tuple[str, str] | None:
 
     dialog = hits[0]
     parts: list[str] = []
+    buttons = 0
 
     def gather(child, _lparam):  # noqa: ANN001
-        if _window_class(child).lower() == "static":
+        nonlocal buttons
+        cls = _window_class(child).lower()
+        if cls == "button":
+            buttons += 1
+        elif cls == "static":
             text = _window_text(child).strip()
             if text:
                 parts.append(text)
@@ -384,7 +402,31 @@ def modal_dialog(pid: int) -> tuple[str, str] | None:
 
     kids = WNDENUMPROC(gather)
     user32.EnumChildWindows(dialog, kids, 0)
-    return _window_text(dialog), " ".join(" ".join(parts).split())
+    body = " ".join(" ".join(parts).split())
+
+    # A MESSAGE BOX HAS A MESSAGE, and that is the whole discriminator.
+    #
+    # Two other #32770 windows of the game's own pid were measured on this
+    # machine (2026-08-31), and neither is anything a caller should be told
+    # about:
+    #
+    #   the diag CONSOLE   one RichEdit20A child, no buttons, no static text
+    #   the diag STARTUP   ten Button children, ALL with empty text, and no
+    #                      static text at all -- title just "DayZ"
+    #
+    # Requiring a button was not enough: the startup window has ten of them,
+    # and reporting it failed two perfectly healthy client launches 2.2 s in,
+    # with the uselessly empty reason "holding up a dialog: 'DayZ'".
+    #
+    # Requiring TEXT is both stricter and honest about the purpose. This
+    # function exists to hand back what the engine is saying; a window with
+    # nothing to say is not the thing it was written to find. The real
+    # popup -- "Can't compile ... script module!" over Abort/Retry/Ignore --
+    # has both halves.
+    if buttons == 0 or not body:
+        return None
+
+    return _window_text(dialog), body
 
 
 def foreground_hwnd() -> int:

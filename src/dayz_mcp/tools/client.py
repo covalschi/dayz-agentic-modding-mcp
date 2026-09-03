@@ -642,6 +642,20 @@ def client_start(
             # not there a moment ago.
             before = pids_of(image) if via_launcher else set()
 
+            # THE PLAYER COUNT BEFORE WE LAUNCH ANYTHING. Readiness below is a
+            # RISE above this, not "at least one".
+            #
+            # The absolute count lies right after a previous client is stopped:
+            # the server has not noticed the disconnect yet, the state still
+            # says 1, and the next launch is then declared connected in a
+            # quarter of a second by a player who is not this one. Measured
+            # 2026-08-31 -- "connected: the bridge reports 1 player(s) 0s after
+            # launch", for a client that had barely started loading.
+            #
+            # None means the state could not be read at all; there is then no
+            # baseline to be wrong about, and one player is the honest bar.
+            baseline = _players_in(channel.read_state())
+
             pid = spawn(cmd, Path(game))
 
             if via_launcher:
@@ -697,7 +711,10 @@ def client_start(
                 if players is not None:
                     ever_readable = True
                     last_seen = players
-                    if players >= 1:
+                    want = 1
+                    if baseline is not None:
+                        want = baseline + 1
+                    if players >= want:
                         store.finish(
                             job.id, 0,
                             summary=f"connected: the bridge reports {players} player(s) "
