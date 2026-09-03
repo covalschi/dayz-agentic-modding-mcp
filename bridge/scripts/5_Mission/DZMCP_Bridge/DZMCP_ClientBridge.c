@@ -476,7 +476,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         string layout = ArgOr(args, "layout", "");
         if (layout == "")
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_load needs a layout argument -- a path relative to the pbo prefix, like OpenZone_PDA/gui/layouts/oz_pda_tab.layout");
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_load needs a layout argument -- a path relative to the pbo prefix, like MyMod/gui/layouts/x.layout");
             return;
         }
         string why;

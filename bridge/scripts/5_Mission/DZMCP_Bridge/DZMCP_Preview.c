@@ -348,7 +348,12 @@ class DZMCP_Preview
             return false;
         }
         fill.Show(false);
-        fixed.SetScreenSize(w, h);
+        // SetSize takes LAYOUT UNITS -- HostFixed's hexactsize/vexactsize
+        // flags are what turn them into screen pixels. SetScreenSize takes
+        // pixels directly, so calling it here with a layout-unit "w h" spec
+        // sized the host wrong (measured 2026-09-03: a "1306 518" host came
+        // back 1306x518 PIXELS, not layout units).
+        fixed.SetSize(w, h);
         fixed.Show(true);
         m_Host = fixed;
         return true;
