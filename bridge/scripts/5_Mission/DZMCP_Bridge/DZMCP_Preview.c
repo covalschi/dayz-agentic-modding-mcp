@@ -199,6 +199,16 @@ class DZMCP_Preview
             why = "add needs a layout";
             return false;
         }
+        if (op.count < 1)
+        {
+            why = "add: count must be at least 1, not " + op.count;
+            return false;
+        }
+        if (op.count > 500)
+        {
+            why = "add: count must be at most 500, not " + op.count;
+            return false;
+        }
         Widget into = m_Loaded;
         if (op.into != "")
         {
