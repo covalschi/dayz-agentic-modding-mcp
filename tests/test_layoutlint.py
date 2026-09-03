@@ -126,6 +126,29 @@ def test_an_edit_box_with_neither_style_nor_panel_warns():
     assert one(too_small, "layout-editbox-bare").severity == WARN
 
 
+def test_a_proportional_flag_paired_with_a_pixel_number_warns():
+    """The ContactList shape measured on the stand, 2026-09-03: `size 600
+    395` with `vexactsize 0` is not 395 px tall, it is 395 PARENT heights --
+    the cause of a spacer measured at 231148 px."""
+    contact_list = wrap('  WrapSpacerWidgetClass ContactList {\n   size 600 395\n   hexactsize 1\n   vexactsize 0\n  }\n')
+    f = one(contact_list, "layout-proportional-magnitude")
+    assert f.severity == WARN
+    assert "`size 600 395` with `vexactsize 0` asks for 395 parent heights" in f.message
+    assert "vexactsize 1" in f.hint
+
+
+def test_a_fully_proportional_size_of_one_is_clean():
+    assert checks(wrap('  PanelWidgetClass P {\n   size 1 1\n   hexactsize 0\n   vexactsize 0\n  }\n')) == []
+
+
+def test_a_pixel_sized_widget_with_the_matching_exact_flag_is_clean():
+    assert checks(wrap('  WrapSpacerWidgetClass W {\n   size 600 395\n   hexactsize 1\n   vexactsize 1\n  }\n')) == []
+
+
+def test_a_proportional_position_within_zero_to_one_is_clean():
+    assert checks(wrap('  PanelWidgetClass P {\n   position 0.24 0.14\n   size 1 1\n   hexactpos 0\n   vexactpos 0\n  }\n')) == []
+
+
 def test_a_duplicate_name_warns_with_the_first_line():
     text = wrap("  TextWidgetClass T {\n   size 1 1\n  }\n  TextWidgetClass T {\n   size 1 1\n  }\n")
     f = one(text, "layout-dup-name")

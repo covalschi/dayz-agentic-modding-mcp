@@ -97,6 +97,20 @@ def test_zero_size_runaway_and_offhost():
     assert by_name["Empty"] == WARN and by_name["Huge"] == ERROR and by_name["Gone"] == WARN
 
 
+def test_runaway_detail_names_a_proportional_flag_with_a_pixel_number():
+    """The ContactList shape measured on the stand, 2026-09-03: `size 600
+    395` with `vexactsize 0` is not 395 PIXELS tall, it is 395 PARENT
+    heights -- the actual, statically-detectable cause of a spacer measured
+    at 231148 px tall on the stand."""
+    layout = 'FrameWidgetClass Root {\n size 1 1\n {\n  WrapSpacerWidgetClass ContactList {\n   size 600 395\n   hexactsize 1\n   vexactsize 0\n  }\n }\n}\n'
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "ContactList", "10 10 300 231148")]
+    issues, _ = check(nodes, HOST, source=parse_layout(layout))
+    found = [i for i in issues if i.rule == "runaway"]
+    assert len(found) == 1
+    assert "`size 600 395` with `vexactsize 0` is 395 parent heights" in found[0].detail
+
+
 def test_hidden_nodes_are_ignored():
     nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
              node("0", "TextWidget", "Gone", "2000 2000 50 20", shown=False)]

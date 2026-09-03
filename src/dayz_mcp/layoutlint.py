@@ -47,6 +47,7 @@ def lint_layout(text: str, file: str = "", vocab: dict | None = None,
         _check_scriptclass(node, file, out)
         _check_name(node, first_seen, file, out)
         _check_edit_boxes(node, file, out)
+        _check_proportional_magnitude(node, file, out)
     _check_preview_priority(root, 0, file, out)
     return out
 
@@ -200,6 +201,57 @@ def _check_edit_boxes(parent: LayoutNode, file: str, out: list[Finding]) -> None
                                "add `style Default` (vanilla's usual edit-box style), or declare a "
                                "PanelWidgetClass with `style rover_sim_colorable` before it, enclosing it",
                                file, node.line))
+
+
+def _gt1(value: str) -> bool:
+    """True if `value` parses as a number greater than 1 -- False (never a
+    finding) for anything unparsable, matching `_check_size`'s own
+    tolerance for a value that is not a plain number."""
+    try:
+        return float(value) > 1
+    except ValueError:
+        return False
+
+
+def _check_proportional_magnitude(node: LayoutNode, file: str, out: list[Finding]) -> None:
+    """`hexactsize`/`vexactsize` (and the `pos` twins) 0 means "this
+    component of `size`/`position` is a FRACTION (0..1) of the parent", not
+    a pixel count. An EXPLICIT 0 paired with a component greater than 1 is
+    not a large widget, it is hundreds or thousands of PARENT
+    widths/heights -- measured on the first gallery run, 2026-09-03:
+    `WrapSpacerWidgetClass ContactList { size 600 395 hexactsize 1
+    vexactsize 0 }` came back 231148 px tall on the stand, 395 parent
+    heights. Only an explicit `0` triggers this -- the vocabulary's own
+    default for an ABSENT flag is not settled here, and treating "absent"
+    as "proportional" would warn on every ordinary vanilla widget that
+    leaves the flag out (`size 1 1` with no flags at all is the single most
+    common shape in the vanilla layouts, and is not this bug)."""
+    size = node.prop("size")
+    if size and len(size) > 0 and node.prop("hexactsize") == ["0"] and _gt1(size[0]):
+        out.append(Finding("layout-proportional-magnitude", WARN,
+                           f"`size {' '.join(size)}` with `hexactsize 0` asks for {size[0]} parent "
+                           "widths -- a proportional flag with a pixel number",
+                           "set hexactsize 1 for a pixel width, or a fraction 0..1 for a proportional one",
+                           file, node.line))
+    if size and len(size) > 1 and node.prop("vexactsize") == ["0"] and _gt1(size[1]):
+        out.append(Finding("layout-proportional-magnitude", WARN,
+                           f"`size {' '.join(size)}` with `vexactsize 0` asks for {size[1]} parent "
+                           "heights -- a proportional flag with a pixel number",
+                           "set vexactsize 1 for a pixel height, or a fraction 0..1 for a proportional one",
+                           file, node.line))
+    pos = node.prop("position")
+    if pos and len(pos) > 0 and node.prop("hexactpos") == ["0"] and _gt1(pos[0]):
+        out.append(Finding("layout-proportional-magnitude", WARN,
+                           f"`position {' '.join(pos)}` with `hexactpos 0` asks for {pos[0]} parent "
+                           "widths from the edge -- a proportional flag with a pixel number",
+                           "set hexactpos 1 for a pixel x position, or a fraction 0..1 for a proportional one",
+                           file, node.line))
+    if pos and len(pos) > 1 and node.prop("vexactpos") == ["0"] and _gt1(pos[1]):
+        out.append(Finding("layout-proportional-magnitude", WARN,
+                           f"`position {' '.join(pos)}` with `vexactpos 0` asks for {pos[1]} parent "
+                           "heights from the edge -- a proportional flag with a pixel number",
+                           "set vexactpos 1 for a pixel y position, or a fraction 0..1 for a proportional one",
+                           file, node.line))
 
 
 def _check_preview_priority(node: LayoutNode, inherited: int, file: str, out: list[Finding]) -> None:

@@ -157,6 +157,40 @@ def _drawn_behind(picture: dict, other: dict) -> bool:
     return _contains(rect_of(picture), rect_of(other))
 
 
+def _gt1(value: str) -> bool:
+    """True if `value` parses as a number greater than 1 -- False for
+    anything unparsable, so a malformed layout value never raises here."""
+    try:
+        return float(value) > 1
+    except ValueError:
+        return False
+
+
+def _proportional_magnitude_note(src: LayoutNode | None) -> str:
+    """A detail suffix naming the actual cause of a runaway spacer, when the
+    SOURCE says so: `hexactsize`/`vexactsize` 0 means "this `size` component
+    is a FRACTION (0..1) of the parent", not a pixel count -- an explicit 0
+    paired with a `size` component greater than 1 is not a large widget, it
+    is hundreds or thousands of PARENT widths/heights. Measured on the first
+    gallery run, 2026-09-03: `WrapSpacerWidgetClass ContactList { size 600
+    395 hexactsize 1 vexactsize 0 }` came back 231148 px tall -- 395 parent
+    heights, not 395 px, and THE cause of that runaway. "" when the source
+    is unavailable or does not show this shape, so the caller can always
+    append the result to an existing detail string unconditionally."""
+    if src is None:
+        return ""
+    size = src.prop("size")
+    if not size or len(size) < 2:
+        return ""
+    if src.prop("vexactsize") == ["0"] and _gt1(size[1]):
+        return (f" -- `size {' '.join(size)}` with `vexactsize 0` is {size[1]} parent "
+                "heights: a proportional flag with a pixel number")
+    if src.prop("hexactsize") == ["0"] and _gt1(size[0]):
+        return (f" -- `size {' '.join(size)}` with `hexactsize 0` is {size[0]} parent "
+                "widths: a proportional flag with a pixel number")
+    return ""
+
+
 def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
           source: LayoutNode | None = None, scale: float = 1.0) -> tuple[list[Issue], list[str]]:
     issues: list[Issue] = []
@@ -179,8 +213,9 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
             issues.append(Issue("zero_size", WARN, path, name, cls,
                                 f"visible but {w}x{h} px -- a collapsed Size To Content, or an empty container"))
         if host and (w > host[2] * RUNAWAY_FACTOR or h > host[3] * RUNAWAY_FACTOR):
-            issues.append(Issue("runaway", ERROR, path, name, cls,
-                                f"{w}x{h} px against a host of {host[2]}x{host[3]} -- a self-sizing spacer that grew without bound"))
+            detail = f"{w}x{h} px against a host of {host[2]}x{host[3]} -- a self-sizing spacer that grew without bound"
+            detail += _proportional_magnitude_note(source_by_path.get(path))
+            issues.append(Issue("runaway", ERROR, path, name, cls, detail))
         if host and (_cross(rect, host) == (0, 0)) and w > 0 and h > 0:
             issues.append(Issue("offhost", WARN, path, name, cls, f"entirely outside the host {host}"))
 
