@@ -549,14 +549,43 @@ def ensure_patch_link(mod_dir: Path, name: str, src: Path) -> tuple[bool, str]:
 
     A REAL folder at that path is never touched. It is not this build's, and
     replacing it would delete whatever somebody put there.
+
+    Refused outright when the link would sit INSIDE its own target -- a mod
+    whose source is the repository root (`build.sources = {"MyMod": "."}`)
+    links `@MyMod/MyMod` to that same root, which contains `@MyMod` itself:
+    a loop `rglob`/`copytree` would follow for as long as the filesystem lets
+    them, 128 levels deep and more. This is a structural property of the
+    arguments alone, so it is checked before anything on disk is touched.
     """
     link = Path(mod_dir) / name
     target = Path(src).resolve()
+    # Resolved WITHOUT following a reparse point that might already sit at
+    # `link` itself: this asks where the link's own PATH lives, lexically --
+    # not where an existing junction currently points, which `Path.resolve`
+    # would follow given the chance and which is a different question (the
+    # "already points at" check below owns that one, once this one has
+    # cleared it). Only the parent is resolved, so ancestor symlinks are
+    # still normalised the way `target` itself is.
+    link_lexical = link.parent.resolve() / link.name
+    try:
+        link_lexical.relative_to(target)
+        inside_target = True
+    except ValueError:
+        inside_target = False
+    if inside_target:
+        return False, (
+            f"{link} would sit inside its own target {target} -- a mod whose source is "
+            "the repository root cannot be patched by junction; turn client.file_patching "
+            "off or move the source into a subfolder"
+        )
     if is_junction(link):
         if Path(os.path.realpath(link)) == target:
             return True, f"{link} already points at {target}"
         # Removing a junction removes the link entry only; the target stays.
-        os.rmdir(link)
+        try:
+            os.rmdir(link)
+        except OSError as exc:
+            return False, f"could not remove the stale junction {link}: {exc}"
     elif link.exists():
         return False, (f"{link} exists and is a real folder, not a link -- refusing to touch it. "
                        "Move it away, or turn client.file_patching off")

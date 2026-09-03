@@ -1433,3 +1433,43 @@ def test_a_stale_link_is_repointed_and_a_real_folder_is_refused(tmp_path):
     assert not ok_
     assert "real folder" in note
     assert (real / "keep.txt").exists()
+
+
+@windows_only
+def test_a_root_layout_mod_is_refused_rather_than_looped_into_itself(tmp_path):
+    """build.sources = {"MyMod": "."} makes the source THE REPOSITORY ROOT,
+    which contains @MyMod itself -- a junction there would have rglob and
+    copytree follow the loop for as long as the filesystem lets them. Refused
+    by construction, before anything on disk is touched."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    mod_dir = root / "@MyMod"
+    ok_, note = ensure_patch_link(mod_dir, "MyMod", root)
+    assert not ok_
+    assert "inside its own target" in note
+    assert not (mod_dir / "MyMod").exists()
+    assert not mod_dir.exists()  # refused before even mkdir(mod_dir)
+
+
+@windows_only
+def test_a_junction_that_cannot_be_removed_is_reported_not_raised(tmp_path, monkeypatch):
+    """A stuck reparse point (a file lock, a permissions quirk) must come back
+    as a normal (False, note) -- not an OSError climbing out of the build."""
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    new.mkdir()
+    mod_dir = tmp_path / "@MyMod"
+    assert ensure_patch_link(mod_dir, "MyMod", old)[0]
+    link = mod_dir / "MyMod"
+
+    def broken_rmdir(path):
+        raise OSError(5, "Access is denied")
+
+    monkeypatch.setattr(os, "rmdir", broken_rmdir)
+
+    ok_, note = ensure_patch_link(mod_dir, "MyMod", new)
+
+    assert not ok_
+    assert str(link) in note
+    assert "could not remove" in note
