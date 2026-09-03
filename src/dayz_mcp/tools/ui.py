@@ -44,6 +44,7 @@ from ..errors import Result, fail, ok
 from ..layoutparse import LayoutSyntaxError, parse_layout
 from ..procs import is_alive
 from ..profile import resolve_mod_dir
+from ..uigeom import parse_rect
 from . import session
 from .client import client_profiles_dir
 from .project import require_project
@@ -226,26 +227,17 @@ def _node(line: str) -> dict:
 
 def _centre(rect: str) -> tuple[int, int] | None:
     """The centre of an `x y w h` rectangle, or None if it is not one."""
-    parts = rect.split()
-    if len(parts) != 4:
+    parsed = parse_rect(rect)
+    if parsed is None:
         return None
-    try:
-        x, y, w, h = (int(float(p)) for p in parts)
-    except ValueError:
-        return None
+    x, y, w, h = parsed
     return x + w // 2, y + h // 2
 
 
-def _rect(text: str) -> tuple[int, int, int, int] | None:
-    """An `x y w h` string as four ints, or None if it is not one."""
-    parts = str(text).split()
-    if len(parts) != 4:
-        return None
-    try:
-        x, y, w, h = (int(float(p)) for p in parts)
-    except ValueError:
-        return None
-    return x, y, w, h
+#: Kept under this name because callers in this module and its tests already
+#: use it; the parsing itself lives in uigeom, shared with uicheck and
+#: uireport so "split 'x y w h' into four ints" exists in exactly one place.
+_rect = parse_rect
 
 
 def _is_within(path: Path, base: Path) -> bool:
@@ -563,6 +555,15 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     guard = require_project()
     if guard:
         return guard
+    # Normalised ONCE, here, rather than left to ui_load's own copy: this
+    # same string is also handed to _source_for and into meta["layout"], and
+    # a backslash-separated path (Windows-typed, exactly what ui_load itself
+    # accepts) would otherwise reach _source_for unnormalised, split on "/"
+    # into one segment that matches no configured mod, and mis-attribute a
+    # real project layout as "not a mod of this project" -- wrong, not just
+    # unhelpful, since the source is right there under a name that not
+    # normalising failed to recognise.
+    layout = (layout or "").replace("\\", "/").strip()
     prof = session.profile()
     if live:
         first = ui_tree(root="menu", timeout=timeout)

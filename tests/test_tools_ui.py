@@ -531,3 +531,32 @@ def test_ui_preview_marks_a_host_of_its_own_size_as_emulated(live, monkeypatch):
     monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
     result = ui.ui_preview("a.layout", host="1306 518")
     assert result.data["emulated"] is True
+
+
+def test_ui_preview_normalises_backslashes_so_the_source_is_still_found(live, monkeypatch):
+    """A backslash-separated layout path is exactly what ui_load itself
+    accepts (it normalises its own copy). _source_for must see the SAME
+    normalised string ui_load sees -- otherwise it splits on "/", finds none,
+    treats the whole path as a single unmatched mod name, and mis-attributes a
+    real project layout as belonging to no mod at all: the "not a mod" note
+    would be false, and editbox_bare would be silently skipped even though the
+    source is right there."""
+    root = Path(session.profile().root)
+    layout_dir = root / "MyMod" / "gui" / "layouts"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    (layout_dir / "x.layout").write_text(
+        "FrameWidgetClass Root {\n size 1 1\n {\n"
+        "  EditBoxWidgetClass Field {\n   size 100 20\n  }\n }\n}\n",
+        encoding="utf-8",
+    )
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 2, "ui_host": "0 0 200 100",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 200 100"),
+                     node_line(path="0", cls="EditBoxWidget", name="Field", rect="10 10 100 20")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview("MyMod\\gui\\layouts\\x.layout")
+    assert result.ok, result.error
+    assert not any("is not a mod" in n for n in result.data["notes"]), result.data["notes"]
+    issues_on_disk = json.loads((Path(result.data["dir"]) / "issues.json").read_text(encoding="utf-8"))
+    assert any(i["rule"] == "editbox_bare" for i in issues_on_disk)

@@ -7,6 +7,8 @@ import html
 import json
 from pathlib import Path
 
+from .uigeom import parse_rect
+
 _STYLE = """
 body{margin:0;background:#141416;color:#d8d8dc;font:14px system-ui,sans-serif;display:flex;height:100vh}
 #stage{position:relative;overflow:auto;flex:1;background:#0b0b0c}
@@ -35,16 +37,6 @@ document.querySelectorAll('.issue').forEach(el=>{el.addEventListener('click',()=
 """
 
 
-def _rect(text: str) -> tuple[int, int, int, int] | None:
-    parts = str(text).split()
-    if len(parts) != 4:
-        return None
-    try:
-        return tuple(int(float(p)) for p in parts)  # type: ignore[return-value]
-    except ValueError:
-        return None
-
-
 def render_html(shot: str | None, nodes: list[dict], issues: list[dict], notes: list[str], meta: dict) -> str:
     host = meta.get("host") or (0, 0, 0, 0)
     hx, hy = int(host[0]), int(host[1])
@@ -53,7 +45,7 @@ def render_html(shot: str | None, nodes: list[dict], issues: list[dict], notes: 
         worst[issue["path"]] = "error" if issue["severity"] == "error" or worst.get(issue["path"]) == "error" else "warn"
     boxes = []
     for n in nodes:
-        rect = _rect(n.get("rect", ""))
+        rect = parse_rect(n.get("rect", ""))
         if not rect or not n.get("shown", True):
             continue
         x, y, w, h = rect

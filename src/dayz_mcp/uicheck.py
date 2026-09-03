@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from .layoutparse import LayoutNode
+from .uigeom import parse_rect
 
 ERROR = "error"
 WARN = "warn"
@@ -58,13 +59,7 @@ class Issue:
 
 
 def rect_of(node: dict) -> tuple[int, int, int, int] | None:
-    parts = str(node.get("rect", "")).split()
-    if len(parts) != 4:
-        return None
-    try:
-        return tuple(int(float(p)) for p in parts)  # type: ignore[return-value]
-    except ValueError:
-        return None
+    return parse_rect(node.get("rect", ""))
 
 
 def _parent_path(path: str) -> str | None:
