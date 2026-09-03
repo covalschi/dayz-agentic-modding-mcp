@@ -59,6 +59,28 @@ def test_a_multiword_keys_first_word_being_a_standalone_key_does_not_hide_it():
     assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   text "Hello"\n  }\n')) == []
 
 
+def test_a_quoted_value_is_never_mistaken_for_an_unquoted_multiword_key():
+    """`text "color"` is the widget's text, set to the literal word "color" --
+    not the key `text color` written without its quotes. A quoted token is a
+    value, never a stray key word, so it stops the reconstruction outright."""
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   text "color"\n  }\n')) == []
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   text "offset"\n  }\n')) == []
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   stretch "mode"\n  }\n')) == []
+
+
+def test_the_longest_known_multiword_key_wins_over_a_shorter_prefix():
+    """`Scrollbar V` alone is a real key, and so is `Scrollbar V Left`; unquoted
+    `Scrollbar V Left 1` must be read as the longer one. Same for `exact text`
+    versus `exact text size`."""
+    findings = lint_layout(wrap("  TextWidgetClass T {\n   size 1 1\n   Scrollbar V Left 1\n  }\n"), "a.layout")
+    assert [(f.check, f.severity) for f in findings] == [("layout-unquoted-key", REFUSE)]
+    assert "'Scrollbar V Left'" in findings[0].message
+
+    findings = lint_layout(wrap("  TextWidgetClass T {\n   size 1 1\n   exact text size 32\n  }\n"), "a.layout")
+    assert [(f.check, f.severity) for f in findings] == [("layout-unquoted-key", REFUSE)]
+    assert "'exact text size'" in findings[0].message
+
+
 def test_an_unknown_key_only_warns():
     f = one(wrap("  TextWidgetClass T {\n   size 1 1\n   borderRadius 4\n  }\n"), "layout-key")
     assert f.severity == WARN

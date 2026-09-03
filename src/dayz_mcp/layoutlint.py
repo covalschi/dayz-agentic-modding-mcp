@@ -70,12 +70,26 @@ def _multiword_match(prop: LayoutProp, multiword: set[str]) -> str | None:
     followed by its value" from "the multi-word key, unquoted" apart is to
     try reattaching each possible number of leading value tokens and see
     whether that longer string is itself a known key.
+
+    Only UNQUOTED value tokens can be part of an unquoted key -- a quoted
+    token is a value written as one (`text "color"` means the literal word
+    "color", not the key `text color` missing its quotes), so the search
+    stops at the first quoted token. `prop.quoted` empty (a property built
+    without that information) is treated as "every value unquoted", so the
+    search still runs. The longest reconstruction that is a real key wins:
+    `exact text size 32` unquoted names `exact text size`, not the shorter
+    `exact text` that also happens to be a real key.
     """
-    for n in (1, 2, 3):
-        if len(prop.values) >= n:
-            candidate = " ".join([prop.key, *prop.values[:n]])
-            if candidate in multiword:
-                return candidate
+    quoted = prop.quoted if prop.quoted else [False] * len(prop.values)
+    limit = 0
+    for q in quoted[:3]:
+        if q:
+            break
+        limit += 1
+    for n in range(limit, 0, -1):
+        candidate = " ".join([prop.key, *prop.values[:n]])
+        if candidate in multiword:
+            return candidate
     return None
 
 

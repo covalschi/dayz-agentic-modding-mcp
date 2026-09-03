@@ -60,6 +60,14 @@ def test_the_tree_has_classes_names_props_and_children():
     assert root.children[1].children[0].prop("color") == ["0.1", "0.2", "0.3", "1"]
 
 
+def test_a_propertys_quoted_flags_match_its_values():
+    """Which of a property's own values were written quoted -- the key's own
+    quoting is a different thing and is not one of these flags."""
+    text = 'FrameWidgetClass Root {\n text "Hello"\n size 1 1\n "exact text" 1\n}\n'
+    root = parse_layout(text)
+    assert [p.quoted for p in root.props] == [[True], [False, False], [False]]
+
+
 def test_walk_paths_match_the_engine_walker():
     """Depth-first, declaration order, dotted indexes, root is ''. The same
     addressing the bridge's DZMCP_Ui.Walk produces, so an engine node and a

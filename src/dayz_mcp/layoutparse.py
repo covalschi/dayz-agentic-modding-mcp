@@ -34,6 +34,10 @@ class LayoutProp:
     key: str
     values: list[str]
     line: int
+    #: Whether each of `values`, in order, was written quoted in the source.
+    #: An empty list means "not recorded" -- treat every value as unquoted,
+    #: so code built against the field's absence still works.
+    quoted: list[bool] = field(default_factory=list)
 
 
 @dataclass
@@ -175,7 +179,7 @@ def parse_layout(text: str) -> LayoutNode:
         if state[-1] != "props":
             raise LayoutSyntaxError(lineno, f"property {words[0]!r} after the child block -- properties come before children")
         # Property of the current widget
-        stack[-1].props.append(LayoutProp(words[0], words[1:], lineno))
+        stack[-1].props.append(LayoutProp(words[0], words[1:], lineno, [q for _, q in tokens[1:]]))
 
     if stack:
         raise LayoutSyntaxError(lineno, f"unclosed widget {stack[-1].name!r}")
