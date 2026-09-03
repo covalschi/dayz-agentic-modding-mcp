@@ -186,7 +186,7 @@ CONNECT_POLL_SECONDS = 2.0
 # foreground at all (an attempt to cover one hung), so a client launched
 # fullscreen is a client nothing can be verified against.
 OWNED_LAUNCH_ARGS = ("-connect", "-port", "-mod", "-profiles", "-window",
-                     "-nolauncher", "-exe")
+                     "-nolauncher", "-exe", "-filePatching", "-x", "-y")
 
 # Said in the answer of the one tool that takes the screen away, the same way
 # gamepad.py announces that a controller has been plugged in: a side effect on
@@ -457,7 +457,8 @@ def _require_live_client() -> tuple[int, Result | None]:
 
 
 def client_start(
-    timeout: float = CONNECT_TIMEOUT_SECONDS, extra_args: list[str] | None = None
+    timeout: float = CONNECT_TIMEOUT_SECONDS, extra_args: list[str] | None = None,
+    window: list[int] | None = None,
 ) -> Result:
     """Start the game client and connect it to the test stand. Returns a job id.
 
@@ -484,8 +485,10 @@ def client_start(
 
     IT LAUNCHES WINDOWED, always. A fullscreen D3D window does not yield the
     foreground -- an attempt to cover one simply hung -- so a fullscreen client
-    can be neither typed into nor left behind while the owner works. The window
-    size itself is the client profile's business (DayZ.cfg), not this server's.
+    can be neither typed into nor left behind while the owner works.
+    `machine.window`, when set, is passed as -x/-y and `window=` overrides it
+    for one launch; `client.file_patching` adds -filePatching; all three are
+    then arguments this tool owns.
 
     IT REFUSES WHEN THERE IS NO STAND TO JOIN. The client connects, it does not
     listen, so there is no port of its own to pre-flight; what there must be is
@@ -538,6 +541,15 @@ def client_start(
                          "run the client (windowed, joined to the stand) -- change the "
                          "profile, not the command line",
                 )
+
+    size = prof.machine.window
+    if window is not None:
+        good = (isinstance(window, (list, tuple)) and len(window) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in window))
+        if not good:
+            return fail("window must be two positive integers, like [1920, 1080]",
+                        hint="it overrides machine.window for this one launch")
+        size = (window[0], window[1])
 
     running = session.client_pid()
     if running and is_alive(running, image=_tracked_image()):
@@ -619,6 +631,13 @@ def client_start(
         "-nolauncher",
         "-window",
     ]
+    if prof.client.file_patching:
+        # The stand's server config must allow it (allowFilePatching = 1) or
+        # the client is refused at connect with the engine's own message.
+        cmd.append("-filePatching")
+    if size:
+        cmd += [f"-x={size[0]}", f"-y={size[1]}"]
+
     extras_note = ""
     if extra_args:
         cmd.extend(extra_args)

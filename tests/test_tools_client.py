@@ -313,6 +313,46 @@ def test_client_start_launches_windowed_and_connects_to_the_stand(tmp_path, monk
     assert any(part.startswith("-mod=") for part in cmd)
 
 
+def reopen_with(root: Path, main_extra: str = "", local_extra: str = "") -> None:
+    """Rewrite both halves of the profile with extra lines and open again."""
+    main = root / "dayz-mcp.toml"
+    main.write_text(main.read_text(encoding="utf-8") + main_extra, encoding="utf-8")
+    local = root / "dayz-mcp.local.toml"
+    local.write_text(local.read_text(encoding="utf-8") + local_extra, encoding="utf-8")
+    opened = tools.project_open(str(root))
+    assert opened.ok, opened.error
+
+
+def test_client_start_passes_file_patching_and_the_window_size_from_the_profile(tmp_path, monkeypatch):
+    root, stand, game, spawned = started_client(tmp_path, monkeypatch)
+    reopen_with(root, "\n[client]\nfile_patching = true\n", "window = [1920, 1080]\n")
+    started = client.client_start(timeout=5)
+    assert started.ok, started.error
+    wait_for_job(started.data["job_id"])
+    cmd = spawned[0]
+    assert "-filePatching" in cmd
+    assert "-x=1920" in cmd and "-y=1080" in cmd
+
+
+def test_client_start_leaves_patching_and_size_alone_by_default(tmp_path, monkeypatch):
+    root, stand, game, spawned = started_client(tmp_path, monkeypatch)
+    started = client.client_start(timeout=5)
+    wait_for_job(started.data["job_id"])
+    cmd = spawned[0]
+    assert "-filePatching" not in cmd
+    assert not any(part.startswith(("-x=", "-y=")) for part in cmd)
+
+
+def test_a_window_argument_overrides_the_profile_for_one_launch(tmp_path, monkeypatch):
+    root, stand, game, spawned = started_client(tmp_path, monkeypatch)
+    reopen_with(root, "", "window = [3840, 1600]\n")
+    started = client.client_start(timeout=5, window=[1920, 1080])
+    assert started.ok, started.error
+    wait_for_job(started.data["job_id"])
+    assert "-x=1920" in spawned[0] and "-y=1080" in spawned[0]
+    assert not client.client_start(timeout=5, window=[0, 5]).ok
+
+
 def test_readiness_is_the_player_count_not_a_timer(tmp_path, monkeypatch):
     """The measured connect time is ~50s and it varies. A timer would call a
     client ready that is still loading, and would call a client that never
@@ -446,7 +486,8 @@ def test_client_start_never_rewrites_the_owners_setting(tmp_path, monkeypatch):
 
 def test_client_start_refuses_extras_that_collide_with_arguments_it_owns(tmp_path, monkeypatch):
     root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
-    for arg in ("-connect=1.2.3.4", "-port=2402", "-profiles=C:/x", "-mod=@Dep", "-window"):
+    for arg in ("-connect=1.2.3.4", "-port=2402", "-profiles=C:/x", "-mod=@Dep", "-window",
+                "-filePatching", "-x=800", "-y=600"):
         result = client.client_start(timeout=1, extra_args=[arg])
         assert result.ok is False, arg
         assert arg.split("=", 1)[0] in result.error

@@ -357,6 +357,11 @@ a frozen frame looks exactly like a live one. So `client_start` and
 `client_status` READ that setting and warn; they never write it, because it
 belongs to whoever owns the machine.
 
+**Two more profile settings ride along on the same launch line.**
+`client.file_patching` adds `-filePatching` (the stand's server config needs
+`allowFilePatching = 1` or the client is refused at connect), and
+`machine.window` — or a per-call `window=` override — adds `-x`/`-y`.
+
 **`client_type` is the only tool that takes the screen**, and it is honest
 about it: the answer carries `foreground_taken` and a sentence saying the
 person at the machine could not type into their own window while it ran. It
