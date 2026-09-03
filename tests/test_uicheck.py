@@ -111,23 +111,66 @@ def test_a_bare_edit_box_needs_the_source_to_be_judged():
     purpose, so a check that judged framing off the engine class alone could
     not tell Root and Frame apart. With a source layout, `check` decides by
     the SOURCE class instead: Root (FrameWidgetClass) does not frame Bare,
-    but Frame (PanelWidgetClass) does frame Framed, despite both reporting
-    the same "Widget" to the engine."""
+    but Frame (PanelWidgetClass) -- which HUGS Framed, 2 px of margin on
+    every side -- does frame it, despite both reporting the same "Widget" to
+    the engine."""
     layout = ("FrameWidgetClass Root {\n size 1 1\n {\n"
               "  EditBoxWidgetClass Bare {\n   size 100 20\n  }\n"
               "  EditBoxWidgetClass Styled {\n   size 100 20\n   style Default\n  }\n"
-              "  PanelWidgetClass Frame {\n   size 120 30\n   style rover_sim_colorable\n  }\n"
+              "  PanelWidgetClass Frame {\n   size 104 24\n   style rover_sim_colorable\n  }\n"
               "  EditBoxWidgetClass Framed {\n   size 100 20\n  }\n }\n}\n")
     nodes = [node("", "Widget", "Root", "0 0 1000 600"),
              node("0", "EditBoxWidget", "Bare", "10 10 100 20"),
              node("1", "EditBoxWidget", "Styled", "10 40 100 20"),
-             node("2", "Widget", "Frame", "5 95 120 30"),
+             node("2", "Widget", "Frame", "8 98 104 24"),
              node("3", "EditBoxWidget", "Framed", "10 100 100 20")]
     issues, notes = check(nodes, HOST)
     assert rules(issues) == []
     assert any("editbox_bare" in n for n in notes)
     issues, _ = check(nodes, HOST, source=parse_layout(layout))
     assert rules(issues) == [("editbox_bare", "Bare")]
+
+
+def test_a_page_sized_panel_is_not_a_frame_even_though_it_encloses_the_box():
+    """F4/G3: every PDA edit box sits on the PAGE's own whole background
+    panel. Untightened, the parent branch trusted the candidate's class
+    alone and called any enclosing panel a frame -- so editbox_bare never
+    fired on a real page. A panel far larger than the field it merely
+    happens to contain is a page background, not a frame."""
+    layout = 'FrameWidgetClass Root {\n size 1 1\n {\n  PanelWidgetClass PageBg {\n   position 0 0\n   size 1000 600\n   style rover_sim_colorable\n   {\n    EditBoxWidgetClass Field {\n     size 100 20\n    }\n   }\n  }\n }\n}\n'
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "Widget", "PageBg", "0 0 1000 600"),
+             node("0.0", "EditBoxWidget", "Field", "400 300 100 20")]
+    issues, _ = check(nodes, HOST, source=parse_layout(layout))
+    assert rules(issues) == [("editbox_bare", "Field")]
+
+
+def test_a_panel_four_px_larger_on_every_side_hugs_and_frames():
+    """FRAME_SLACK_UNITS is 6, so the allowed margin at scale 1.0 is
+    round(6 * 1.0) + 1 = 7 px. A preceding sibling only 4 px larger than
+    the box on every side is well within that -- a frame, not a page."""
+    layout = 'FrameWidgetClass Root {\n size 1 1\n {\n  PanelWidgetClass Frame {\n   position 6 6\n   size 108 28\n   style rover_sim_colorable\n  }\n  EditBoxWidgetClass Field {\n   size 100 20\n  }\n }\n}\n'
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "Widget", "Frame", "6 6 108 28"),
+             node("1", "EditBoxWidget", "Field", "10 10 100 20")]
+    issues, _ = check(nodes, HOST, source=parse_layout(layout))
+    assert rules(issues) == []
+
+
+def test_the_parent_panel_shortcut_obeys_the_same_slack():
+    """The parent branch used to trust the candidate's class alone, with no
+    tightness check at all -- exactly the bug in test_a_page_sized_panel
+    above, which is the parent case failing to refuse a loose panel. This is
+    its positive twin: a parent that HUGS the box (2 px margin on every
+    side, same shape the sibling test above and the pre-existing
+    test_a_bare_edit_box_needs_the_source_to_be_judged both use) still
+    frames it directly, parent or not."""
+    layout = 'FrameWidgetClass Root {\n size 1 1\n {\n  PanelWidgetClass Frame {\n   position 8 98\n   size 104 24\n   style rover_sim_colorable\n   {\n    EditBoxWidgetClass Field {\n     size 100 20\n    }\n   }\n  }\n }\n}\n'
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "Widget", "Frame", "8 98 104 24"),
+             node("0.0", "EditBoxWidget", "Field", "10 100 100 20")]
+    issues, _ = check(nodes, HOST, source=parse_layout(layout))
+    assert rules(issues) == []
 
 
 def test_a_spacers_full_width_child_may_overhang_by_the_padding_scaled():
