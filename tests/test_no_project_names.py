@@ -34,7 +34,7 @@ MOD_TOKEN = re.compile(r"@[A-Za-z][A-Za-z0-9_]{1,40}")
 # consumed the whole line (see the test below for both shapes).
 DECORATOR_NAME = re.compile(r"^\s*@[A-Za-z_][A-Za-z0-9_.]*")
 
-SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".dayz-mcp", "build", "dist"}
+SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".dayz-mcp", "build", "dist", ".superpowers"}  # .superpowers: git-ignored workspace of plan-execution tooling, never ships
 # ".c" and ".cpp" are here because the bridge mod's own sources are Enforce
 # Script and config.cpp; ".json" because it is this protocol's own wire format;
 # ".hpp"/".h" because that is how DayZ configs are split up. The last three
