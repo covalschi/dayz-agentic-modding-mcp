@@ -517,7 +517,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         walk.offset = m_LoadOffset;
         DZMCP_Ui.Walk(root, "", 0, walk);
         PublishWalk("preview", walk);
-        FinishCommand(DZMCP_STATUS_DONE, "loaded " + m_Preview.LayoutPath() + " under a host of " + m_Preview.HostRect() + "; listed " + walk.lines.Count() + " of " + walk.total + " widget(s)");
+        FinishCommand(DZMCP_STATUS_DONE, "loaded " + m_Preview.LayoutPath() + " under a host of " + m_Preview.HostRect() + " (scale " + m_Preview.ScaleText() + "); listed " + walk.lines.Count() + " of " + walk.total + " widget(s)");
     }
 
     // ui_unload: remove the preview and give the HUD back.

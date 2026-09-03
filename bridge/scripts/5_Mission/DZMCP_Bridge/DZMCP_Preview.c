@@ -53,6 +53,9 @@ class DZMCP_Preview
     protected Widget m_Loaded;
     protected string m_Layout;
     protected bool m_HudHidden;
+    // Layout-unit-to-pixel ratio of this client's own window, measured in
+    // PickHost off the workspace (window height / 1080). 1 before any Load.
+    protected float m_Scale;
 
     void DZMCP_Preview()
     {
@@ -61,6 +64,7 @@ class DZMCP_Preview
         m_Loaded = null;
         m_Layout = "";
         m_HudHidden = false;
+        m_Scale = 1;
     }
 
     bool IsLoaded()
@@ -90,6 +94,19 @@ class DZMCP_Preview
         m_Host.GetScreenPos(x, y);
         m_Host.GetScreenSize(w, h);
         return "" + Math.Round(x) + " " + Math.Round(y) + " " + Math.Round(w) + " " + Math.Round(h);
+    }
+
+    // The window's own unit scale, as PickHost measured it, "1.48"-style --
+    // two decimals, no format-width helper needed since Enforce has none
+    // (see DZMCP_Text.Pad2). "1.00" before anything has ever been loaded.
+    string ScaleText()
+    {
+        int hundredths = Math.Round(m_Scale * 100);
+        int whole = hundredths / 100;
+        int frac = hundredths % 100;
+        if (frac < 0)
+            frac = -frac;
+        return whole.ToString() + "." + DZMCP_Text.Pad2(frac);
     }
 
     bool Load(string layout, string hostSpec, out string why)
@@ -328,6 +345,20 @@ class DZMCP_Preview
             why = "the host layout lacks HostFill or HostFixed";
             return false;
         }
+        // The unit scale (layout units -> screen pixels) has to be measured
+        // off the WORKSPACE, not off HostFixed itself: a widget CreateWidgets
+        // just made reports a zero size until its first layout pass, and this
+        // runs on the very tick that made it. GetGame().GetWorkspace() is a
+        // WorkspaceWidget (extends Widget, enwidgets.c) whose own size is
+        // valid on any tick. sh <= 0 (no window yet) falls back to 1.
+        float sw = 0;
+        float sh = 0;
+        GetGame().GetWorkspace().GetScreenSize(sw, sh);
+        m_Scale = 1;
+        if (sh > 0)
+        {
+            m_Scale = sh / 1080;
+        }
         if (spec == "")
         {
             m_Host = fill;
@@ -348,12 +379,14 @@ class DZMCP_Preview
             return false;
         }
         fill.Show(false);
-        // SetSize takes LAYOUT UNITS -- HostFixed's hexactsize/vexactsize
-        // flags are what turn them into screen pixels. SetScreenSize takes
-        // pixels directly, so calling it here with a layout-unit "w h" spec
-        // sized the host wrong (measured 2026-09-03: a "1306 518" host came
-        // back 1306x518 PIXELS, not layout units).
-        fixed.SetSize(w, h);
+        // Both SetSize and SetScreenSize on this exact-size (hexactsize 1,
+        // vexactsize 1) frame write real screen PIXELS -- measured
+        // 2026-09-03, second gallery round: SetSize("1306 518") read back
+        // 1306x518 px at 1600 rows, where 1306 layout units at THIS window's
+        // own scale are ~1934 px. Neither Set* call converts a layout-unit
+        // number for us, so w/h (the caller's layout units, per the ui_load
+        // "host" argument this spec came from) are scaled by hand first.
+        fixed.SetSize(w * m_Scale, h * m_Scale);
         fixed.Show(true);
         m_Host = fixed;
         return true;

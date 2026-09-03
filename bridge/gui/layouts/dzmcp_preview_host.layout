@@ -1,8 +1,12 @@
 // The preview host: a neutral backdrop over the world and two frames the
 // previewed layout can be parented to. HostFill is the whole screen; HostFixed
-// is centred and sized from script (SetScreenSize, layout units) to emulate
-// a screen of another size. Priority 200 on purpose: an ItemPreviewWidget
-// under a priority above 256 silently draws nothing (measured).
+// is centred and sized from script, IN PIXELS, to emulate a screen of another
+// size: DZMCP_Preview.PickHost multiplies the caller's layout-unit "w h" by
+// this window's own scale (units * (window height / 1080), measured
+// 2026-09-03) before calling SetSize -- neither SetSize nor SetScreenSize
+// converts a layout-unit number for you on this exact-size frame. Priority
+// 200 on purpose: an ItemPreviewWidget under a priority above 256 silently
+// draws nothing (measured).
 FrameWidgetClass DZMCP_PreviewRoot {
  visible 1
  ignorepointer 1
