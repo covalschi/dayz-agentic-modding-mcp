@@ -54,6 +54,29 @@ def test_two_content_siblings_that_cross_overlap_but_a_panel_behind_them_does_no
     assert issues[0].other == "2"
 
 
+def test_an_image_drawn_first_and_behind_a_control_is_not_an_overlap():
+    """The device shell's bezel (an ImageWidget drawn first, covering the
+    whole device) was reported as overlapping the close button drawn on top
+    of it (measured on the first gallery run, 2026-09-03) -- a picture
+    behind a control is background, not an overlap. Without the skip this
+    pair crosses by 40x20 px, well past OVERLAP_MIN_PX, and would flag."""
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("1", "ImageWidget", "Bezel", "0 0 1000 600"),
+             node("5", "ButtonWidget", "Close", "900 10 40 20")]
+    assert check(nodes, HOST)[0] == []
+
+
+def test_two_images_that_merely_cross_still_overlap():
+    """The skip is for a picture BEHIND a control, not for "both nodes
+    happen to be ImageWidget": two images side by side, nudged to cross,
+    is a real layout collision -- neither contains the other."""
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("1", "ImageWidget", "Left", "0 0 100 100"),
+             node("2", "ImageWidget", "Right", "90 10 100 100")]
+    issues, _ = check(nodes, HOST)
+    assert rules(issues) == [("overlap", "Left")]
+
+
 def test_text_wider_than_its_box_overflows():
     nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
              node("0", "TextWidget", "Label", "10 10 100 20", text_size=(140, 20))]

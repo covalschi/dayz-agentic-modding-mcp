@@ -131,6 +131,32 @@ def _border_overhang(parent: tuple, child: tuple) -> tuple[int, int, int, int] |
     return left, top, right, bottom
 
 
+def _sibling_index(path: str) -> int | None:
+    """A node's own last path component as an int, for sibling draw order --
+    None for the root path "" (which has no siblings to order against)."""
+    last = path.rsplit(".", 1)[-1]
+    try:
+        return int(last)
+    except ValueError:
+        return None
+
+
+def _drawn_behind(picture: dict, other: dict) -> bool:
+    """True if `picture` is a backdrop drawn first, fully behind `other` --
+    an ImageWidget that encloses the other node's rectangle AND precedes it
+    in sibling draw order. Measured on the first gallery run, 2026-09-03: the
+    device shell's bezel (an ImageWidget drawn first, covering the whole
+    device) was reported as overlapping the close button drawn on top of it
+    -- a picture behind a control is background, not an overlap."""
+    if picture["class"] != "ImageWidget":
+        return False
+    picture_index = _sibling_index(picture["path"])
+    other_index = _sibling_index(other["path"])
+    if picture_index is None or other_index is None or picture_index >= other_index:
+        return False
+    return _contains(rect_of(picture), rect_of(other))
+
+
 def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
           source: LayoutNode | None = None, scale: float = 1.0) -> tuple[list[Issue], list[str]]:
     issues: list[Issue] = []
@@ -209,9 +235,12 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         for i, a in enumerate(content):
             for b in content[i + 1:]:
                 dx, dy = _cross(rect_of(a), rect_of(b))
-                if dx > OVERLAP_MIN_PX and dy > OVERLAP_MIN_PX:
-                    issues.append(Issue("overlap", ERROR, a["path"], a["name"], a["class"],
-                                        f"crosses {b['name']!r} by {dx}x{dy} px", b["path"]))
+                if dx <= OVERLAP_MIN_PX or dy <= OVERLAP_MIN_PX:
+                    continue
+                if _drawn_behind(a, b) or _drawn_behind(b, a):
+                    continue
+                issues.append(Issue("overlap", ERROR, a["path"], a["name"], a["class"],
+                                    f"crosses {b['name']!r} by {dx}x{dy} px", b["path"]))
 
     # F3: drawn OVER the content -- the content is never narrowed for it --
     # and only when the content is taller than the viewport, so the rule
