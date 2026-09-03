@@ -19,6 +19,7 @@ from pathlib import Path
 from ..errors import Result, fail
 from ..knowledge.layers import SCRIPT_SUFFIXES
 from ..knowledge.parse import parse_source
+from ..layoutlint import lint_layout
 from ..lint import REFUSE, WARN, lint_index, lint_text
 from ..profile import resolve_mod_dir
 from . import session
@@ -50,6 +51,12 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
     index cannot answer: an unbuilt layer makes it warn rather than accuse,
     because "no such class" and "I have not read the game yet" are different
     answers and only one of them is the mod's fault.
+
+    `.layout` files are checked too: a quote inside a text value, an
+    unquoted multi-word key, an unknown widget class and an ItemPreview
+    under a priority above 256 refuse; a bare edit box, a scroll widget
+    without clipchildren, a duplicate name and an unprefixed scriptclass
+    warn.
     """
     guard = require_project()
     if guard:
@@ -68,10 +75,15 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
     declarations = []
     scanned: list[str] = []
     truncated = False
+    layouts = 0
     for name in wanted:
         root = resolve_mod_dir(prof.root, prof.build.sources, name)
         for path in sorted(root.rglob("*")):
-            if not path.is_file() or not path.name.lower().endswith(SCRIPT_SUFFIXES):
+            if not path.is_file():
+                continue
+            lower = path.name.lower()
+            is_layout = lower.endswith(".layout")
+            if not is_layout and not lower.endswith(SCRIPT_SUFFIXES):
                 continue
             if len(scanned) >= MAX_FILES:
                 truncated = True
@@ -87,6 +99,10 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
                 )
                 continue
             scanned.append(label)
+            if is_layout:
+                layouts += 1
+                findings += [f.to_dict() for f in lint_layout(text, label)]
+                continue
             findings += [f.to_dict() for f in lint_text(text, label)]
             declarations += parse_source(text, file=label)
 
@@ -108,6 +124,7 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
     data = {
         "mods": wanted,
         "files": len(scanned),
+        "layouts": layouts,
         "declarations": len(declarations),
         "truncated": truncated,
         "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),

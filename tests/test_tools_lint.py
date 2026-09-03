@@ -135,3 +135,33 @@ def test_the_answer_says_how_much_it_read(tmp_path):
     assert result.data["declarations"] == 2
     assert result.data["truncated"] is False
     assert result.data["elapsed_ms"] >= 0
+
+
+def make_layout(root: Path, name: str, text: str) -> None:
+    layouts = root / "MyMod" / "gui" / "layouts"
+    layouts.mkdir(parents=True, exist_ok=True)
+    (layouts / name).write_text(text, encoding="utf-8")
+
+
+def test_layouts_are_linted_alongside_scripts(tmp_path):
+    open_with(tmp_path / "p", {"a.c": "class MyThing { }\n"})
+    seed(CORE, "game.c", ["ItemBase"])
+    seed(DEPS, "Mod/x.c", ["Other"])
+    make_layout(tmp_path / "p", "bare.layout",
+                "FrameWidgetClass Root {\n size 1 1\n {\n  EditBoxWidgetClass E {\n   size 100 20\n  }\n }\n}\n")
+    result = tools.mod_lint()
+    assert result.ok, result.error
+    assert "layout-editbox-bare" in checks(result)
+    assert result.data["layouts"] == 1
+    assert result.data["files"] == 2
+
+
+def test_a_quote_inside_a_layout_text_stops_the_build(tmp_path):
+    open_with(tmp_path / "p", {"a.c": "class MyThing { }\n"})
+    seed(CORE, "game.c", ["ItemBase"])
+    seed(DEPS, "Mod/x.c", ["Other"])
+    make_layout(tmp_path / "p", "hang.layout",
+                'FrameWidgetClass Root {\n size 1 1\n {\n  TextWidgetClass T {\n   size 1 1\n   text "a "b" c"\n  }\n }\n}\n')
+    result = tools.mod_lint()
+    assert not result.ok
+    assert "layout-quote-in-text" in checks(result)

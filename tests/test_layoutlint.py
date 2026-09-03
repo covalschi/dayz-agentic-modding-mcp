@@ -1,0 +1,105 @@
+"""Static checks on .layout files. Each refusing rule names a failure that the
+engine reports nowhere: a hung parser, a silently ignored property, an
+ItemPreview that draws nothing."""
+import pytest
+
+from dayz_mcp.layoutlint import lint_layout
+from dayz_mcp.lint import REFUSE, WARN
+
+
+def wrap(body: str) -> str:
+    return "FrameWidgetClass Root {\n size 1 1\n {\n" + body + " }\n}\n"
+
+
+def checks(text):
+    return [(f.check, f.severity) for f in lint_layout(text, "a.layout")]
+
+
+def one(text, check):
+    found = [f for f in lint_layout(text, "a.layout") if f.check == check]
+    assert len(found) == 1, [f.check for f in lint_layout(text, "a.layout")]
+    return found[0]
+
+
+def test_a_clean_layout_has_no_findings():
+    text = wrap('  TextWidgetClass T {\n   size 100 20\n   text "Hi"\n   "exact text" 1\n  }\n')
+    assert checks(text) == []
+
+
+def test_syntax_errors_refuse_with_the_line():
+    f = one("FrameWidgetClass A {\n visible 1\n", "layout-syntax")
+    assert f.severity == REFUSE and f.line == 2
+
+
+def test_an_unknown_widget_class_is_refused():
+    f = one(wrap("  BogusTextWidgetClass T {\n   size 1 1\n  }\n"), "layout-class")
+    assert f.severity == REFUSE and "BogusTextWidgetClass" in f.message
+
+
+def test_an_unquoted_multi_word_key_is_refused():
+    f = one(wrap("  TextWidgetClass T {\n   size 1 1\n   exact text 1\n  }\n"), "layout-unquoted-key")
+    assert f.severity == REFUSE and '"exact text"' in f.message
+    assert ("layout-key", WARN) not in checks(wrap("  TextWidgetClass T {\n   size 1 1\n   exact text 1\n  }\n"))
+
+
+def test_an_unknown_key_only_warns():
+    f = one(wrap("  TextWidgetClass T {\n   size 1 1\n   borderRadius 4\n  }\n"), "layout-key")
+    assert f.severity == WARN
+
+
+def test_a_quote_inside_a_text_value_is_refused():
+    text = wrap('  TextWidgetClass T {\n   size 1 1\n   text "say "hi" now"\n  }\n')
+    f = one(text, "layout-quote-in-text")
+    assert f.severity == REFUSE
+
+
+def test_a_negative_size_is_refused_but_a_negative_position_is_fine():
+    assert one(wrap("  PanelWidgetClass P {\n   size -1 10\n  }\n"), "layout-negative-size").severity == REFUSE
+    assert checks(wrap("  PanelWidgetClass P {\n   position -1 -1\n   size 10 10\n  }\n")) == []
+
+
+def test_an_item_preview_under_a_high_priority_is_refused():
+    text = ("FrameWidgetClass Root {\n priority 990\n {\n"
+            "  ItemPreviewWidgetClass P {\n   size 1 1\n  }\n }\n}\n")
+    f = one(text, "layout-preview-priority")
+    assert f.severity == REFUSE and "990" in f.message
+    fine = ("FrameWidgetClass Root {\n priority 200\n {\n"
+            "  ItemPreviewWidgetClass P {\n   size 1 1\n   priority 250\n  }\n }\n}\n")
+    assert checks(fine) == []
+
+
+def test_a_scroll_widget_without_clipchildren_warns():
+    f = one(wrap('  ScrollWidgetClass S {\n   size 1 1\n   "Scrollbar V" 1\n  }\n'), "layout-scroll-no-clip")
+    assert f.severity == WARN
+    assert checks(wrap('  ScrollWidgetClass S {\n   size 1 1\n   clipchildren 1\n  }\n')) == []
+
+
+def test_an_edit_box_with_neither_style_nor_panel_warns():
+    bare = wrap("  EditBoxWidgetClass E {\n   position 10 10\n   size 100 20\n  }\n")
+    assert one(bare, "layout-editbox-bare").severity == WARN
+    styled = wrap("  EditBoxWidgetClass E {\n   position 10 10\n   size 100 20\n   style Default\n  }\n")
+    assert checks(styled) == []
+    framed = wrap("  PanelWidgetClass F {\n   position 8 8\n   size 104 24\n   style rover_sim_colorable\n  }\n"
+                  "  EditBoxWidgetClass E {\n   position 10 10\n   size 100 20\n  }\n")
+    assert checks(framed) == []
+    too_small = wrap("  PanelWidgetClass F {\n   position 8 8\n   size 50 24\n   style rover_sim_colorable\n  }\n"
+                     "  EditBoxWidgetClass E {\n   position 10 10\n   size 100 20\n  }\n")
+    assert one(too_small, "layout-editbox-bare").severity == WARN
+
+
+def test_a_duplicate_name_warns_with_the_first_line():
+    text = wrap("  TextWidgetClass T {\n   size 1 1\n  }\n  TextWidgetClass T {\n   size 1 1\n  }\n")
+    f = one(text, "layout-dup-name")
+    assert f.severity == WARN and "line 4" in f.message
+
+
+def test_a_scriptclass_without_a_prefix_warns_and_an_empty_one_does_not():
+    assert one(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass "Tabber"\n  }\n'), "layout-scriptclass-prefix").severity == WARN
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass "OZ_Tabber"\n  }\n')) == []
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass ""\n  }\n')) == []
+
+
+def test_project_classes_can_be_allowed():
+    text = wrap("  MyMapWidgetClass M {\n   size 1 1\n  }\n")
+    assert ("layout-class", REFUSE) in checks(text)
+    assert lint_layout(text, "a.layout", extra_classes=["MyMapWidgetClass"]) == []
