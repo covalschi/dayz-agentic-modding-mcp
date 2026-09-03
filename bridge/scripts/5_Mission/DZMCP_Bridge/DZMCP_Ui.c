@@ -316,4 +316,59 @@ class DZMCP_Ui
         node.GetScreenSize(w, h);
         return "" + Math.Round(x + w / 2) + " " + Math.Round(y + h / 2);
     }
+
+    // The nth widget (1-based) named `name` under `root`, depth-first in
+    // declaration order -- the order rows created from one template appear
+    // in, which is why "the third Line" is a meaningful address.
+    static Widget FindNth(Widget root, string name, int nth)
+    {
+        int seen = 0;
+        return FindNthFrom(root, name, nth, seen);
+    }
+
+    protected static Widget FindNthFrom(Widget node, string name, int nth, inout int seen)
+    {
+        if (!node)
+            return null;
+        if (node.GetName() == name)
+        {
+            seen++;
+            if (seen == nth)
+                return node;
+        }
+        Widget child = node.GetChildren();
+        int guard = 0;
+        while (child)
+        {
+            Widget hit = FindNthFrom(child, name, nth, seen);
+            if (hit)
+                return hit;
+            child = child.GetSibling();
+            guard++;
+            if (guard > NODES_MAX)
+                break;
+        }
+        return null;
+    }
+
+    // Spacers lay their children out only when told (enwidgets.c:164 Update;
+    // the wiki's most-reported spacer bug). Called once after a fixture.
+    static void UpdateSpacers(Widget node)
+    {
+        if (!node)
+            return;
+        SpacerWidget spacer;
+        if (Class.CastTo(spacer, node))
+            spacer.Update();
+        Widget child = node.GetChildren();
+        int guard = 0;
+        while (child)
+        {
+            UpdateSpacers(child);
+            child = child.GetSibling();
+            guard++;
+            if (guard > NODES_MAX)
+                break;
+        }
+    }
 }

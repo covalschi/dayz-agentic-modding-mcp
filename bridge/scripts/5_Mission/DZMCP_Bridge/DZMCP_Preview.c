@@ -7,6 +7,43 @@
 // shows the layout and nothing else, and shown again on unload.
 //
 // One statement per line, as everywhere in this mod.
+
+// One fixture operation, as the JSON carries it. Defaults in the constructor:
+// the deserializer leaves an absent member at whatever the constructor set.
+class DZMCP_FixtureOp
+{
+    string op;
+    string layout;
+    string into;
+    int count;
+    string name;
+    int nth;
+    string text;
+    string color;
+
+    void DZMCP_FixtureOp()
+    {
+        op = "";
+        layout = "";
+        into = "";
+        count = 1;
+        name = "";
+        nth = 1;
+        text = "";
+        color = "";
+    }
+}
+
+class DZMCP_Fixture
+{
+    ref array<ref DZMCP_FixtureOp> ops;
+
+    void DZMCP_Fixture()
+    {
+        ops = new array<ref DZMCP_FixtureOp>();
+    }
+}
+
 class DZMCP_Preview
 {
     static const string HOST_LAYOUT = "DZMCP_Bridge/gui/layouts/dzmcp_preview_host.layout";
@@ -88,11 +125,147 @@ class DZMCP_Preview
         return true;
     }
 
-    // Placeholder until the fixture task: refuse rather than pretend.
     bool ApplyFixture(string json, out string why)
     {
-        why = "fixtures are not supported by this bridge build";
+        why = "";
+        if (!m_Loaded)
+        {
+            why = "no layout is loaded to apply a fixture to";
+            return false;
+        }
+        DZMCP_Fixture fixture = new DZMCP_Fixture();
+        JsonSerializer reader = new JsonSerializer();
+        string parseError;
+        if (!reader.ReadFromString(fixture, json, parseError))
+        {
+            why = "the fixture does not parse: " + parseError;
+            return false;
+        }
+        for (int i = 0; i < fixture.ops.Count(); i++)
+        {
+            DZMCP_FixtureOp op = fixture.ops.Get(i);
+            string opWhy;
+            if (!ApplyOp(op, opWhy))
+            {
+                why = "fixture op " + i + " (" + op.op + "): " + opWhy;
+                return false;
+            }
+        }
+        DZMCP_Ui.UpdateSpacers(m_Loaded);
+        return true;
+    }
+
+    protected bool ApplyOp(DZMCP_FixtureOp op, out string why)
+    {
+        why = "";
+        if (op.op == "add")
+            return OpAdd(op, why);
+        if (op.op == "text")
+            return OpText(op, why);
+        if (op.op == "show")
+            return OpShow(op, true, why);
+        if (op.op == "hide")
+            return OpShow(op, false, why);
+        if (op.op == "color")
+            return OpColor(op, why);
+        why = "unknown op '" + op.op + "'; this build knows add, text, show, hide, color";
         return false;
+    }
+
+    protected Widget Target(DZMCP_FixtureOp op, out string why)
+    {
+        why = "";
+        if (op.name == "")
+        {
+            why = "needs a name";
+            return null;
+        }
+        Widget node = DZMCP_Ui.FindNth(m_Loaded, op.name, op.nth);
+        if (!node)
+            why = "no widget named '" + op.name + "' (occurrence " + op.nth + ") under the loaded layout";
+        return node;
+    }
+
+    protected bool OpAdd(DZMCP_FixtureOp op, out string why)
+    {
+        why = "";
+        if (op.layout == "")
+        {
+            why = "add needs a layout";
+            return false;
+        }
+        Widget into = m_Loaded;
+        if (op.into != "")
+        {
+            into = DZMCP_Ui.FindNth(m_Loaded, op.into, 1);
+            if (!into)
+            {
+                why = "no container named '" + op.into + "' under the loaded layout";
+                return false;
+            }
+        }
+        for (int i = 0; i < op.count; i++)
+        {
+            Widget made = GetGame().GetWorkspace().CreateWidgets(op.layout, into);
+            if (!made)
+            {
+                why = "nothing loaded from '" + op.layout + "' on copy " + (i + 1);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected bool OpText(DZMCP_FixtureOp op, out string why)
+    {
+        Widget node = Target(op, why);
+        if (!node)
+            return false;
+        TextWidget text;
+        if (Class.CastTo(text, node))
+        {
+            text.SetText(op.text);
+            return true;
+        }
+        EditBoxWidget edit;
+        if (Class.CastTo(edit, node))
+        {
+            edit.SetText(op.text);
+            return true;
+        }
+        ButtonWidget button;
+        if (Class.CastTo(button, node))
+        {
+            button.SetText(op.text);
+            return true;
+        }
+        why = "'" + op.name + "' is a " + node.ClassName() + ", which carries no text";
+        return false;
+    }
+
+    protected bool OpShow(DZMCP_FixtureOp op, bool show, out string why)
+    {
+        Widget node = Target(op, why);
+        if (!node)
+            return false;
+        node.Show(show);
+        return true;
+    }
+
+    protected bool OpColor(DZMCP_FixtureOp op, out string why)
+    {
+        Widget node = Target(op, why);
+        if (!node)
+            return false;
+        array<string> parts = new array<string>();
+        op.color.Split(" ", parts);
+        if (parts.Count() != 4)
+        {
+            why = "color must be four fractions 'a r g b', not '" + op.color + "'";
+            return false;
+        }
+        node.SetColor(ARGBF(parts.Get(0).ToFloat(), parts.Get(1).ToFloat(), parts.Get(2).ToFloat(), parts.Get(3).ToFloat()));
+        return true;
     }
 
     void Unload()
