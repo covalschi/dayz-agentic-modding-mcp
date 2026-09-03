@@ -1,0 +1,120 @@
+// Measurement probe for the preview harness. Everything here has a known
+// size in layout units, so ui_tree's rectangles answer: the unit scale
+// (Probe100), the scrollbar width (ProbeScroll vs ProbeContent), text metrics
+// (ProbeText) and how a self-sizing WrapSpacer behaves (WrapVanilla, WrapOurs).
+FrameWidgetClass DZMCP_Probe {
+ visible 1
+ position 0 0
+ size 1 1
+ hexactpos 0
+ vexactpos 0
+ hexactsize 0
+ vexactsize 0
+ {
+  PanelWidgetClass Probe100 {
+   visible 1
+   color 1 0 0 1
+   position 50 50
+   size 100 100
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   style rover_sim_colorable
+  }
+  TextWidgetClass ProbeText {
+   visible 1
+   position 200 50
+   size 300 40
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   color 1 1 1 1
+   text "Probe text 0123456789"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 24
+  }
+  ScrollWidgetClass ProbeScroll {
+   visible 1
+   clipchildren 1
+   position 50 200
+   size 300 200
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   "Scrollbar V" 1
+   {
+    PanelWidgetClass ProbeContent {
+     visible 1
+     color 0 0.6 0 1
+     position 0 0
+     size 300 600
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     style rover_sim_colorable
+    }
+   }
+  }
+  WrapSpacerWidgetClass WrapVanilla {
+   visible 1
+   position 400 200
+   size 300 0
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   "Size To Content V" 1
+   {
+    PanelWidgetClass V1 {
+     visible 1
+     color 0 0 1 1
+     size 1 30
+     hexactsize 0
+     vexactsize 1
+     style rover_sim_colorable
+    }
+    PanelWidgetClass V2 {
+     visible 1
+     color 0 0 0.7 1
+     size 1 30
+     hexactsize 0
+     vexactsize 1
+     style rover_sim_colorable
+    }
+   }
+  }
+  WrapSpacerWidgetClass WrapOurs {
+   visible 1
+   position 400 400
+   size 300 0
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 0
+   "Size To Content V" 1
+   {
+    PanelWidgetClass O1 {
+     visible 1
+     color 1 0.5 0 1
+     size 1 30
+     hexactsize 0
+     vexactsize 1
+     style rover_sim_colorable
+    }
+    PanelWidgetClass O2 {
+     visible 1
+     color 0.7 0.3 0 1
+     size 1 30
+     hexactsize 0
+     vexactsize 1
+     style rover_sim_colorable
+    }
+   }
+  }
+ }
+}

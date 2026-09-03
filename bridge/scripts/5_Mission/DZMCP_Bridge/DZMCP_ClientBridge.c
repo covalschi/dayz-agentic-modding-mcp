@@ -29,6 +29,19 @@
 // settle is written down as a question in the spec, not assumed here.
 class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 {
+    protected ref DZMCP_Preview m_Preview;
+    protected int m_LoadDepth;
+    protected int m_LoadLimit;
+    protected int m_LoadOffset;
+
+    void DZMCP_ClientBridgeCore()
+    {
+        m_Preview = new DZMCP_Preview();
+        m_LoadDepth = DZMCP_Ui.DEPTH_MAX;
+        m_LoadLimit = DZMCP_Ui.NODES_MAX;
+        m_LoadOffset = 0;
+    }
+
     override protected string CmdPath()
     {
         return DZMCP_CLIENT_CMD_PATH;
@@ -54,7 +67,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
     override protected string KnownVerbs()
     {
-        return "ping, ui_tree, ui_find, ui_click, ui_text";
+        return "ping, ui_tree, ui_find, ui_click, ui_text, ui_load, ui_unload";
     }
 
     // Deliberately NOT "everything the server knows, plus UI". A client asked
@@ -65,7 +78,9 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     {
         if (verb == "ping")
             return true;
-        return verb == "ui_tree" || verb == "ui_find" || verb == "ui_click" || verb == "ui_text";
+        if (verb == "ui_tree" || verb == "ui_find" || verb == "ui_click" || verb == "ui_text")
+            return true;
+        return verb == "ui_load" || verb == "ui_unload";
     }
 
     override protected void Dispatch(string verb, string raw)
@@ -74,7 +89,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         // refusal, the two-stage parse and `ping`. The verb check there calls
         // IsKnownVerb, which is the override above -- so a server verb sent to
         // a client is refused by name rather than half-executed.
-        if (verb != "ui_tree" && verb != "ui_find" && verb != "ui_click" && verb != "ui_text")
+        if (verb != "ui_tree" && verb != "ui_find" && verb != "ui_click" && verb != "ui_text" && verb != "ui_load" && verb != "ui_unload")
         {
             super.Dispatch(verb, raw);
             return;
@@ -105,7 +120,17 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             VerbUiClick(args);
             return;
         }
-        VerbUiText(args);
+        if (verb == "ui_text")
+        {
+            VerbUiText(args);
+            return;
+        }
+        if (verb == "ui_load")
+        {
+            VerbUiLoad(args);
+            return;
+        }
+        VerbUiUnload(args);
     }
 
     // What this half publishes every tick. The base class looks at players,
@@ -114,6 +139,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     override protected void RefreshWorld()
     {
         m_State.world.ui_menu = DZMCP_Text.Sanitize(DZMCP_Ui.OpenMenuClass(), ID_LEN);
+        m_State.world.ui_host = m_Preview.HostRect();
         m_State.world.ui_cursor = -1;
         m_State.world.ui_dialog = -1;
 
@@ -134,6 +160,33 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
     // ---- the verbs ---------------------------------------------------------
 
+    protected bool RootNameOk(string which)
+    {
+        return which == "menu" || which == "screen" || which == "preview";
+    }
+
+    protected Widget ResolveRoot(string which, out string why)
+    {
+        why = "";
+        if (which == "preview")
+        {
+            Widget loaded = m_Preview.LoadedRoot();
+            if (!loaded)
+                why = "no preview is loaded -- ui_load a layout first";
+            return loaded;
+        }
+        return DZMCP_Ui.Root(which, why);
+    }
+
+    protected void PublishWalk(string which, DZMCP_UiWalk walk)
+    {
+        m_State.world.ui_root = which;
+        m_State.world.ui_total = walk.total;
+        m_State.world.ui_nodes.Clear();
+        for (int i = 0; i < walk.lines.Count(); i++)
+            m_State.world.ui_nodes.Insert(walk.lines.Get(i));
+    }
+
     // ui_tree: the widget tree, as a page.
     //
     //   root   "menu" (the open scripted menu, the default) or "screen"
@@ -148,14 +201,14 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (which != "menu" && which != "screen")
+        if (!RootNameOk(which))
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_tree: root must be menu or screen, not " + Excerpt(which));
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_tree: root must be menu, screen or preview, not " + Excerpt(which));
             return;
         }
 
         string why;
-        Widget root = DZMCP_Ui.Root(which, why);
+        Widget root = ResolveRoot(which, why);
         if (!root)
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_tree: " + why);
@@ -169,11 +222,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
         DZMCP_Ui.Walk(root, "", 0, walk);
 
-        m_State.world.ui_root = which;
-        m_State.world.ui_total = walk.total;
-        m_State.world.ui_nodes.Clear();
-        for (int i = 0; i < walk.lines.Count(); i++)
-            m_State.world.ui_nodes.Insert(walk.lines.Get(i));
+        PublishWalk(which, walk);
 
         FinishCommand(DZMCP_STATUS_DONE, "listed " + walk.lines.Count() + " of " + walk.total + " widget(s) under the " + which + " root");
     }
@@ -192,9 +241,9 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (which != "menu" && which != "screen")
+        if (!RootNameOk(which))
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_find: root must be menu or screen, not " + Excerpt(which));
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_find: root must be menu, screen or preview, not " + Excerpt(which));
             return;
         }
 
@@ -208,7 +257,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         }
 
         string why;
-        Widget root = DZMCP_Ui.Root(which, why);
+        Widget root = ResolveRoot(which, why);
         if (!root)
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_find: " + why);
@@ -263,9 +312,9 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (which != "menu" && which != "screen")
+        if (!RootNameOk(which))
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_click: root must be menu or screen, not " + Excerpt(which));
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_click: root must be menu, screen or preview, not " + Excerpt(which));
             return;
         }
 
@@ -276,7 +325,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         }
 
         string why;
-        Widget root = DZMCP_Ui.Root(which, why);
+        Widget root = ResolveRoot(which, why);
         if (!root)
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_click: " + why);
@@ -409,6 +458,81 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         // itself -- the same trap as trusting binarize's exit code.
         string now = box.GetText();
         FinishCommand(DZMCP_STATUS_DONE, "set " + node.ClassName() + " '" + node.GetName() + "'; it now reads " + Excerpt(now));
+    }
+
+    // ui_load: show a layout file under the preview host and list it.
+    //
+    //   layout   path relative to the pbo prefix, forward slashes (required)
+    //   host     "w h" in layout units, or empty for the whole screen
+    //   fixture  JSON of operations to populate it (next task)
+    //   depth, limit, offset  as for ui_tree
+    //
+    // Answers on the NEXT tick: a widget measured before its first layout
+    // pass reports zero rectangles (measured), so the walk waits one.
+    protected void VerbUiLoad(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|layout|host|fixture|depth|limit|offset|", "layout, host, fixture, depth, limit, offset"))
+            return;
+        string layout = ArgOr(args, "layout", "");
+        if (layout == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_load needs a layout argument -- a path relative to the pbo prefix, like OpenZone_PDA/gui/layouts/oz_pda_tab.layout");
+            return;
+        }
+        string why;
+        if (!m_Preview.Load(layout, ArgOr(args, "host", ""), why))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_load: " + why);
+            return;
+        }
+        string fixture = ArgOr(args, "fixture", "");
+        if (fixture != "" && !m_Preview.ApplyFixture(fixture, why))
+        {
+            m_Preview.Unload();
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_load: " + why);
+            return;
+        }
+        m_LoadDepth = ReadBoundedInt(args, "depth", DZMCP_Ui.DEPTH_MAX, 1, DZMCP_Ui.DEPTH_MAX);
+        m_LoadLimit = ReadBoundedInt(args, "limit", DZMCP_Ui.NODES_MAX, 1, DZMCP_Ui.NODES_MAX);
+        m_LoadOffset = ReadBoundedInt(args, "offset", 0, 0, 100000);
+        DeferCompletion(1);
+    }
+
+    override protected void CompleteDeferred()
+    {
+        if (m_CmdVerb != "ui_load")
+        {
+            super.CompleteDeferred();
+            return;
+        }
+        Widget root = m_Preview.LoadedRoot();
+        if (!root)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "ui_load: the preview vanished before it could be walked");
+            return;
+        }
+        DZMCP_UiWalk walk = new DZMCP_UiWalk();
+        walk.maxDepth = m_LoadDepth;
+        walk.limit = m_LoadLimit;
+        walk.offset = m_LoadOffset;
+        DZMCP_Ui.Walk(root, "", 0, walk);
+        PublishWalk("preview", walk);
+        FinishCommand(DZMCP_STATUS_DONE, "loaded " + m_Preview.LayoutPath() + " under a host of " + m_Preview.HostRect() + "; listed " + walk.lines.Count() + " of " + walk.total + " widget(s)");
+    }
+
+    // ui_unload: remove the preview and give the HUD back.
+    protected void VerbUiUnload(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|", "(none)"))
+            return;
+        if (!m_Preview.IsLoaded())
+        {
+            FinishCommand(DZMCP_STATUS_DONE, "nothing was loaded, so nothing was removed");
+            return;
+        }
+        string was = m_Preview.LayoutPath();
+        m_Preview.Unload();
+        FinishCommand(DZMCP_STATUS_DONE, "removed the preview of " + was);
     }
 
     // ---- shared argument reading ------------------------------------------

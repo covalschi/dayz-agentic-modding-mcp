@@ -195,6 +195,9 @@ class DZMCP_WorldSnapshot
     int ui_total;
     ref array<string> ui_nodes;
 
+    // screen rectangle "x y w h" of the preview host while a preview is loaded, "" otherwise
+    string ui_host;
+
     void DZMCP_WorldSnapshot()
     {
         tick_time = 0;
@@ -234,6 +237,7 @@ class DZMCP_WorldSnapshot
         ui_root = "";
         ui_total = -1;
         ui_nodes = new array<string>();
+        ui_host = "";
     }
 }
 

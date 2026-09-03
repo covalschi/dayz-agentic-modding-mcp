@@ -1,0 +1,53 @@
+// The preview host: a neutral backdrop over the world and two frames the
+// previewed layout can be parented to. HostFill is the whole screen; HostFixed
+// is centred and sized from script (SetScreenSize, layout units) to emulate
+// a screen of another size. Priority 200 on purpose: an ItemPreviewWidget
+// under a priority above 256 silently draws nothing (measured).
+FrameWidgetClass DZMCP_PreviewRoot {
+ visible 1
+ ignorepointer 1
+ position 0 0
+ size 1 1
+ hexactpos 0
+ vexactpos 0
+ hexactsize 0
+ vexactsize 0
+ priority 200
+ {
+  PanelWidgetClass Backdrop {
+   visible 1
+   ignorepointer 1
+   color 0.08 0.08 0.09 1
+   position 0 0
+   size 1 1
+   hexactpos 0
+   vexactpos 0
+   hexactsize 0
+   vexactsize 0
+   priority 1
+   style rover_sim_colorable
+  }
+  FrameWidgetClass HostFill {
+   visible 1
+   position 0 0
+   size 1 1
+   hexactpos 0
+   vexactpos 0
+   hexactsize 0
+   vexactsize 0
+   priority 2
+  }
+  FrameWidgetClass HostFixed {
+   visible 0
+   halign center_ref
+   valign center_ref
+   position 0 0
+   size 1920 1080
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+  }
+ }
+}

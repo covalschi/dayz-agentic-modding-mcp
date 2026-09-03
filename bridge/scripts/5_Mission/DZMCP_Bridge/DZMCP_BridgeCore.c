@@ -152,6 +152,9 @@ class DZMCP_BridgeCore
     // Bookkeeping for the running command, none of which belongs on the wire.
     protected string m_CmdVerb;
     protected bool   m_CmdInstant;
+    // >0 while an instant verb has asked to finish on a later tick; see
+    // DeferCompletion.
+    protected int    m_CmdDeferTicks;
     protected float  m_CmdStartedAt;
     protected float  m_CmdProgressAt;
     protected int    m_TerminalPublishes;
@@ -192,6 +195,7 @@ class DZMCP_BridgeCore
         m_TickIncomplete = false;
         m_CmdVerb = "";
         m_CmdInstant = false;
+        m_CmdDeferTicks = 0;
         m_CmdStartedAt = 0;
         m_CmdProgressAt = 0;
         m_TerminalPublishes = 0;
@@ -365,6 +369,16 @@ class DZMCP_BridgeCore
 
         if (m_CmdInstant)
         {
+            // A verb that created widgets this tick cannot measure them yet:
+            // before the first layout pass every rectangle reads as zero. Such
+            // a verb asks for a later tick, and this is that tick.
+            if (m_CmdDeferTicks > 0)
+            {
+                m_CmdDeferTicks--;
+                if (m_CmdDeferTicks == 0)
+                    CompleteDeferred();
+                return;
+            }
             FinishCommand(DZMCP_STATUS_FAILED, "the immediate verb '" + m_CmdVerb + "' did not report a result within its own" + " tick -- see the script log for the fault that stopped it");
             return;
         }
@@ -543,6 +557,7 @@ class DZMCP_BridgeCore
 
         m_CmdVerb = verb;
         m_CmdInstant = true;
+        m_CmdDeferTicks = 0;
         m_CmdStartedAt = GetGame().GetTickTime();
         m_CmdProgressAt = m_CmdStartedAt;
         m_TerminalPublishes = 0;
@@ -575,6 +590,22 @@ class DZMCP_BridgeCore
         m_TerminalPublishes = 0;
 
         DZMCP_Log.Info("command " + m_State.command.id + " -> " + status + ": " + m_State.command.detail);
+    }
+
+    // Finish this instant verb `ticks` ticks from now instead of now. The
+    // command stays RUNNING and published as such; CompleteDeferred is the
+    // hook that must then finish it.
+    protected void DeferCompletion(int ticks)
+    {
+        m_CmdDeferTicks = ticks;
+        m_CmdProgressAt = GetGame().GetTickTime();
+    }
+
+    // The base has no deferred verbs. A subclass that calls DeferCompletion
+    // overrides this and MUST reach FinishCommand on every path.
+    protected void CompleteDeferred()
+    {
+        FinishCommand(DZMCP_STATUS_FAILED, "verb '" + m_CmdVerb + "' deferred its completion and nothing completed it -- a bridge bug");
     }
 
     // -----------------------------------------------------------------------
