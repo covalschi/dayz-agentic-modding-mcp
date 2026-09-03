@@ -165,3 +165,19 @@ def test_a_quote_inside_a_layout_text_stops_the_build(tmp_path):
     result = tools.mod_lint()
     assert not result.ok
     assert "layout-quote-in-text" in checks(result)
+
+
+def test_project_layout_classes_are_allowed_by_the_layout_lint(tmp_path):
+    root = tmp_path / "p"
+    open_with(root, {"a.c": "class MyThing { }\n"})
+    (root / "dayz-mcp.toml").write_text(
+        textwrap.dedent(PROFILE).replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nlayout_classes = ["MyMapWidgetClass"]'),
+        encoding="utf-8",
+    )
+    assert tools.project_open(str(root)).ok
+    seed(CORE, "game.c", ["ItemBase"])
+    seed(DEPS, "Mod/x.c", ["Other"])
+    make_layout(root, "map.layout", "FrameWidgetClass Root {\n size 1 1\n {\n  MyMapWidgetClass M {\n   size 1 1\n  }\n }\n}\n")
+    result = tools.mod_lint()
+    assert result.ok, result.error
+    assert "layout-class" not in checks(result)

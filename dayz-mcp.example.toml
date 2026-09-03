@@ -5,6 +5,7 @@
 # committed), for example:
 #   [machine]
 #   config = "serverDZ.cfg"  # the server config file inside stand_root
+#   window = [3840, 1600]    # client window size, passed as -x/-y; omit to leave DayZ.cfg in charge
 #
 # Optionally, the stand can be booted from a DEDICATED SERVER install (Steam
 # app 223350) instead of the client install's diagnostic executable:
@@ -63,6 +64,8 @@ stage = false
 # announced in the profile's notes; an absolute path is refused, because a
 # committed absolute path builds correctly on exactly one machine.
 # project_root = "staging"
+# Optional: widget classes your own scripts declare, so the layout lint does not refuse them as unknown.
+# layout_classes = []
 
 [expect]
 # The line your mod prints when it has finished loading. The server does not
@@ -81,3 +84,9 @@ noise        = []
 [expect.counters]
 items   = 12
 recipes = 3
+
+[client]
+# Launch the client with -filePatching and keep a junction @<Mod>/<Mod> at each
+# mod's source tree, so an edited .layout is read without repacking. The
+# stand's server config needs allowFilePatching = 1. Off by default.
+file_patching = false

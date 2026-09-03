@@ -20,6 +20,7 @@ from ..errors import Result, fail
 from ..knowledge.layers import SCRIPT_SUFFIXES
 from ..knowledge.parse import parse_source
 from ..layoutlint import lint_layout
+from ..layoutvocab import load_vocab
 from ..lint import REFUSE, WARN, lint_index, lint_text
 from ..profile import resolve_mod_dir
 from . import session
@@ -76,6 +77,7 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
     scanned: list[str] = []
     truncated = False
     layouts = 0
+    vocab = load_vocab()
     for name in wanted:
         root = resolve_mod_dir(prof.root, prof.build.sources, name)
         for path in sorted(root.rglob("*")):
@@ -101,7 +103,7 @@ def mod_lint(mod: str = "", strict: bool = False) -> Result:
             scanned.append(label)
             if is_layout:
                 layouts += 1
-                findings += [f.to_dict() for f in lint_layout(text, label)]
+                findings += [f.to_dict() for f in lint_layout(text, label, vocab=vocab, extra_classes=prof.build.layout_classes)]
                 continue
             findings += [f.to_dict() for f in lint_text(text, label)]
             declarations += parse_source(text, file=label)

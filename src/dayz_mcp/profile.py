@@ -46,6 +46,9 @@ class BuildCfg:
     # relative to the profile directory. Empty means the project declares none
     # and nothing model-shaped can run. See resolve_project_root.
     project_root: str = ""
+    # Widget classes the project's own scripts declare (a modded map widget,
+    # say), so the layout lint does not refuse them as unknown.
+    layout_classes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -89,6 +92,19 @@ class MachineCfg:
     # Machine-specific like the other two, and optional like the export step
     # it serves: a project that never exports a model never needs it.
     blender: str = ""
+    # Client window size, (width, height) in pixels, passed as -x/-y. Machine
+    # half because it follows the monitor: the owner's is 3840x1600. None
+    # leaves the size to the client's own DayZ.cfg, as before.
+    window: tuple[int, int] | None = None
+
+
+@dataclass
+class ClientCfg:
+    # Launch the client with -filePatching and keep a junction @<Mod>/<Mod>
+    # pointing at each mod's source tree, so an edited .layout (or .c) is read
+    # by the engine without repacking. Portable: it is a way of working, not a
+    # machine fact. The stand's server config must carry allowFilePatching = 1.
+    file_patching: bool = False
 
 
 @dataclass
@@ -101,6 +117,7 @@ class Profile:
     machine: MachineCfg
     own_mod_dirs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    client: ClientCfg = field(default_factory=ClientCfg)
 
 
 def resolve_mod_dir(root: Path, sources: dict[str, str], mod: str) -> Path:
@@ -251,6 +268,11 @@ def load_profile(path: str | Path) -> Result:
                  "makes them agree",
         )
 
+    layout_classes = b.get("layout_classes", [])
+    if not isinstance(layout_classes, list) or not all(isinstance(x, str) for x in layout_classes):
+        return fail("build.layout_classes must be a list of strings",
+                    hint='e.g. layout_classes = ["MyMapWidgetClass"]')
+
     build = BuildCfg(
         mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
@@ -258,6 +280,7 @@ def load_profile(path: str | Path) -> Result:
         sources={str(k): str(v) for k, v in sources_val.items()},
         stage=stage_val,
         project_root=project_root_val,
+        layout_classes=layout_classes,
     )
     if not build.mods:
         return fail(
@@ -370,6 +393,18 @@ def load_profile(path: str | Path) -> Result:
                 hint="fix the pattern, or escape the characters you meant literally",
             )
 
+    client = ClientCfg()
+    craw = raw.get("client")
+    if craw is not None:
+        if not isinstance(craw, dict):
+            return fail(f"[client] must be a table, got {type(craw).__name__}",
+                        hint="write it as a [section] header, not a bare value")
+        fp = craw.get("file_patching", False)
+        if not isinstance(fp, bool):
+            return fail(f"client.file_patching must be true or false, got {fp!r}",
+                        hint="file_patching = true")
+        client = ClientCfg(file_patching=fp)
+
     mods = ModsCfg()
     machine = MachineCfg()
     local = root / LOCAL_NAME
@@ -394,6 +429,9 @@ def load_profile(path: str | Path) -> Result:
                 f"[expect] found in {LOCAL_NAME}",
                 hint=f"[expect] is portable and belongs in {MAIN_NAME}",
             )
+        if "client" in lraw:
+            return fail(f"[client] found in {LOCAL_NAME}",
+                        hint=f"[client] is portable and belongs in {MAIN_NAME}")
 
         # Check [machine] is a table
         lm = lraw.get("machine")
@@ -418,6 +456,16 @@ def load_profile(path: str | Path) -> Result:
                 hint='use a filename, e.g. config = "serverDZ.cfg"',
             )
 
+        window_val = lm.get("window")
+        window: tuple[int, int] | None = None
+        if window_val is not None:
+            good = (isinstance(window_val, list) and len(window_val) == 2
+                    and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in window_val))
+            if not good:
+                return fail(f"machine.window must be two positive integers, got {window_val!r}",
+                            hint="window = [3840, 1600]")
+            window = (window_val[0], window_val[1])
+
         machine = MachineCfg(
             game=str(lm.get("game", "")),
             tools=str(lm.get("tools", "")),
@@ -426,6 +474,7 @@ def load_profile(path: str | Path) -> Result:
             port=port_val,
             config=config_val,
             blender=str(lm.get("blender", "")),
+            window=window,
         )
 
         # Check [mods] is a table
@@ -445,4 +494,4 @@ def load_profile(path: str | Path) -> Result:
         notes.append(f"no {LOCAL_NAME}: machine paths will be discovered automatically")
 
     own = [f"@{m}" for m in build.mods]
-    return ok(Profile(name, root, build, mods, expect, machine, own, notes))
+    return ok(Profile(name, root, build, mods, expect, machine, own, notes, client))

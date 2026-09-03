@@ -34,12 +34,14 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | `build.stage` | pack a filtered copy instead of refusing when something excluded is present — the layout a root-layout mod needs |
 | `build.project_root` | the directory every model path resolves against, relative to this file. It must **contain** the mod's prefix folder. Required by the model tools and by nothing else — see "The asset pipeline" |
 | `build.pre_script` | a PowerShell script run before packing, for projects that generate code first |
+| `build.layout_classes` | widget classes your own scripts declare (a modded map widget, say), so the layout lint does not refuse them as unknown |
 | `expect.ready_line` | the line the mod prints when it has finished loading — see below |
 | `expect.counters` | `key = value` pairs carried by that line, compared numerically |
 | `expect.max_warnings` | warning budget; omit the key to disable the check |
 | `expect.forbid` | substrings that make a run bad regardless of anything else |
 | `expect.error_regex` | regexes marking script errors that belong to you, used by the client compile check |
 | `expect.noise` | extra engine noise to ignore, on top of the built-in list |
+| `client.file_patching` | launch the client with `-filePatching` and keep a junction `@<Mod>/<Mod>` at each mod's source tree, so an edited `.layout` (or `.c`) is read without repacking. Off by default; the stand's server config needs `allowFilePatching = 1` |
 
 ### The machine half — `dayz-mcp.local.toml`, never committed
 
@@ -52,6 +54,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | `machine.stand_root` | the prepared test stand. The server boots against it and its logs are read from `<stand_root>/profiles`. Defaults to `<root>/testenv` |
 | `machine.config` | the server config filename inside the stand (default `serverDZ.cfg`). It is a setting because a stand can hold a config that hangs forever after world-compile and a working one under another name; it must resolve inside `stand_root` |
 | `machine.port` | the port `server_start` passes to the server (default `2302`) |
+| `machine.window` | client window size, `[width, height]` in pixels, passed as `-x`/`-y`. Omit it to leave the size to the client's own `DayZ.cfg` |
 | `mods.required` | mod folder names, resolved under the game's own `!Workshop` folder — `required = ["@CF"]` means `<game>/!Workshop/@CF` |
 | `mods.extra` | full paths to anything else to load, for mods that do not live in `!Workshop` |
 | `mods.server_only` | folder names to route to `-serverMod` instead of `-mod`. Matching is by folder name against every mod being loaded, wherever it came from — `mods.required`, `mods.extra` or the project's own `@Name` folders; everything not listed goes to `-mod`. The diagnostic client never loads server-only mods, so the client compile check drops them |

@@ -599,3 +599,39 @@ def test_machine_blender_defaults_to_empty(tmp_path):
     """Absent, discovery answers instead -- a project that never exports a
     model must not need the key at all."""
     assert load_profile(write(tmp_path, BASE)).data.machine.blender == ""
+
+
+def test_client_file_patching_is_portable_and_off_by_default(tmp_path):
+    p = load_profile(write(tmp_path, BASE)).data
+    assert p.client.file_patching is False
+    p = load_profile(write(tmp_path, BASE + '\n[client]\nfile_patching = true\n')).data
+    assert p.client.file_patching is True
+
+
+def test_client_file_patching_must_be_a_boolean(tmp_path):
+    r = load_profile(write(tmp_path, BASE + '\n[client]\nfile_patching = "yes"\n'))
+    assert not r.ok
+    assert "file_patching" in r.error
+
+
+def test_a_client_section_in_the_local_file_is_rejected(tmp_path):
+    r = load_profile(write(tmp_path, BASE, "[client]\nfile_patching = true\n"))
+    assert not r.ok
+    assert "[client]" in r.error
+
+
+def test_layout_classes_are_a_build_setting(tmp_path):
+    main = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nlayout_classes = ["MyMapWidgetClass"]')
+    p = load_profile(write(tmp_path, main)).data
+    assert p.build.layout_classes == ["MyMapWidgetClass"]
+    assert load_profile(write(tmp_path, BASE)).data.build.layout_classes == []
+
+
+def test_machine_window_is_two_positive_integers(tmp_path):
+    p = load_profile(write(tmp_path, BASE, "[machine]\nwindow = [3840, 1600]\n")).data
+    assert p.machine.window == (3840, 1600)
+    assert load_profile(write(tmp_path, BASE, "[machine]\n")).data.machine.window is None
+    for bad in ("window = [3840]", 'window = "3840x1600"', "window = [0, 1600]", "window = [1920, 1080, 60]"):
+        r = load_profile(write(tmp_path, BASE, f"[machine]\n{bad}\n"))
+        assert not r.ok, bad
+        assert "window" in r.error
