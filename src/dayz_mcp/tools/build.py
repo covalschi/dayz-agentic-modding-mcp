@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
-from ..packer import pack_all
+from ..packer import ensure_patch_link, pack_all
 from ..procs import powershell_cmd, run_blocking
 from ..profile import resolve_mod_dir
 from . import session
@@ -101,13 +101,23 @@ def mod_build(skip_lint: bool = False) -> Result:
             if broken:
                 store.fail(job.id, "; ".join(f"{r.name}: {r.error}" for r in broken))
                 return
+
+            link_notes = []
+            if prof.client.file_patching:
+                for name in prof.build.mods:
+                    linked, note = ensure_patch_link(prof.root / f"@{name}", name, sources[name])
+                    if not linked:
+                        store.fail(job.id, f"{name}: {note}")
+                        return
+                    link_notes.append(f"{name}: {note}")
+
             summary = ", ".join(
                 f"{r.name} {r.size}B{'' if r.signed else ' (unsigned)'}" for r in results
             )
             # A non-empty note is an actionable half of the result (e.g. which key
             # signed it, or why it did not sign) -- dropping it here would make the
             # agent re-derive the reason from raw pack logs instead of the job.
-            notes = [f"{r.name}: {r.note}" for r in results if r.note]
+            notes = [f"{r.name}: {r.note}" for r in results if r.note] + link_notes
             if notes:
                 summary = f"{summary} | notes: {'; '.join(notes)}"
             store.finish(job.id, 0, summary=summary)

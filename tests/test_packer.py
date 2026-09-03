@@ -1,11 +1,14 @@
 import os
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from dayz_mcp.packer import (
-    DEFAULT_EXCLUDE, PackResult, config_syntax_cmd, filebank_cmd, find_excluded, find_keys,
-    newest_source_mtime, pack_all, pack_one, sign_cmd,
+    DEFAULT_EXCLUDE, PackResult, config_syntax_cmd, ensure_patch_link, filebank_cmd,
+    find_excluded, find_keys, is_junction, newest_source_mtime, pack_all, pack_one, sign_cmd,
 )
 
 
@@ -1386,3 +1389,47 @@ def test_pack_one_keeps_the_signature_when_the_build_did_not_happen(tmp_path, mo
 
     assert "stale pbo" in result.error
     assert sig.exists(), "a detected non-build destroyed a signature that was still valid"
+
+
+# --- file patching: a junction from the built mod folder to the source tree --
+
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
+
+
+@windows_only
+def test_a_patch_link_is_a_junction_at_the_pbo_prefix(tmp_path):
+    src = tmp_path / "MyMod"
+    (src / "gui").mkdir(parents=True)
+    (src / "gui" / "a.layout").write_text("x", encoding="utf-8")
+    mod_dir = tmp_path / "@MyMod"
+    ok_, note = ensure_patch_link(mod_dir, "MyMod", src)
+    assert ok_, note
+    link = mod_dir / "MyMod"
+    assert is_junction(link)
+    assert (link / "gui" / "a.layout").read_text(encoding="utf-8") == "x"
+    # idempotent
+    ok_, note = ensure_patch_link(mod_dir, "MyMod", src)
+    assert ok_ and "already" in note
+
+
+@windows_only
+def test_a_stale_link_is_repointed_and_a_real_folder_is_refused(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "MyMod"
+    new.mkdir()
+    mod_dir = tmp_path / "@MyMod"
+    assert ensure_patch_link(mod_dir, "MyMod", old)[0]
+    ok_, note = ensure_patch_link(mod_dir, "MyMod", new)
+    assert ok_, note
+    assert Path(os.path.realpath(mod_dir / "MyMod")) == new.resolve()
+    assert old.exists()  # the old target is never touched
+
+    real = tmp_path / "@Dep" / "Dep"
+    real.mkdir(parents=True)
+    (real / "keep.txt").write_text("keep", encoding="utf-8")
+    ok_, note = ensure_patch_link(tmp_path / "@Dep", "Dep", new)
+    assert not ok_
+    assert "real folder" in note
+    assert (real / "keep.txt").exists()

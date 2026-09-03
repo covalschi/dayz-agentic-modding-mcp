@@ -24,6 +24,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -521,3 +522,48 @@ def pack_all(
             )
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# file patching: a junction from the built mod folder to the source tree
+# ---------------------------------------------------------------------------
+
+
+def is_junction(path: Path) -> bool:
+    """A reparse point at `path` -- a junction or a symlink. os.path.islink
+    answers False for junctions, which is exactly the case this exists for."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def ensure_patch_link(mod_dir: Path, name: str, src: Path) -> tuple[bool, str]:
+    """`<mod_dir>/<name>` as a junction to `src`, for the engine's -filePatching.
+
+    The engine looks up loose files under each -mod folder by their pbo prefix
+    path, so `@MyMod/MyMod/gui/layouts/x.layout` shadows the same file inside
+    `@MyMod/addons/MyMod.pbo`. A junction rather than a copy: an edit is
+    visible the moment it is saved, and there is no second tree to forget.
+
+    A REAL folder at that path is never touched. It is not this build's, and
+    replacing it would delete whatever somebody put there.
+    """
+    link = Path(mod_dir) / name
+    target = Path(src).resolve()
+    if is_junction(link):
+        if Path(os.path.realpath(link)) == target:
+            return True, f"{link} already points at {target}"
+        # Removing a junction removes the link entry only; the target stays.
+        os.rmdir(link)
+    elif link.exists():
+        return False, (f"{link} exists and is a real folder, not a link -- refusing to touch it. "
+                       "Move it away, or turn client.file_patching off")
+    Path(mod_dir).mkdir(parents=True, exist_ok=True)
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, AttributeError, OSError) as exc:
+        return False, f"could not create the junction {link} -> {target}: {exc}"
+    return True, f"linked {link} -> {target} for -filePatching"
