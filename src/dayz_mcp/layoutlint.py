@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .layoutparse import LayoutNode, LayoutSyntaxError, parse_layout
+from .layoutparse import LayoutNode, LayoutProp, LayoutSyntaxError, parse_layout
 from .layoutvocab import load_vocab
 from .lint import REFUSE, WARN, Finding
 
@@ -41,7 +41,7 @@ def lint_layout(text: str, file: str = "", vocab: dict | None = None,
     for _path, node in root.walk():
         _check_class(node, classes, file, out)
         _check_keys(node, keys, multiword, file, out)
-        _check_text(node, file, out)
+        _check_text(node, multiword, file, out)
         _check_size(node, file, out)
         _check_scroll(node, file, out)
         _check_scriptclass(node, file, out)
@@ -60,16 +60,35 @@ def _check_class(node: LayoutNode, classes: set[str], file: str, out: list[Findi
                            file, node.line))
 
 
+def _multiword_match(prop: LayoutProp, multiword: set[str]) -> str | None:
+    """The known multi-word key an unquoted property's own tokens spell, if any.
+
+    Vocabulary multi-word keys run two to four words long (`"text color"`,
+    `"disabled text color"`, `"size to text h"`). Several of them start with a
+    word -- `text`, `size`, `stretch`, `disabled` -- that is ALSO a valid
+    standalone key on its own, so the only way to tell "the standalone key,
+    followed by its value" from "the multi-word key, unquoted" apart is to
+    try reattaching each possible number of leading value tokens and see
+    whether that longer string is itself a known key.
+    """
+    for n in (1, 2, 3):
+        if len(prop.values) >= n:
+            candidate = " ".join([prop.key, *prop.values[:n]])
+            if candidate in multiword:
+                return candidate
+    return None
+
+
 def _check_keys(node: LayoutNode, keys: set[str], multiword: set[str], file: str, out: list[Finding]) -> None:
     for prop in node.props:
-        if prop.key in keys:
-            continue
-        joined = f"{prop.key} {prop.values[0]}" if prop.values else ""
-        if joined in multiword:
+        joined = _multiword_match(prop, multiword)
+        if joined:
             out.append(Finding("layout-unquoted-key", REFUSE,
                                f"'{joined}' must be quoted as \"{joined}\" -- unquoted, the engine reads "
                                f"key {prop.key!r} with a stray value and ignores it silently",
                                "put the multi-word key in double quotes", file, prop.line))
+            continue
+        if prop.key in keys:
             continue
         out.append(Finding("layout-key", WARN,
                            f"{prop.key!r} is not a property any vanilla layout uses (widget {node.name!r})",
@@ -77,9 +96,9 @@ def _check_keys(node: LayoutNode, keys: set[str], multiword: set[str], file: str
                            file, prop.line))
 
 
-def _check_text(node: LayoutNode, file: str, out: list[Finding]) -> None:
+def _check_text(node: LayoutNode, multiword: set[str], file: str, out: list[Finding]) -> None:
     for prop in node.props:
-        if prop.key == "text" and len(prop.values) != 1:
+        if prop.key == "text" and len(prop.values) != 1 and not _multiword_match(prop, multiword):
             out.append(Finding("layout-quote-in-text", REFUSE,
                                f"a quote inside the text of {node.name!r} hangs the engine's layout parser "
                                "(measured 2026-08-30)",

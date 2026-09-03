@@ -42,6 +42,23 @@ def test_an_unquoted_multi_word_key_is_refused():
     assert ("layout-key", WARN) not in checks(wrap("  TextWidgetClass T {\n   size 1 1\n   exact text 1\n  }\n"))
 
 
+def test_a_multiword_keys_first_word_being_a_standalone_key_does_not_hide_it():
+    """`text`, `size`, `stretch` and `disabled` are each both a standalone key
+    and the first word of a multi-word one -- unquoted, only the tokens that
+    follow say which was meant, so the multi-word reconstruction has to be
+    tried before the standalone key is accepted."""
+    assert checks(wrap("  TextWidgetClass T {\n   size 1 1\n   text color 1 1 1 1\n  }\n")) == [
+        ("layout-unquoted-key", REFUSE)]
+    assert checks(wrap("  TextWidgetClass T {\n   size 1 1\n   stretch mode stretch_w_h\n  }\n")) == [
+        ("layout-unquoted-key", REFUSE)]
+    assert checks(wrap("  TextWidgetClass T {\n   size 1 1\n   size to text h 1\n  }\n")) == [
+        ("layout-unquoted-key", REFUSE)]
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   "text color" 1 1 1 1\n  }\n')) == []
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   text "say "hi" now"\n  }\n')) == [
+        ("layout-quote-in-text", REFUSE)]
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   text "Hello"\n  }\n')) == []
+
+
 def test_an_unknown_key_only_warns():
     f = one(wrap("  TextWidgetClass T {\n   size 1 1\n   borderRadius 4\n  }\n"), "layout-key")
     assert f.severity == WARN
