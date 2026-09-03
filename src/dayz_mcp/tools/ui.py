@@ -48,8 +48,9 @@ from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
 from . import session
-from .client import client_profiles_dir, client_start, client_stop, window_size
+from .client import _players_in, client_profiles_dir, client_start, client_stop, window_size
 from .jobs_api import job_wait
+from .lifecycle import server_profiles_dir
 from .project import require_project
 from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire_args
 
@@ -687,16 +688,72 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     })
 
 
+#: How long _restart_client will wait for the server to drop a killed
+#: player before giving up on that round entirely. Measured 2026-09-03,
+#: first gallery's second round: client_stop kills the client process
+#: outright, no clean disconnect ever reaches the server, and it holds the
+#: player for its own timeout -- tens of seconds -- before dropping them. A
+#: second client started into that window is kicked at login: "Player with
+#: same UID is already in game".
+RESTART_RELEASE_SECONDS = 90
+
+#: How often the wait re-reads the server's player count. A module constant,
+#: not a literal in the loop, so a test can monkeypatch time.sleep to a
+#: no-op and let the whole wait run in however many iterations it takes
+#: instead of RESTART_RELEASE_SECONDS of real wall-clock time -- the wait
+#: below counts elapsed time as iterations * this constant, never
+#: time.time(), specifically so that mocking sleep alone is enough.
+RESTART_POLL_SECONDS = 2.0
+
+
+def _server_players() -> int | None:
+    """How many players the SERVER half of the bridge reports right now, or
+    None when its state cannot be read at all (bridge not loaded in the
+    stand, most often) -- the exact signal client_start's own readiness loop
+    reads as its baseline (_players_in, imported rather than reimplemented),
+    off the exact same channel."""
+    return _players_in(Channel(server_profiles_dir()).read_state())
+
+
 def _restart_client(size: tuple[int, int], timeout: float) -> str:
     """Stop the client and start it again at `size`. Empty string on success,
     the reason otherwise.
+
+    `client_stop` kills the client process outright -- there is no clean
+    disconnect for the server to react to, and it holds the killed player
+    for its own timeout before dropping them (measured on the stand
+    2026-09-03: a second gallery round's client was kicked at login, "Player
+    with same UID is already in game", started only seconds after the first
+    was killed). So: read the player count BEFORE stopping, stop, and if that
+    reading was a real, positive count, wait for the server's own count to
+    fall below it (or to 0) before starting the next client at all. `before` None
+    (unreadable) or 0 (nobody was connected) means there is nothing to
+    release, and starting proceeds immediately either way.
 
     `client_stop` is called for its effect alone, not its answer: the real
     one always reports ok, including "nothing was started" -- that is a fact
     about the machine, not a refusal, so there is nothing here for a status
     check to add.
     """
+    before = _server_players()
     client_stop()
+    if before is not None and before > 0:
+        last_seen = before
+        elapsed = 0.0
+        while True:
+            time.sleep(RESTART_POLL_SECONDS)
+            elapsed += RESTART_POLL_SECONDS
+            now = _server_players()
+            if now is not None:
+                last_seen = now
+                if now < before:
+                    break
+            if elapsed >= RESTART_RELEASE_SECONDS:
+                return (
+                    f"the server still reports {last_seen} player(s) {RESTART_RELEASE_SECONDS}s "
+                    "after the stop -- a new client would be kicked with 'Player with same UID "
+                    "is already in game'"
+                )
     started = client_start(window=list(size))
     if not started.ok:
         return f"could not start the client at {size[0]}x{size[1]}: {started.error}"

@@ -767,6 +767,105 @@ def test_restart_client_stops_then_starts_at_the_new_size_and_waits_for_it_to_co
     assert calls["wait"] == ("j1", 240)  # max(45.0, 240) floor
 
 
+def test_restart_client_waits_for_the_server_to_drop_the_killed_player(live, monkeypatch):
+    """G1: client_stop kills the client outright, and the server holds the
+    killed player for its own timeout -- a second client started too soon is
+    kicked at login. before=1, the poll sees 1 again (not yet dropped), and
+    only the THIRD read of _server_players (0, below before) releases the
+    wait -- three reads total, and only then does the client start."""
+    readings = iter([1, 1, 0])
+    calls = []
+
+    def fake_players():
+        calls.append("players")
+        return next(readings)
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        calls.append("stop")
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import ok as _ok
+        calls.append("start")
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "done"})
+
+    monkeypatch.setattr(ui, "_server_players", fake_players)
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    monkeypatch.setattr(ui.time, "sleep", lambda seconds: None)
+    assert ui._restart_client((1920, 1080), 45.0) == ""
+    assert calls == ["players", "stop", "players", "players", "start"]
+
+
+def test_restart_client_gives_up_if_the_server_never_drops_the_player(live, monkeypatch):
+    """The wait is not unbounded: a server that keeps reporting the old
+    player forever must not block the gallery past RESTART_RELEASE_SECONDS,
+    and must never reach client_start."""
+    def fake_players():
+        return 1  # never drops, however many times it is read
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    started = []
+
+    def fake_start(window=None):
+        started.append(window)
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"job_id": "j1"})
+
+    monkeypatch.setattr(ui, "_server_players", fake_players)
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui.time, "sleep", lambda seconds: None)
+    reason = ui._restart_client((1920, 1080), 45.0)
+    assert "still reports 1 player(s)" in reason
+    assert f"{ui.RESTART_RELEASE_SECONDS}s" in reason
+    assert "already in game" in reason
+    assert started == []
+
+
+def test_restart_client_does_not_wait_when_the_server_signal_is_unreadable(live, monkeypatch):
+    """before=None means the signal itself is unavailable (most often: the
+    bridge is not loaded in the stand) -- not "zero players, safe to go" and
+    not "wait and see" either, since a signal that is not there now will not
+    become readable by waiting. Starting proceeds immediately, with no wait
+    and no second read of _server_players."""
+    calls = []
+
+    def fake_players():
+        calls.append("players")
+        return None
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        calls.append("stop")
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        calls.append("start")
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "done"})
+
+    monkeypatch.setattr(ui, "_server_players", fake_players)
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    assert ui._restart_client((1920, 1080), 45.0) == ""
+    assert calls == ["players", "stop", "start"]
+
+
 def test_restart_client_reports_a_start_that_refused(live, monkeypatch):
     waited = []
 
