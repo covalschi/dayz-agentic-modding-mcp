@@ -36,8 +36,9 @@ OVERLAP_MIN_PX = 2
 #: A node this many times taller or wider than the host is a runaway spacer.
 RUNAWAY_FACTOR = 4
 #: Width of the engine's vertical scrollbar, in LAYOUT UNITS -- 10 px at 1080
-#: rows, 14 at 1600 (measured 2026-09-03, spec F3). Scaled to screen pixels
-#: by `check`'s own `scale` argument before it is compared against a rect.
+#: rows, 15 at 1600 (round(10 * 1600 / 1080), measured 2026-09-03, spec F3).
+#: Scaled to screen pixels by `check`'s own `scale` argument before it is
+#: compared against a rect.
 SCROLLBAR_UNITS = 10
 
 #: Engine class names (Widget.ClassName()) that carry content rather than
