@@ -149,7 +149,7 @@ def _check_scriptclass(node: LayoutNode, file: str, out: list[Finding]) -> None:
         out.append(Finding("layout-scriptclass-prefix", WARN,
                            f"scriptclass {value[0]!r} on {node.name!r} carries no prefix -- scriptclass names "
                            "are global across every loaded mod",
-                           "prefix it with the project's tag, e.g. OZ_", file, node.line))
+                           "prefix it with the project's tag, e.g. MM_", file, node.line))
 
 
 def _check_name(node: LayoutNode, first_seen: dict[str, int], file: str, out: list[Finding]) -> None:

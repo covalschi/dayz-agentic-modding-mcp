@@ -59,8 +59,10 @@ from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire
 NODES_MAX = 300
 DEPTH_MAX = 32
 
-#: Fields of one described node: seven before the text size was added, eight
-#: with it. Both parse, so a bridge built before the change still reads.
+#: Fields of one described node: seven, or eight with the text-size field.
+#: Both lengths are ordinary rather than one being a compat shim -- the
+#: field is only present for widgets that derive from TextWidget;
+#: EditBoxWidget and ButtonWidget extend UIWidget and never send it.
 _FIELDS_MIN = 7
 _FIELDS_MAX = 8
 
@@ -499,7 +501,7 @@ def ui_load(layout: str, fixture: dict | str | None = None, host: str = "",
     layout = (layout or "").replace("\\", "/").strip()
     if not layout:
         return fail("ui_load needs a layout path",
-                    hint="relative to the pbo prefix, e.g. OpenZone_PDA/gui/layouts/oz_pda_tab.layout")
+                    hint="relative to the pbo prefix, e.g. MyMod/gui/layouts/x.layout")
     text, error = _fixture_text(fixture, Path(session.profile().root))
     if error:
         return fail(error, hint='a fixture is {"ops": [{"op": "add", "layout": "...", "into": "...", "count": 3}, ...]}')
