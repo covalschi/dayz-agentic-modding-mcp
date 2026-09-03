@@ -556,6 +556,49 @@ def test_shot_captures_the_client_area_not_the_window_frame(tmp_path, own_window
 
 
 @WINDOWS_ONLY
+def test_shot_with_rect_writes_a_cropped_png_and_reports_the_rectangle(tmp_path, own_window):
+    """The crop path through `shot` itself, not `crop_bgra` in isolation: a
+    real capture of a real window, cropped, written to disk, and read back --
+    proving winui.py's try/except ValueError->fail wiring and the conditional
+    data["rect"] both actually run, not just crop_bgra's own arithmetic."""
+    width, height = winui.client_size(own_window)
+    x, y, w, h = 4, 4, max(2, width // 4), max(2, height // 4)
+    out = tmp_path / "cropped.png"
+
+    got = winui.shot(os.getpid(), out, rect=(x, y, w, h))
+
+    assert got.ok, got.error
+    assert got.data["rect"] == [x, y, w, h]
+    assert got.data["width"] == w
+    assert got.data["height"] == h
+    assert out.exists()
+    header = out.read_bytes()[16:24]
+    ihdr_width = int.from_bytes(header[0:4], "big")
+    ihdr_height = int.from_bytes(header[4:8], "big")
+    assert (ihdr_width, ihdr_height) == (w, h)
+
+    # A call with no rect at all must not grow a "rect" key nobody asked for.
+    uncropped = winui.shot(os.getpid(), tmp_path / "uncropped.png")
+    assert uncropped.ok, uncropped.error
+    assert "rect" not in uncropped.data
+
+
+@WINDOWS_ONLY
+def test_shot_refuses_a_rectangle_entirely_outside_the_client_area(tmp_path, own_window):
+    """The refusal wired through `shot`, not just `crop_bgra`'s own ValueError:
+    no file is written and the envelope carries the reason plus a hint."""
+    width, height = winui.client_size(own_window)
+    out = tmp_path / "frame.png"
+
+    got = winui.shot(os.getpid(), out, rect=(width + 100, height + 100, 10, 10))
+
+    assert not got.ok
+    assert "rectangle" in got.error
+    assert got.hint
+    assert not out.exists()
+
+
+@WINDOWS_ONLY
 def test_shot_refuses_when_printwindow_declines_to_draw(tmp_path, monkeypatch, own_window):
     """PrintWindow returning 0 is the one honest signal that nothing was drawn.
     Without this check the capture continues over an untouched bitmap and
