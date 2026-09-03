@@ -16,6 +16,7 @@ this layer could quietly lie:
    tract has to click where the client says the widget IS, not where a stale
    answer said it was.
 """
+import json
 import textwrap
 from pathlib import Path
 
@@ -366,3 +367,68 @@ def test_the_mods_refusal_reaches_the_caller_verbatim(live):
     result = ui.ui_tree()
     assert not result.ok
     assert "no scripted menu is open" in result.error
+
+
+# ---------------------------------------------------------------------- load
+
+
+def test_ui_load_sends_the_layout_and_the_host(live):
+    result = ui.ui_load("OpenZone_PDA/gui/layouts/oz_pda_tab.layout", host="60 52")
+    assert result.ok, result.error
+    sent = live.sent[-1]
+    assert sent.verb == "ui_load"
+    assert sent.args["layout"] == "OpenZone_PDA/gui/layouts/oz_pda_tab.layout"
+    assert sent.args["host"] == "60 52"
+    assert "fixture" not in sent.args
+
+
+def test_ui_load_normalises_backslashes_and_refuses_an_empty_path(live):
+    ui.ui_load("OpenZone_PDA\\gui\\layouts\\x.layout")
+    assert live.sent[-1].args["layout"] == "OpenZone_PDA/gui/layouts/x.layout"
+    result = ui.ui_load("")
+    assert not result.ok and "layout" in result.error
+
+
+def test_a_fixture_dict_travels_as_json_text(live):
+    fixture = {"ops": [{"op": "add", "layout": "OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "into": "TabRail", "count": 6}]}
+    ui.ui_load("a.layout", fixture=fixture)
+    assert json.loads(live.sent[-1].args["fixture"]) == fixture
+
+
+def test_a_fixture_path_is_read_from_the_project(live, tmp_path):
+    from dayz_mcp.tools import session
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "tabs.json").write_text('{"ops": [{"op": "hide", "name": "TabHover"}]}', encoding="utf-8")
+    ui.ui_load("a.layout", fixture="preview/tabs.json")
+    assert json.loads(live.sent[-1].args["fixture"]) == {"ops": [{"op": "hide", "name": "TabHover"}]}
+
+
+def test_a_broken_fixture_is_refused_before_anything_is_sent(live):
+    for bad in ({"nope": []}, {"ops": "x"}, "{not json", "preview/missing.json"):
+        result = ui.ui_load("a.layout", fixture=bad)
+        assert not result.ok, bad
+        assert "fixture" in result.error
+    assert live.sent == []
+
+
+def test_ui_load_reports_the_host_rectangle(live):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_nodes": [node_line(path="")],
+        "ui_host": "0 0 3840 1600",
+    })
+    result = ui.ui_load("a.layout")
+    assert result.data["host"] == (0, 0, 3840, 1600)
+    live.state = BridgeState(tick=9, session_id="client-1", world={"ui_total": 0, "ui_nodes": []})
+    assert ui.ui_tree(root="preview").data["host"] is None
+
+
+def test_ui_unload_sends_its_verb(live):
+    result = ui.ui_unload()
+    assert result.ok
+    assert live.sent[-1].verb == "ui_unload" and live.sent[-1].args == {}
+
+
+def test_the_preview_root_is_accepted_by_the_tree(live):
+    ui.ui_tree(root="preview")
+    assert live.sent[-1].args["root"] == "preview"

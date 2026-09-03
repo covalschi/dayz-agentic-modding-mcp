@@ -33,6 +33,7 @@ settle.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -190,6 +191,7 @@ def _with_ui(answered: Result, channel: Channel, offset: int = 0) -> Result:
         isinstance(answered.data["total"], int)
         and answered.data["total"] > offset + len(nodes)
     )
+    answered.data["host"] = _rect(block.get("ui_host", ""))
     return answered
 
 
@@ -229,6 +231,47 @@ def _centre(rect: str) -> tuple[int, int] | None:
     except ValueError:
         return None
     return x + w // 2, y + h // 2
+
+
+def _rect(text: str) -> tuple[int, int, int, int] | None:
+    """An `x y w h` string as four ints, or None if it is not one."""
+    parts = str(text).split()
+    if len(parts) != 4:
+        return None
+    try:
+        x, y, w, h = (int(float(p)) for p in parts)
+    except ValueError:
+        return None
+    return x, y, w, h
+
+
+def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
+    """The fixture as the JSON text the mod will parse, or an error.
+
+    A dict is serialised; a string is a project-relative path to a JSON file,
+    or JSON text itself when it starts with `{`. Validated HERE, before the
+    round trip: the mod's own refusal costs a tick and names less.
+    """
+    if fixture is None:
+        return None, ""
+    if isinstance(fixture, str):
+        if fixture.lstrip().startswith("{"):
+            text = fixture
+        else:
+            path = root / fixture
+            if not path.is_file():
+                return None, f"fixture file not found: {path}"
+            text = path.read_text(encoding="utf-8")
+        try:
+            fixture = json.loads(text)
+        except ValueError as exc:
+            return None, f"fixture is not valid JSON: {exc}"
+    if not isinstance(fixture, dict) or not isinstance(fixture.get("ops"), list):
+        return None, 'fixture must be an object with an "ops" list'
+    for index, op in enumerate(fixture["ops"]):
+        if not isinstance(op, dict) or not isinstance(op.get("op"), str):
+            return None, f'fixture op {index} must be an object with an "op" string'
+    return json.dumps(fixture, ensure_ascii=False), ""
 
 
 # ------------------------------------------------------------------ the tools
@@ -420,3 +463,40 @@ def ui_text(path: str, text: str, expect_name: str = "", expect_class: str = "",
               expect_class=expect_class or None, root=root),
         timeout,
     )
+
+
+def ui_load(layout: str, fixture: dict | str | None = None, host: str = "",
+            depth: int = DEPTH_MAX, limit: int = NODES_MAX, offset: int = 0,
+            timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Show a layout file in the client, under a host of the bridge's own, and
+    list what the engine made of it.
+
+    `layout` is the path CreateWidgets takes: relative to the pbo prefix, with
+    forward slashes. `host` is "w h" in layout units to emulate a screen of
+    that size (empty: the whole screen). `fixture` fills the layout the way a
+    mod's script would -- rows into a container, texts, visibility -- as a
+    dict, JSON text, or a project-relative path to a JSON file; the operations
+    are the bridge's (add, text, show, hide, color).
+
+    The answer arrives a tick later than the command: a widget measured before
+    its first layout pass reports zeros, so the mod waits one. The preview
+    stays on screen for client_shot until ui_unload or the next ui_load; the
+    HUD is hidden meanwhile.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    layout = (layout or "").replace("\\", "/").strip()
+    if not layout:
+        return fail("ui_load needs a layout path",
+                    hint="relative to the pbo prefix, e.g. OpenZone_PDA/gui/layouts/oz_pda_tab.layout")
+    text, error = _fixture_text(fixture, Path(session.profile().root))
+    if error:
+        return fail(error, hint='a fixture is {"ops": [{"op": "add", "layout": "...", "into": "...", "count": 3}, ...]}')
+    args = _args(layout=layout, host=host or None, fixture=text, depth=depth, limit=limit, offset=offset)
+    return _run("ui_load", args, timeout, offset)
+
+
+def ui_unload(timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Remove the preview ui_load put up, and give the HUD back."""
+    return _run("ui_unload", {}, timeout)

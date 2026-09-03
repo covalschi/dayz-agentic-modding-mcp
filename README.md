@@ -118,6 +118,8 @@ in its notes.
 | `ui_find(name, class_name, text, root, offset)` | the same walk, filtered in the client so the whole tree never has to travel |
 | `ui_click(path, expect_name, expect_class, via)` | press a widget. `via="script"` goes through the open menu's handler with no focus; `via="cursor"` puts the real mouse on its rectangle |
 | `ui_text(path, text, expect_name)` | write into an edit box, and read the value back out of the widget |
+| `ui_load(layout, fixture, host, depth, limit, offset)` | show a layout file in the client under a host of the bridge's own size, and list what the engine made of it. `fixture` fills it first — add rows, set text, show/hide, colour — from a dict, JSON text, or a project-relative `.json` path. The preview stays up for `client_shot` until `ui_unload` or the next `ui_load`; the HUD is hidden meanwhile |
+| `ui_unload()` | remove the preview `ui_load` put up, and give the HUD back |
 | `mod_lint(mod, strict)` | judge the Enforce Script without packing or booting anything. `mod_build` runs it first and refuses on what it refuses; .layout files: quotes inside text, unquoted keys, unknown classes, ItemPreview priority (refuse), bare edit boxes, unclipped scrolls, duplicate names (warn) |
 | `knowledge_build(layer, full, only)` | build or refresh a layer of the API index; returns a job id. `only=[path]` re-reads exactly the files you name |
 | `knowledge_status()` | what each layer holds, how old it is, and whether it still matches what is on disk |
