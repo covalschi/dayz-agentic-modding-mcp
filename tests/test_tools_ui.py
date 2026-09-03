@@ -519,7 +519,9 @@ def test_ui_preview_live_reads_the_open_menu_instead_of_loading(live, monkeypatc
     monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
     result = ui.ui_preview(live=True, name="pda")
     assert result.ok, result.error
-    assert [c.verb for c in live.sent] == ["ui_tree"]
+    # ui_unload first, so a leftover preview backdrop from an earlier
+    # ui_load never sits on top of the menu this call is meant to shoot.
+    assert [c.verb for c in live.sent] == ["ui_unload", "ui_tree"]
     assert shots == [(0, 0, 3840, 1600)]
 
 
@@ -560,6 +562,25 @@ def test_ui_preview_normalises_backslashes_so_the_source_is_still_found(live, mo
     assert not any("is not a mod" in n for n in result.data["notes"]), result.data["notes"]
     issues_on_disk = json.loads((Path(result.data["dir"]) / "issues.json").read_text(encoding="utf-8"))
     assert any(i["rule"] == "editbox_bare" for i in issues_on_disk)
+
+
+def test_ui_preview_refuses_a_layout_that_would_hang_the_engine(live):
+    """A quote inside a text value does not stop THIS project's own parser --
+    it just splits the value into more tokens -- but it hangs the ENGINE's,
+    so ui_preview must catch it via lint_layout before ui_load ever reaches
+    the client, and send nothing at all."""
+    root = Path(session.profile().root)
+    layout_dir = root / "MyMod" / "gui" / "layouts"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    (layout_dir / "hang.layout").write_text(
+        'TextWidgetClass Label {\n size 1 1\n text "a "b" c"\n}\n',
+        encoding="utf-8",
+    )
+    result = ui.ui_preview("MyMod/gui/layouts/hang.layout")
+    assert not result.ok
+    assert "hang.layout:3" in result.error, result.error
+    assert "quote" in result.error
+    assert live.sent == []
 
 
 # ------------------------------------------------------------------- gallery

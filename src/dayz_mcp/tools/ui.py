@@ -41,7 +41,9 @@ from .. import uicheck, uireport
 from .. import winui
 from ..bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
+from ..layoutlint import lint_layout
 from ..layoutparse import LayoutSyntaxError, parse_layout
+from ..lint import REFUSE
 from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
@@ -524,20 +526,27 @@ def _collect_nodes(root: str, first: Result, timeout: float) -> tuple[list[dict]
 
 
 def _source_for(layout: str):
-    """The layout's source in this project, parsed, for the checks that need
-    the text (a style on an edit box). Empty with a reason when it is not
-    this project's file -- a vanilla layout, another mod's."""
+    """The layout's source in this project: `(node, text, why)`.
+
+    `node` is the parsed tree, for the checks that need it (a style on an
+    edit box); `text` is the raw file, for the checks that need THAT instead
+    (lint_layout re-parses it itself, and catches what this function's own
+    parse attempt does not survive). Both come back None with a reason when
+    there is nothing to read at all -- not this project's file (a vanilla
+    layout, another mod's), or no file at that path.
+    """
     prof = session.profile()
     head, _, rest = layout.partition("/")
     if head not in prof.build.mods:
-        return None, f"{head!r} is not a mod of this project, so the source was not read"
+        return None, None, f"{head!r} is not a mod of this project, so the source was not read"
     path = resolve_mod_dir(prof.root, prof.build.sources, head) / rest
     if not path.is_file():
-        return None, f"source not found at {path}"
+        return None, None, f"source not found at {path}"
+    text = path.read_text(encoding="utf-8", errors="replace")
     try:
-        return parse_layout(path.read_text(encoding="utf-8", errors="replace")), ""
+        return parse_layout(text), text, ""
     except LayoutSyntaxError as exc:
-        return None, f"source does not parse: {exc}"
+        return None, text, f"source does not parse: {exc}"
 
 
 def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = "",
@@ -552,6 +561,12 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     OPEN scripted menu and shoots its root -- the way to look at the real PDA
     with real data. A host of its own size is an emulation of a screen that
     size and the report says so; the real check is the real window size.
+
+    `live=False` LINTS the source before ever reaching ui_load: a quote
+    inside a text value parses fine here (it just splits into more tokens)
+    but hangs the ENGINE's own layout parser, and a hung client answers
+    nothing for every tool afterwards. Any REFUSE-severity finding stops the
+    call before anything is sent -- fix it, or run mod_lint first.
     """
     guard = require_project()
     if guard:
@@ -567,11 +582,27 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     layout = (layout or "").replace("\\", "/").strip()
     prof = session.profile()
     if live:
+        # A leftover preview backdrop from an earlier ui_load would otherwise
+        # sit on top of the menu this is meant to shoot. Its own result is
+        # not this call's business: "nothing was loaded" is a fact about the
+        # client from before this call started, not a failure of this one.
+        ui_unload(timeout=timeout)
+        source, text, why = None, None, ""
         first = ui_tree(root="menu", timeout=timeout)
         root = "menu"
     else:
         if not layout:
             return fail("ui_preview needs a layout, or live=True to look at the open menu")
+        source, text, why = _source_for(layout)
+        if text is not None:
+            findings = lint_layout(text, layout, extra_classes=prof.build.layout_classes)
+            refusal = next((f for f in findings if f.severity == REFUSE), None)
+            if refusal:
+                return fail(
+                    f"{refusal.file}:{refusal.line}: {refusal.message}",
+                    hint="fix it or lint with mod_lint first -- a quote inside a text value "
+                         "hangs the engine's layout parser and the client stops ticking",
+                )
         first = ui_load(layout, fixture=fixture, host=host, timeout=timeout)
         root = "preview"
     if not first.ok:
@@ -599,7 +630,6 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     elif shot.data.get("warning"):
         notes.append(shot.data["warning"])
 
-    source, why = (None, "") if live else _source_for(layout)
     if why:
         notes.append(why)
     issues, check_notes = uicheck.check(nodes, rect, source)
