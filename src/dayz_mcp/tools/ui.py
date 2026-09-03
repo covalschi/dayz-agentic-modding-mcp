@@ -43,7 +43,7 @@ from ..bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
 from ..layoutlint import lint_layout
 from ..layoutparse import LayoutSyntaxError, parse_layout
-from ..lint import REFUSE
+from ..lint import REFUSE, WARN
 from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
@@ -59,10 +59,13 @@ from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire
 NODES_MAX = 300
 DEPTH_MAX = 32
 
-#: Fields of one described node: seven, or eight with the text-size field.
-#: Both lengths are ordinary rather than one being a compat shim -- the
-#: field is only present for widgets that derive from TextWidget;
-#: EditBoxWidget and ButtonWidget extend UIWidget and never send it.
+#: Fields of one described node. The bridge's own Describe() always sends
+#: eight -- path|class|name|flags|rect|depth|text|metrics -- with metrics
+#: empty for a widget that does not derive from TextWidget: the field is
+#: always appended, never omitted (measured 2026-09-03). Seven is not a
+#: second normal shape; it is what an OLDER, not yet rebuilt bridge still on
+#: disk sends, accepted here so a stale @DZMCP_Bridge turns into a node this
+#: can still read rather than an unparsed "raw" line.
 _FIELDS_MIN = 7
 _FIELDS_MAX = 8
 
@@ -81,6 +84,20 @@ def _client_channel() -> Channel:
 def _live_client() -> tuple[int, bool]:
     pid = session.client_pid()
     return pid, bool(pid and is_alive(pid, image=session.client_image()))
+
+
+def _window_scale(pid: int) -> tuple[float, str]:
+    """The live client window's layout-unit-to-pixel ratio: s = H/1080,
+    exact (spec F1, measured 2026-09-03). 1.0 with a note when there is no
+    window to measure it from -- the client is not up, or has not opened a
+    window the OS will report a client area for yet."""
+    hwnd = winui.find_window(pid) if pid else None
+    if not hwnd:
+        return 1.0, "scale: no client window found, assuming 1.0 (100 layout units = 100 px)"
+    _w, h = winui.client_size(hwnd)
+    if not h:
+        return 1.0, "scale: the client window reported no height, assuming 1.0"
+    return round(h / 1080, 4), ""
 
 
 def _no_client() -> Result:
@@ -571,7 +588,15 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     inside a text value parses fine here (it just splits into more tokens)
     but hangs the ENGINE's own layout parser, and a hung client answers
     nothing for every tool afterwards. Any REFUSE-severity finding stops the
-    call before anything is sent -- fix it, or run mod_lint first.
+    call before anything is sent -- fix it, or run mod_lint first. A WARN
+    finding does not stop the call, but is folded into `notes` rather than
+    thrown away.
+
+    `data["scale"]` is the layout-unit-to-pixel ratio read off the live
+    client's own window (s = H/1080, spec F1) -- 1.0, with a note in
+    `notes`, when there is no window to measure. It is what `uicheck` uses
+    to turn a tolerance measured in layout units (the scrollbar's width, a
+    border panel's overhang) into the screen pixels this report compares.
     """
     guard = require_project()
     if guard:
@@ -586,6 +611,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     # normalising failed to recognise.
     layout = (layout or "").replace("\\", "/").strip()
     prof = session.profile()
+    lint_notes: list[str] = []
     if live:
         # A leftover preview backdrop from an earlier ui_load would otherwise
         # sit on top of the menu this is meant to shoot. Its own result is
@@ -608,6 +634,11 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
                     hint="fix it or lint with mod_lint first -- a quote inside a text value "
                          "hangs the engine's layout parser and the client stops ticking",
                 )
+            # WARN findings do not stop the call the way a REFUSE does, but
+            # they were computed by this same lint pass regardless -- folded
+            # into notes rather than thrown away, so a caller sees them
+            # without a separate mod_lint round trip.
+            lint_notes = [f"lint: {f.file}:{f.line} {f.message}" for f in findings if f.severity == WARN]
         first = ui_load(layout, fixture=fixture, host=host, timeout=timeout)
         root = "preview"
     if not first.ok:
@@ -627,8 +658,11 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"preview-{label}-{int(time.time() * 1000)}"
     out_dir.mkdir(parents=True, exist_ok=True)
     pid, _alive = _live_client()
+    scale, scale_note = _window_scale(pid)
     shot = winui.shot(pid, out_dir / "shot.png", rect=rect)
-    notes: list[str] = []
+    notes: list[str] = list(lint_notes)
+    if scale_note:
+        notes.append(scale_note)
     shot_name = "shot.png" if shot.ok else None
     if not shot.ok:
         notes.append(f"no screenshot: {shot.error}")
@@ -637,18 +671,19 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
 
     if why:
         notes.append(why)
-    issues, check_notes = uicheck.check(nodes, rect, source)
+    issues, check_notes = uicheck.check(nodes, rect, source, scale=scale)
     notes += check_notes
     issue_dicts = [i.to_dict() for i in issues]
     meta = {"layout": layout or first.data.get("ui", {}).get("ui_menu", "menu"), "host": rect,
-            "emulated": bool(host) and not live, "fixture": bool(fixture), "nodes": len(nodes), "total": total}
+            "emulated": bool(host) and not live, "fixture": bool(fixture), "nodes": len(nodes),
+            "total": total, "scale": scale}
     report = uireport.write_report(out_dir, shot_name, nodes, issue_dicts, notes, meta)
     counts = {"error": sum(1 for i in issues if i.severity == uicheck.ERROR),
               "warn": sum(1 for i in issues if i.severity == uicheck.WARN)}
     return ok({
         "dir": str(out_dir), "shot": str(out_dir / "shot.png") if shot_name else None,
         "report": str(report), "count": len(nodes), "total": total, "issues": counts,
-        "notes": notes, "host": rect, "emulated": meta["emulated"],
+        "notes": notes, "host": rect, "emulated": meta["emulated"], "scale": scale,
     })
 
 

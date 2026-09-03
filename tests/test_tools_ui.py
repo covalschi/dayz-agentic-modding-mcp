@@ -576,6 +576,56 @@ def test_ui_preview_normalises_backslashes_so_the_source_is_still_found(live, mo
     assert any(i["rule"] == "editbox_bare" for i in issues_on_disk)
 
 
+def test_ui_preview_reports_the_window_scale(live, monkeypatch):
+    """spec F1: s = H/1080, read off the live client's own window."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_host": "0 0 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 400 300", metrics="")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    monkeypatch.setattr(winui, "find_window", lambda pid: 4242)
+    monkeypatch.setattr(winui, "client_size", lambda hwnd: (2560, 1600))
+    result = ui.ui_preview("a.layout")
+    assert result.ok, result.error
+    assert result.data["scale"] == round(1600 / 1080, 4)
+
+
+def test_ui_preview_falls_back_to_scale_1_with_a_note_when_no_window_is_found(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_host": "0 0 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 400 300", metrics="")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    monkeypatch.setattr(winui, "find_window", lambda pid: None)
+    result = ui.ui_preview("a.layout")
+    assert result.ok, result.error
+    assert result.data["scale"] == 1.0
+    assert any("scale" in n for n in result.data["notes"]), result.data["notes"]
+
+
+def test_ui_preview_folds_a_warn_lint_finding_into_notes(live, monkeypatch):
+    """A WARN from the pre-load lint was computed anyway -- discarding it
+    would waste the pass ui_preview already paid for."""
+    root = Path(session.profile().root)
+    layout_dir = root / "MyMod" / "gui" / "layouts"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    (layout_dir / "warn.layout").write_text(
+        "FrameWidgetClass Root {\n size 1 1\n {\n"
+        "  EditBoxWidgetClass Field {\n   size 100 20\n  }\n }\n}\n",
+        encoding="utf-8",
+    )
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 2, "ui_host": "0 0 200 100",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 200 100"),
+                     node_line(path="0", cls="EditBoxWidget", name="Field", rect="10 10 100 20")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview("MyMod/gui/layouts/warn.layout")
+    assert result.ok, result.error
+    assert any(n.startswith("lint: MyMod/gui/layouts/warn.layout") and "no style and no panel" in n
+               for n in result.data["notes"]), result.data["notes"]
+
+
 def test_ui_preview_refuses_a_layout_that_would_hang_the_engine(live):
     """A quote inside a text value does not stop THIS project's own parser --
     it just splits the value into more tokens -- but it hangs the ENGINE's,
