@@ -245,6 +245,15 @@ def _rect(text: str) -> tuple[int, int, int, int] | None:
     return x, y, w, h
 
 
+def _is_within(path: Path, base: Path) -> bool:
+    """True if `path` is `base` or lives underneath it (both already resolved)."""
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
 def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
     """The fixture as the JSON text the mod will parse, or an error.
 
@@ -258,7 +267,10 @@ def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
         if fixture.lstrip().startswith("{"):
             text = fixture
         else:
-            path = root / fixture
+            root_resolved = root.resolve()
+            path = (root / fixture).resolve()
+            if not _is_within(path, root_resolved):
+                return None, f"fixture path must stay inside the project: {path}"
             if not path.is_file():
                 return None, f"fixture file not found: {path}"
             text = path.read_text(encoding="utf-8")

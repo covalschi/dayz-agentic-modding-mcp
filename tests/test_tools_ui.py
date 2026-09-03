@@ -412,6 +412,30 @@ def test_a_broken_fixture_is_refused_before_anything_is_sent(live):
     assert live.sent == []
 
 
+def test_a_fixture_path_outside_the_project_is_refused(live, tmp_path):
+    """`root / fixture` discards `root` entirely when `fixture` is itself
+    absolute (pathlib's own rule for `/`), so an absolute path used to reach
+    straight past the project root onto the real filesystem. The file is real
+    and readable -- the refusal has to be about containment, not "not found"."""
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"ops": [{"op": "hide", "name": "TabHover"}]}', encoding="utf-8")
+    result = ui.ui_load("a.layout", fixture=str(outside))
+    assert not result.ok
+    assert "fixture" in result.error
+    assert live.sent == []
+
+
+def test_a_fixture_path_that_climbs_out_of_the_project_is_refused(live, tmp_path):
+    """Same escape, spelled with `..` instead of an absolute path. The project
+    root is tmp_path/p, so one level up lands exactly on the file below."""
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"ops": []}', encoding="utf-8")
+    result = ui.ui_load("a.layout", fixture="../outside.json")
+    assert not result.ok
+    assert "fixture" in result.error
+    assert live.sent == []
+
+
 def test_ui_load_reports_the_host_rectangle(live):
     live.state = BridgeState(tick=9, session_id="client-1", world={
         "ui_root": "preview", "ui_total": 1, "ui_nodes": [node_line(path="")],
