@@ -92,6 +92,67 @@ def test_an_unclosed_widget_is_refused():
         parse_layout("FrameWidgetClass A {\n visible 1\n")
 
 
+def test_widget_declared_in_header_state_is_refused():
+    """A child widget declared while parent is still in header state (no opening
+    brace yet) should be rejected, not silently become the parent's child."""
+    text = "FrameWidgetClass A\nTextWidgetClass B {\n visible 1\n}\n{\n}\n"
+    with pytest.raises(LayoutSyntaxError) as caught:
+        parse_layout(text)
+    assert caught.value.line == 2
+    assert "child block needs its own" in caught.value.message
+
+
+def test_widget_with_two_sibling_blocks_parses():
+    """Two sibling { ... } blocks in one widget: child widgets, then ScriptParams.
+    Validates real vanilla grammar where blocks can contain either widget
+    declarations or special config like ScriptParamsClass."""
+    text = """FrameWidgetClass Root {
+ position 0 0
+ size 1 1
+ {
+  TextWidgetClass Title {
+   text "Hello"
+  }
+ }
+ {
+  ScriptParamsClass {
+   border 10
+  }
+ }
+}
+"""
+    root = parse_layout(text)
+    assert root.cls == "FrameWidgetClass"
+    assert root.name == "Root"
+    # Two children: Title and ScriptParamsClass
+    assert len(root.children) == 2
+    assert root.children[0].name == "Title"
+    assert root.children[1].name == ""  # ScriptParamsClass without instance name
+    assert root.children[1].cls == "ScriptParamsClass"
+    # Paths should be in declaration order
+    paths = [(p, n.name) for p, n in root.walk()]
+    assert paths == [("", "Root"), ("0", "Title"), ("1", "")]
+
+
+def test_script_params_class_without_instance_name():
+    """ScriptParamsClass can appear without an instance name; should parse
+    with empty-string name."""
+    text = """FrameWidgetClass Root {
+ {
+  ScriptParamsClass {
+   AlignChilds 1
+  }
+ }
+}
+"""
+    root = parse_layout(text)
+    assert len(root.children) == 1
+    child = root.children[0]
+    assert child.cls == "ScriptParamsClass"
+    assert child.name == ""
+    assert child.prop("AlignChilds") == ["1"]
+
+
 VANILLA = os.environ.get("DAYZ_GUI_LAYOUTS", "")
 
 

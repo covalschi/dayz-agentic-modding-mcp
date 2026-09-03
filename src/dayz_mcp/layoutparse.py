@@ -154,7 +154,7 @@ def parse_layout(text: str) -> LayoutNode:
                 instance_name = ""
                 has_trailing_brace = len(words) >= 2 and words[1] == "{"
 
-            if stack and (nesting[-1] == 0):
+            if stack and (nesting[-1] <= 0):
                 raise LayoutSyntaxError(lineno, f"widget {instance_name!r} declared inside another widget's properties -- a child block needs its own '{{' line")
             if not stack and root is not None:
                 raise LayoutSyntaxError(lineno, f"a second root widget {instance_name!r}; a layout has one")
