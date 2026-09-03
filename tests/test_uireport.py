@@ -52,3 +52,12 @@ def test_the_gallery_links_every_entry_with_its_counts():
     ])
     assert "chat" in html and "2 errors" in html and 'href="../preview-chat-1/report.html"' in html
     assert "no layout" in html
+    assert '<span class="retried"' not in html  # neither entry above was retried
+
+
+def test_a_retried_entry_carries_a_retried_tag():
+    html = render_gallery([
+        {"name": "chat", "size": "3840x1600", "ok": True, "report": "../preview-chat-1/report.html",
+         "shot": "../preview-chat-1/shot.png", "issues": {"error": 0, "warn": 0}, "error": "", "retried": True},
+    ])
+    assert 'class="retried"' in html and ">retried<" in html

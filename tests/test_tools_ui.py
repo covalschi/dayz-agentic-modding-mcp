@@ -972,3 +972,88 @@ def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(
     entry = result.data["entries"][0]
     assert entry["name"] == "(client)" and entry["ok"] is False
     assert "could not start" in entry["error"] and "1920x1080" in entry["error"]
+
+
+def test_ui_gallery_retries_an_entry_that_hit_a_stalled_heartbeat(live, monkeypatch):
+    """The bridge's own movement probe (_require_a_moving_bridge, world.py)
+    can miss a 1Hz tick right after the client (re)connects and refuse the
+    command -- gone seconds later. A gallery should not lose an entry to
+    that: one retry, after GALLERY_RETRY_SECONDS, and the entry that needed
+    it says so."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+    slept = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import fail as _fail, ok as _ok
+        calls.append(kw["name"])
+        if len(calls) == 1:
+            return _fail("the bridge is not ticking (heartbeat='stalled'), so a command sent now "
+                        "would sit unclaimed and its result would arrive after this call had given up")
+        out = root / ".dayz-mcp" / "shots" / "preview-t-1"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text("r", encoding="utf-8")
+        return _ok({"dir": str(out), "shot": str(out / "shot.png"), "report": str(out / "report.html"),
+                    "count": 1, "total": 1, "issues": {"error": 0, "warn": 0}, "notes": [],
+                    "host": (0, 0, 60, 52), "emulated": False})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui.time, "sleep", lambda seconds: slept.append(seconds))
+    result = ui.ui_gallery()
+    assert result.ok, result.error
+    assert calls == ["t", "t"]
+    assert slept == [ui.GALLERY_RETRY_SECONDS]
+    entry = result.data["entries"][0]
+    assert entry["ok"] is True
+    assert entry["retried"] is True
+
+
+def test_ui_gallery_does_not_retry_a_failure_that_is_not_a_stalled_heartbeat(live, monkeypatch):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+    slept = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import fail as _fail
+        calls.append(kw["name"])
+        return _fail("ui_preview needs a layout, or live=True to look at the open menu")
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui.time, "sleep", lambda seconds: slept.append(seconds))
+    result = ui.ui_gallery()
+    assert result.ok, result.error
+    assert calls == ["t"]
+    assert slept == []
+    entry = result.data["entries"][0]
+    assert entry["ok"] is False
+    assert "retried" not in entry
+
+
+def test_ui_gallery_records_a_still_stalled_entry_after_one_retry(live, monkeypatch):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import fail as _fail
+        calls.append(kw["name"])
+        return _fail("the bridge is not ticking (heartbeat='stalled'), so a command sent now "
+                     "would sit unclaimed and its result would arrive after this call had given up")
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui.time, "sleep", lambda seconds: None)
+    result = ui.ui_gallery()
+    assert result.ok, result.error
+    assert calls == ["t", "t"]
+    entry = result.data["entries"][0]
+    assert entry["ok"] is False
+    assert "not ticking" in entry["error"]
+    assert entry["retried"] is True

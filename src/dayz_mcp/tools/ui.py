@@ -763,6 +763,18 @@ def _restart_client(size: tuple[int, int], timeout: float) -> str:
     return ""
 
 
+#: How long ui_gallery waits before retrying an entry that failed on a
+#: stalled bridge heartbeat. Measured 2026-09-03 on the live gallery: right
+#: after the client (re)connects, _require_a_moving_bridge's own 1.2s probe
+#: window (world.MOVEMENT_PROBE_WINDOW) can land between two ticks of the
+#: bridge's 1Hz heartbeat and refuse the command -- three consecutive entries
+#: lost to exactly that, and the same entries succeeded when run again
+#: seconds later. A module constant, not a literal in the retry, so a test
+#: can monkeypatch time.sleep to a no-op the way RESTART_POLL_SECONDS's
+#: callers already do.
+GALLERY_RETRY_SECONDS = 3.0
+
+
 def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None = None,
                timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """Every entry of the project's preview index through ui_preview, and one
@@ -771,6 +783,13 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     `sizes` restarts the client at each [width, height] in turn (the owner's
     3840x1600 and the players' 1920x1080); without it the client is used as
     it is.
+
+    An entry that fails on a stalled bridge heartbeat gets one retry, after
+    GALLERY_RETRY_SECONDS, rather than being recorded lost -- the same brief
+    miss _require_a_moving_bridge warns about (world.py), landing right after
+    a client (re)connect. That entry's dict then carries `"retried": True`
+    (absent otherwise); any other failure is recorded as today, with no
+    second attempt.
     """
     guard = require_project()
     if guard:
@@ -813,18 +832,27 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
                 continue
         for entry in entries_in:
             name = str(entry.get("name") or Path(str(entry.get("layout", ""))).stem or "entry")
-            result = ui_preview(layout=str(entry.get("layout", "")), fixture=entry.get("fixture"),
+            preview_args = dict(layout=str(entry.get("layout", "")), fixture=entry.get("fixture"),
                                 host=str(entry.get("host", "") or ""), live=bool(entry.get("live", False)),
                                 name=name, timeout=timeout)
+            result = ui_preview(**preview_args)
+            retried = False
+            if not result.ok and "not ticking" in result.error:
+                time.sleep(GALLERY_RETRY_SECONDS)
+                result = ui_preview(**preview_args)
+                retried = True
             if result.ok:
                 report = Path(result.data["report"])
                 shot = result.data.get("shot")
-                entries.append({"name": name, "size": label, "ok": True,
-                                "report": Path("..") / report.parent.name / report.name,
-                                "shot": (Path("..") / report.parent.name / "shot.png") if shot else "",
-                                "issues": result.data["issues"], "error": ""})
+                e = {"name": name, "size": label, "ok": True,
+                    "report": Path("..") / report.parent.name / report.name,
+                    "shot": (Path("..") / report.parent.name / "shot.png") if shot else "",
+                    "issues": result.data["issues"], "error": ""}
             else:
-                entries.append({"name": name, "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": result.error})
+                e = {"name": name, "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": result.error}
+            if retried:
+                e["retried"] = True
+            entries.append(e)
     for e in entries:
         e["report"] = str(e["report"]).replace("\\", "/") if e["report"] else ""
         e["shot"] = str(e["shot"]).replace("\\", "/") if e["shot"] else ""
