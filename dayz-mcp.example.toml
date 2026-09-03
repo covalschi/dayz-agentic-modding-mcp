@@ -86,7 +86,10 @@ items   = 12
 recipes = 3
 
 [client]
-# Launch the client with -filePatching and keep a junction @<Mod>/<Mod> at each
-# mod's source tree, so an edited .layout is read without repacking. The
+# Launch the client with -filePatching and keep a junction <game>/<Mod> at
+# each mod's source tree, so an edited .layout is read without repacking --
+# the engine reads loose files from <game directory>/<pbo prefix>/..., not
+# from inside the built @MyMod folder (measured 2026-09-03). Needs
+# machine.game to resolve, or mod_build notes it and makes no link. The
 # stand's server config needs allowFilePatching = 1. Off by default.
 file_patching = false

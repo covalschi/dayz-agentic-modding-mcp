@@ -100,10 +100,14 @@ class MachineCfg:
 
 @dataclass
 class ClientCfg:
-    # Launch the client with -filePatching and keep a junction @<Mod>/<Mod>
+    # Launch the client with -filePatching and keep a junction <game>/<Mod>
     # pointing at each mod's source tree, so an edited .layout (or .c) is read
-    # by the engine without repacking. Portable: it is a way of working, not a
-    # machine fact. The stand's server config must carry allowFilePatching = 1.
+    # by the engine without repacking -- the engine reads -filePatching's
+    # loose files from <game directory>/<pbo prefix>/..., not from inside the
+    # built @MyMod folder (measured 2026-09-03). Needs machine.game to resolve;
+    # mod_build notes it and makes no link otherwise. Portable: it is a way of
+    # working, not a machine fact. The stand's server config must carry
+    # allowFilePatching = 1.
     file_patching: bool = False
 
 

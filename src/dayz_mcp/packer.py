@@ -539,25 +539,32 @@ def is_junction(path: Path) -> bool:
     return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
-def ensure_patch_link(mod_dir: Path, name: str, src: Path) -> tuple[bool, str]:
-    """`<mod_dir>/<name>` as a junction to `src`, for the engine's -filePatching.
+def ensure_patch_link(link_root: Path, name: str, src: Path) -> tuple[bool, str]:
+    """`<link_root>/<name>` as a junction to `src`, for the engine's -filePatching.
 
-    The engine looks up loose files under each -mod folder by their pbo prefix
-    path, so `@MyMod/MyMod/gui/layouts/x.layout` shadows the same file inside
-    `@MyMod/addons/MyMod.pbo`. A junction rather than a copy: an edit is
-    visible the moment it is saved, and there is no second tree to forget.
+    The engine reads loose files for -filePatching from `<game directory>/
+    <pbo prefix>/...` -- measured 2026-09-03 (spec F6): a junction at
+    `<game>/MyMod` is re-read on every CreateWidgets call, so an edit is
+    visible the moment it is saved and there is no second tree to forget. A
+    junction placed INSIDE the built mod folder instead, at `@MyMod/MyMod`,
+    is not read at all, ever -- measured the same day, the same way. So
+    `link_root` is the GAME directory now, not `@MyMod`; see `mod_build`,
+    this function's only caller, for where that value comes from and what it
+    does when the project has none.
 
     A REAL folder at that path is never touched. It is not this build's, and
     replacing it would delete whatever somebody put there.
 
-    Refused outright when the link would sit INSIDE its own target -- a mod
-    whose source is the repository root (`build.sources = {"MyMod": "."}`)
-    links `@MyMod/MyMod` to that same root, which contains `@MyMod` itself:
-    a loop `rglob`/`copytree` would follow for as long as the filesystem lets
-    them, 128 levels deep and more. This is a structural property of the
-    arguments alone, so it is checked before anything on disk is touched.
+    Refused outright when the link would sit INSIDE its own target -- e.g. a
+    mod whose source is the repository root (`build.sources = {"MyMod":
+    "."}`) with a `link_root` that happens to be nested under that same root
+    links `<link_root>/MyMod` to a directory that contains `<link_root>`
+    itself: a loop `rglob`/`copytree` would follow for as long as the
+    filesystem lets them, 128 levels deep and more. This is a structural
+    property of the two paths alone, so it is checked before anything on
+    disk is touched.
     """
-    link = Path(mod_dir) / name
+    link = Path(link_root) / name
     target = Path(src).resolve()
     # Resolved WITHOUT following a reparse point that might already sit at
     # `link` itself: this asks where the link's own PATH lives, lexically --
@@ -589,7 +596,7 @@ def ensure_patch_link(mod_dir: Path, name: str, src: Path) -> tuple[bool, str]:
     elif link.exists():
         return False, (f"{link} exists and is a real folder, not a link -- refusing to touch it. "
                        "Move it away, or turn client.file_patching off")
-    Path(mod_dir).mkdir(parents=True, exist_ok=True)
+    Path(link_root).mkdir(parents=True, exist_ok=True)
     try:
         import _winapi
         _winapi.CreateJunction(str(target), str(link))

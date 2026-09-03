@@ -104,12 +104,27 @@ def mod_build(skip_lint: bool = False) -> Result:
 
             link_notes = []
             if prof.client.file_patching:
-                for name in prof.build.mods:
-                    linked, note = ensure_patch_link(prof.root / f"@{name}", name, sources[name])
-                    if not linked:
-                        store.fail(job.id, f"{name}: {note}")
-                        return
-                    link_notes.append(f"{name}: {note}")
+                # The engine reads -filePatching's loose files from
+                # <game directory>/<pbo prefix>/..., not from inside the
+                # built @MyMod folder (measured 2026-09-03, spec F6) -- so the
+                # junction goes under the GAME directory this session
+                # resolved, the same one client_start launches from.
+                game = session.game()
+                if not game:
+                    link_notes.append(
+                        "file_patching is on, but no game directory is known -- open the "
+                        "project once machine.game resolves (or start the client so this "
+                        "session discovers it) so mod_build knows where -filePatching reads "
+                        "loose files from; no junction was made"
+                    )
+                else:
+                    game_dir = Path(game)
+                    for name in prof.build.mods:
+                        linked, note = ensure_patch_link(game_dir, name, sources[name])
+                        if not linked:
+                            store.fail(job.id, f"{name}: {note}")
+                            return
+                        link_notes.append(f"{name}: {note}")
 
             summary = ", ".join(
                 f"{r.name} {r.size}B{'' if r.signed else ' (unsigned)'}" for r in results

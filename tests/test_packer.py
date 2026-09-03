@@ -1391,7 +1391,10 @@ def test_pack_one_keeps_the_signature_when_the_build_did_not_happen(tmp_path, mo
     assert sig.exists(), "a detected non-build destroyed a signature that was still valid"
 
 
-# --- file patching: a junction from the built mod folder to the source tree --
+# --- file patching: a junction from the game directory to the source tree,
+# spec F6 -- measured 2026-09-03: the engine reads -filePatching's loose
+# files from <game directory>/<pbo prefix>/..., never from inside the built
+# @MyMod folder, so every fixture below links under a "game" directory now. ---
 
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows thing")
@@ -1402,14 +1405,14 @@ def test_a_patch_link_is_a_junction_at_the_pbo_prefix(tmp_path):
     src = tmp_path / "MyMod"
     (src / "gui").mkdir(parents=True)
     (src / "gui" / "a.layout").write_text("x", encoding="utf-8")
-    mod_dir = tmp_path / "@MyMod"
-    ok_, note = ensure_patch_link(mod_dir, "MyMod", src)
+    game_dir = tmp_path / "game"
+    ok_, note = ensure_patch_link(game_dir, "MyMod", src)
     assert ok_, note
-    link = mod_dir / "MyMod"
+    link = game_dir / "MyMod"
     assert is_junction(link)
     assert (link / "gui" / "a.layout").read_text(encoding="utf-8") == "x"
     # idempotent
-    ok_, note = ensure_patch_link(mod_dir, "MyMod", src)
+    ok_, note = ensure_patch_link(game_dir, "MyMod", src)
     assert ok_ and "already" in note
 
 
@@ -1419,17 +1422,20 @@ def test_a_stale_link_is_repointed_and_a_real_folder_is_refused(tmp_path):
     old.mkdir()
     new = tmp_path / "MyMod"
     new.mkdir()
-    mod_dir = tmp_path / "@MyMod"
-    assert ensure_patch_link(mod_dir, "MyMod", old)[0]
-    ok_, note = ensure_patch_link(mod_dir, "MyMod", new)
+    game_dir = tmp_path / "game"
+    assert ensure_patch_link(game_dir, "MyMod", old)[0]
+    ok_, note = ensure_patch_link(game_dir, "MyMod", new)
     assert ok_, note
-    assert Path(os.path.realpath(mod_dir / "MyMod")) == new.resolve()
+    assert Path(os.path.realpath(game_dir / "MyMod")) == new.resolve()
     assert old.exists()  # the old target is never touched
 
-    real = tmp_path / "@Dep" / "Dep"
+    # A second mod's REAL folder, sitting beside the first mod's junction in
+    # the same game directory -- exactly how several mods' entries share one
+    # game install in practice.
+    real = game_dir / "Dep"
     real.mkdir(parents=True)
     (real / "keep.txt").write_text("keep", encoding="utf-8")
-    ok_, note = ensure_patch_link(tmp_path / "@Dep", "Dep", new)
+    ok_, note = ensure_patch_link(game_dir, "Dep", new)
     assert not ok_
     assert "real folder" in note
     assert (real / "keep.txt").exists()
@@ -1437,18 +1443,21 @@ def test_a_stale_link_is_repointed_and_a_real_folder_is_refused(tmp_path):
 
 @windows_only
 def test_a_root_layout_mod_is_refused_rather_than_looped_into_itself(tmp_path):
-    """build.sources = {"MyMod": "."} makes the source THE REPOSITORY ROOT,
-    which contains @MyMod itself -- a junction there would have rglob and
-    copytree follow the loop for as long as the filesystem lets them. Refused
-    by construction, before anything on disk is touched."""
+    """build.sources = {"MyMod": "."} makes the source THE REPOSITORY ROOT. A
+    link_root nested under that same root (however shallow -- mod_build
+    passes the game directory now, spec F6, not @MyMod) would have rglob and
+    copytree follow the resulting loop for as long as the filesystem lets
+    them. Refused by construction, before anything on disk is touched: a
+    structural property of the two paths alone, not of which directory the
+    caller happens to pass as link_root."""
     root = tmp_path / "repo"
     root.mkdir()
-    mod_dir = root / "@MyMod"
-    ok_, note = ensure_patch_link(mod_dir, "MyMod", root)
+    link_root = root / "game"
+    ok_, note = ensure_patch_link(link_root, "MyMod", root)
     assert not ok_
     assert "inside its own target" in note
-    assert not (mod_dir / "MyMod").exists()
-    assert not mod_dir.exists()  # refused before even mkdir(mod_dir)
+    assert not (link_root / "MyMod").exists()
+    assert not link_root.exists()  # refused before even mkdir(link_root)
 
 
 @windows_only
@@ -1459,16 +1468,16 @@ def test_a_junction_that_cannot_be_removed_is_reported_not_raised(tmp_path, monk
     old.mkdir()
     new = tmp_path / "new"
     new.mkdir()
-    mod_dir = tmp_path / "@MyMod"
-    assert ensure_patch_link(mod_dir, "MyMod", old)[0]
-    link = mod_dir / "MyMod"
+    game_dir = tmp_path / "game"
+    assert ensure_patch_link(game_dir, "MyMod", old)[0]
+    link = game_dir / "MyMod"
 
     def broken_rmdir(path):
         raise OSError(5, "Access is denied")
 
     monkeypatch.setattr(os, "rmdir", broken_rmdir)
 
-    ok_, note = ensure_patch_link(mod_dir, "MyMod", new)
+    ok_, note = ensure_patch_link(game_dir, "MyMod", new)
 
     assert not ok_
     assert str(link) in note

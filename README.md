@@ -41,7 +41,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | `expect.forbid` | substrings that make a run bad regardless of anything else |
 | `expect.error_regex` | regexes marking script errors that belong to you, used by the client compile check |
 | `expect.noise` | extra engine noise to ignore, on top of the built-in list |
-| `client.file_patching` | launch the client with `-filePatching` and keep a junction `@<Mod>/<Mod>` at each mod's source tree, so an edited `.layout` (or `.c`) is read without repacking. Off by default; the stand's server config needs `allowFilePatching = 1` |
+| `client.file_patching` | launch the client with `-filePatching` and keep a junction `<game>/<Mod>` at each mod's source tree, so an edited `.layout` (or `.c`) is read without repacking -- the engine reads loose files from `<game directory>/<pbo prefix>/...`, not from inside the built `@MyMod` folder (measured). Needs `machine.game` to resolve; `mod_build` notes it and makes no link otherwise. Off by default; the stand's server config needs `allowFilePatching = 1` |
 
 ### The machine half — `dayz-mcp.local.toml`, never committed
 
