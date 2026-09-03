@@ -46,7 +46,8 @@ from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
 from . import session
-from .client import client_profiles_dir
+from .client import client_profiles_dir, client_start, client_stop
+from .jobs_api import job_wait
 from .project import require_project
 from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire_args
 
@@ -614,3 +615,76 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         "report": str(report), "count": len(nodes), "total": total, "issues": counts,
         "notes": notes, "host": rect, "emulated": meta["emulated"],
     })
+
+
+def _restart_client(size: tuple[int, int], timeout: float) -> str:
+    """Stop the client and start it again at `size`. Empty string on success,
+    the reason otherwise."""
+    stopped = client_stop()
+    if not stopped.ok and "nothing" not in (stopped.error or ""):
+        return f"could not stop the client: {stopped.error}"
+    started = client_start(window=list(size))
+    if not started.ok:
+        return f"could not start the client at {size[0]}x{size[1]}: {started.error}"
+    job = job_wait(started.data["job_id"], timeout=max(timeout, 240))
+    if not job.ok or job.data.get("status") != "done":
+        return f"the client did not connect at {size[0]}x{size[1]}: {job.error or job.data}"
+    return ""
+
+
+def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None = None,
+               timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Every entry of the project's preview index through ui_preview, and one
+    index.html with all the pictures and counts -- the look before a push.
+
+    `sizes` restarts the client at each [width, height] in turn (the owner's
+    3840x1600 and the players' 1920x1080); without it the client is used as
+    it is.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    prof = session.profile()
+    path = Path(prof.root) / index
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        entries_in = spec["entries"]
+        assert isinstance(entries_in, list)
+    except (OSError, ValueError, KeyError, AssertionError) as exc:
+        return fail(f"no usable preview index at {path}: {exc}",
+                    hint='write {"entries": [{"name": "...", "layout": "...", "fixture": "preview/x.json", "host": "w h"}]}')
+
+    rounds: list[tuple[int, int] | None] = [None]
+    if sizes:
+        rounds = [(int(s[0]), int(s[1])) for s in sizes]
+    entries: list[dict] = []
+    out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"gallery-{int(time.time() * 1000)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for size in rounds:
+        label = f"{size[0]}x{size[1]}" if size else "current"
+        if size:
+            problem = _restart_client(size, timeout)
+            if problem:
+                entries.append({"name": "(client)", "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": problem})
+                continue
+        for entry in entries_in:
+            name = str(entry.get("name") or Path(str(entry.get("layout", ""))).stem or "entry")
+            result = ui_preview(layout=str(entry.get("layout", "")), fixture=entry.get("fixture"),
+                                host=str(entry.get("host", "") or ""), live=bool(entry.get("live", False)),
+                                name=name, timeout=timeout)
+            if result.ok:
+                report = Path(result.data["report"])
+                shot = result.data.get("shot")
+                entries.append({"name": name, "size": label, "ok": True,
+                                "report": Path("..") / report.parent.name / report.name,
+                                "shot": (Path("..") / report.parent.name / "shot.png") if shot else "",
+                                "issues": result.data["issues"], "error": ""})
+            else:
+                entries.append({"name": name, "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": result.error})
+    for e in entries:
+        e["report"] = str(e["report"]).replace("\\", "/") if e["report"] else ""
+        e["shot"] = str(e["shot"]).replace("\\", "/") if e["shot"] else ""
+    index_path = out_dir / "index.html"
+    index_path.write_text(uireport.render_gallery(entries), encoding="utf-8")
+    failed = sum(1 for e in entries if not e["ok"])
+    return ok({"dir": str(out_dir), "index": str(index_path), "entries": entries, "failed": failed})

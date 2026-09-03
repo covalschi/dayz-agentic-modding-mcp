@@ -28,3 +28,16 @@ def test_write_report_writes_the_three_files(tmp_path):
     assert json.loads((tmp_path / "nodes.json").read_text(encoding="utf-8"))[1]["name"] == "Label"
     assert json.loads((tmp_path / "issues.json").read_text(encoding="utf-8"))[0]["rule"] == "text_overflow"
     assert "Label" in report.read_text(encoding="utf-8")
+
+
+from dayz_mcp.uireport import render_gallery
+
+
+def test_the_gallery_links_every_entry_with_its_counts():
+    html = render_gallery([
+        {"name": "chat", "size": "3840x1600", "ok": True, "report": "../preview-chat-1/report.html",
+         "shot": "../preview-chat-1/shot.png", "issues": {"error": 2, "warn": 1}, "error": ""},
+        {"name": "map", "size": "3840x1600", "ok": False, "report": "", "shot": "", "issues": {}, "error": "no layout"},
+    ])
+    assert "chat" in html and "2 errors" in html and 'href="../preview-chat-1/report.html"' in html
+    assert "no layout" in html

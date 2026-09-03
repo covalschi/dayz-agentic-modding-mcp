@@ -560,3 +560,66 @@ def test_ui_preview_normalises_backslashes_so_the_source_is_still_found(live, mo
     assert not any("is not a mod" in n for n in result.data["notes"]), result.data["notes"]
     issues_on_disk = json.loads((Path(result.data["dir"]) / "issues.json").read_text(encoding="utf-8"))
     assert any(i["rule"] == "editbox_bare" for i in issues_on_disk)
+
+
+# ------------------------------------------------------------------- gallery
+
+
+def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_path):
+    from dayz_mcp.tools import session
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [
+        {"name": "tab", "layout": "OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "host": "60 52"},
+        {"name": "bad", "layout": ""},
+    ]}), encoding="utf-8")
+    seen = []
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+        from dayz_mcp.errors import fail as _fail, ok as _ok
+        seen.append((layout, host, name))
+        if not layout:
+            return _fail("ui_preview needs a layout")
+        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text("r", encoding="utf-8")
+        return _ok({"dir": str(out), "shot": str(out / "shot.png"), "report": str(out / "report.html"),
+                    "count": 1, "total": 1, "issues": {"error": 0, "warn": 1}, "notes": [], "host": (0, 0, 60, 52), "emulated": True})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    result = ui.ui_gallery()
+    assert result.ok, result.error
+    assert seen == [("OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "60 52", "tab"), ("", "", "bad")]
+    assert result.data["failed"] == 1
+    index = Path(result.data["index"])
+    assert index.exists() and "tab" in index.read_text(encoding="utf-8")
+
+
+def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatch):
+    from dayz_mcp.tools import session
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import ok as _ok
+        calls.append(("preview", kw["name"]))
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
+
+    def fake_restart(size, timeout):
+        calls.append(("restart", size))
+        return ""
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", fake_restart)
+    result = ui.ui_gallery(sizes=[[3840, 1600], [1920, 1080]])
+    assert result.ok, result.error
+    assert calls == [("restart", (3840, 1600)), ("preview", "t"), ("restart", (1920, 1080)), ("preview", "t")]
+    assert [e["size"] for e in result.data["entries"]] == ["3840x1600", "1920x1080"]
+
+
+def test_ui_gallery_refuses_a_missing_or_malformed_index(live):
+    result = ui.ui_gallery(index="preview/nope.json")
+    assert not result.ok and "index" in result.error
