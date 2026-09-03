@@ -456,6 +456,20 @@ def _require_live_client() -> tuple[int, Result | None]:
 # ---------------------------------------------------------------------------
 
 
+def window_size(value) -> tuple[int, int] | None:  # noqa: ANN001 - anything a caller handed in
+    """`value` as a `(width, height)` pair of positive integers, or None.
+
+    THE one definition of "is this a window size": client_start's own
+    `window` argument and ui_gallery's `sizes` entries both have to answer
+    the same question, and two copies of the predicate is how they drift --
+    one accepting a bool or a float where the other refused it, say.
+    """
+    if (isinstance(value, (list, tuple)) and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in value)):
+        return int(value[0]), int(value[1])
+    return None
+
+
 def client_start(
     timeout: float = CONNECT_TIMEOUT_SECONDS, extra_args: list[str] | None = None,
     window: list[int] | None = None,
@@ -544,12 +558,11 @@ def client_start(
 
     size = prof.machine.window
     if window is not None:
-        good = (isinstance(window, (list, tuple)) and len(window) == 2
-                and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in window))
-        if not good:
+        parsed = window_size(window)
+        if parsed is None:
             return fail("window must be two positive integers, like [1920, 1080]",
                         hint="it overrides machine.window for this one launch")
-        size = (window[0], window[1])
+        size = parsed
 
     running = session.client_pid()
     if running and is_alive(running, image=_tracked_image()):

@@ -48,7 +48,7 @@ from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
 from . import session
-from .client import client_profiles_dir, client_start, client_stop
+from .client import client_profiles_dir, client_start, client_stop, window_size
 from .jobs_api import job_wait
 from .project import require_project
 from .world import WORLD_TIMEOUT_SECONDS, _args, _require_a_moving_bridge, _wire_args
@@ -680,17 +680,30 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
         return guard
     prof = session.profile()
     path = Path(prof.root) / index
+    hint = 'write {"entries": [{"name": "...", "layout": "...", "fixture": "preview/x.json", "host": "w h"}]}'
     try:
         spec = json.loads(path.read_text(encoding="utf-8"))
         entries_in = spec["entries"]
-        assert isinstance(entries_in, list)
-    except (OSError, ValueError, KeyError, AssertionError) as exc:
-        return fail(f"no usable preview index at {path}: {exc}",
-                    hint='write {"entries": [{"name": "...", "layout": "...", "fixture": "preview/x.json", "host": "w h"}]}')
+        assert isinstance(entries_in, list), '"entries" must be a list'
+        for entry in entries_in:
+            # A string layout (possibly "", refused later by ui_preview
+            # itself and recorded as a per-entry failure -- not aborted
+            # here) or live: true is what makes an entry USABLE at all; a
+            # non-dict entry, or one with neither, would otherwise reach
+            # entry.get(...) below and raise AttributeError straight out of
+            # this tool instead of a plain fail().
+            usable = isinstance(entry, dict) and (
+                isinstance(entry.get("layout"), str) or entry.get("live") is True
+            )
+            assert usable, f'entry {entry!r} needs a string "layout" or "live": true'
+        rounds: list[tuple[int, int] | None] = [None]
+        if sizes:
+            parsed_sizes = [window_size(s) for s in sizes]
+            assert all(parsed_sizes), f"sizes must each be two positive integers, not {sizes!r}"
+            rounds = parsed_sizes
+    except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
+        return fail(f"no usable preview index at {path}: {exc}", hint=hint)
 
-    rounds: list[tuple[int, int] | None] = [None]
-    if sizes:
-        rounds = [(int(s[0]), int(s[1])) for s in sizes]
     entries: list[dict] = []
     out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"gallery-{int(time.time() * 1000)}"
     out_dir.mkdir(parents=True, exist_ok=True)

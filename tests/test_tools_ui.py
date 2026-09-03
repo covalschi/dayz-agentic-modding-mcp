@@ -646,6 +646,38 @@ def test_ui_gallery_refuses_a_missing_or_malformed_index(live):
     assert not result.ok and "index" in result.error
 
 
+def test_ui_gallery_refuses_an_entry_that_is_not_an_object(live):
+    """Without this, `entry.get(...)` inside the run loop raises a raw
+    AttributeError on a string entry instead of a plain fail()."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": ["oops"]}), encoding="utf-8")
+    result = ui.ui_gallery()
+    assert not result.ok
+    assert "index" in result.error
+
+
+def test_ui_gallery_refuses_an_entry_with_no_layout_and_no_live(live):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [{"name": "x"}]}), encoding="utf-8")
+    result = ui.ui_gallery()
+    assert not result.ok
+    assert "index" in result.error
+
+
+def test_ui_gallery_refuses_a_malformed_size(live):
+    """Without this, `int(s[1])` inside the sizes comprehension raises a raw
+    IndexError on a size given as one element instead of two."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    result = ui.ui_gallery(sizes=[[100]])
+    assert not result.ok
+    assert "sizes" in result.error
+
+
 def test_restart_client_stops_then_starts_at_the_new_size_and_waits_for_it_to_connect(live, monkeypatch):
     """The success path, through the real function -- nothing about
     _restart_client itself is faked here, only its three collaborators."""
