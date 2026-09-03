@@ -623,3 +623,138 @@ def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatc
 def test_ui_gallery_refuses_a_missing_or_malformed_index(live):
     result = ui.ui_gallery(index="preview/nope.json")
     assert not result.ok and "index" in result.error
+
+
+def test_restart_client_stops_then_starts_at_the_new_size_and_waits_for_it_to_connect(live, monkeypatch):
+    """The success path, through the real function -- nothing about
+    _restart_client itself is faked here, only its three collaborators."""
+    calls = {}
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import ok as _ok
+        calls["window"] = window
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        calls["wait"] = (job_id, timeout)
+        return _ok({"status": "done", "summary": "connected"})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    assert ui._restart_client((1920, 1080), 45.0) == ""
+    assert calls["window"] == [1920, 1080]
+    assert calls["wait"] == ("j1", 240)  # max(45.0, 240) floor
+
+
+def test_restart_client_reports_a_start_that_refused(live, monkeypatch):
+    waited = []
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import fail as _fail
+        return _fail("no stand")
+
+    def fake_wait(job_id, timeout):
+        waited.append((job_id, timeout))
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "done"})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    reason = ui._restart_client((1920, 1080), 45.0)
+    assert "could not start" in reason and "1920x1080" in reason
+    assert waited == []  # a start that never got a job id must not reach job_wait
+
+
+def test_restart_client_reports_a_client_that_never_connected(live, monkeypatch):
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "failed", "error": "died"})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    reason = ui._restart_client((1920, 1080), 45.0)
+    assert "did not connect" in reason
+
+
+def test_restart_client_does_not_treat_nothing_to_stop_as_a_failure(live, monkeypatch):
+    """client_stop answers ok even when this session started no client --
+    stopped=False there is a fact about the machine, not a refusal, and the
+    restart must still go on to start the client at the new size."""
+    started = []
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": False, "reason": "no client was started by this session"})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import ok as _ok
+        started.append(window)
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "done"})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    assert ui._restart_client((1920, 1080), 45.0) == ""
+    assert started == [[1920, 1080]]
+
+
+def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(live, monkeypatch):
+    """Through ui_gallery, with the real _restart_client -- only its
+    collaborators are faked. A restart that cannot even start the client must
+    not reach ui_preview at all for that round."""
+    from dayz_mcp.tools import session
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None):
+        from dayz_mcp.errors import fail as _fail
+        return _fail("no stand")
+
+    preview_calls = []
+
+    def fake_preview(**kw):
+        preview_calls.append(kw.get("name"))
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    result = ui.ui_gallery(sizes=[[1920, 1080]])
+    assert result.ok, result.error
+    assert result.data["failed"] == 1
+    assert preview_calls == []
+    entry = result.data["entries"][0]
+    assert entry["name"] == "(client)" and entry["ok"] is False
+    assert "could not start" in entry["error"] and "1920x1080" in entry["error"]
