@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from dayz_mcp import winui
 from dayz_mcp.bridge.protocol import BridgeState, Command, CommandState
 from dayz_mcp.tools import session, ui
 
@@ -456,3 +457,77 @@ def test_ui_unload_sends_its_verb(live):
 def test_the_preview_root_is_accepted_by_the_tree(live):
     ui.ui_tree(root="preview")
     assert live.sent[-1].args["root"] == "preview"
+
+
+# ------------------------------------------------------------------- preview
+
+
+def fake_shot_factory(calls):
+    def fake_shot(pid, path, rect=None):
+        from dayz_mcp.errors import ok as _ok
+        calls.append(rect)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(winui.png_bytes(bytes(4 * 2 * 2), 2, 2))
+        return _ok({"path": str(path), "width": 2, "height": 2, "bytes": 1, "lit_fraction": 0.5, "foreground": False})
+    return fake_shot
+
+
+def test_ui_preview_loads_shoots_checks_and_reports(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 2, "ui_host": "100 50 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="100 50 400 300", metrics=""),
+                     node_line(path="0", cls="TextWidget", name="Label", rect="110 60 200 20", metrics="240 20")],
+    })
+    shots = []
+    monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
+    result = ui.ui_preview("OpenZone_PDA/gui/layouts/a.layout", name="a")
+    assert result.ok, result.error
+    assert [c.verb for c in live.sent] == ["ui_load"]
+    assert shots == [(100, 50, 400, 300)]
+    out = Path(result.data["dir"])
+    assert out.name.startswith("preview-a-")
+    assert (out / "shot.png").exists() and (out / "report.html").exists()
+    assert result.data["issues"] == {"error": 1, "warn": 0}
+    assert result.data["count"] == 2 and result.data["total"] == 2
+    assert result.data["emulated"] is False
+
+
+def test_ui_preview_pages_through_a_big_tree(live, monkeypatch):
+    first = [node_line(path=str(i), cls="TextWidget", name=f"N{i}", rect=f"{i} 0 10 10") for i in range(300)]
+    second = [node_line(path=str(i), cls="TextWidget", name=f"N{i}", rect=f"{i} 0 10 10") for i in range(300, 350)]
+    pages = iter([first, second])
+
+    def state_for(_cmd_id, timeout, poll=0.5):
+        live.state = BridgeState(tick=9, session_id="client-1", world={
+            "ui_root": "preview", "ui_total": 350, "ui_host": "0 0 1000 100", "ui_nodes": next(pages)})
+        return CommandState(id=_cmd_id, status="done", detail="ok", finished_at=1.0)
+
+    monkeypatch.setattr(live, "await_result", state_for)
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview("a.layout")
+    assert result.ok, result.error
+    assert [(c.verb, c.args.get("offset")) for c in live.sent] == [("ui_load", "0"), ("ui_tree", "300")]
+    assert result.data["count"] == 350
+
+
+def test_ui_preview_live_reads_the_open_menu_instead_of_loading(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "menu", "ui_total": 1, "ui_host": "",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="OZ_PdaRoot", rect="0 0 3840 1600")],
+    })
+    shots = []
+    monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
+    result = ui.ui_preview(live=True, name="pda")
+    assert result.ok, result.error
+    assert [c.verb for c in live.sent] == ["ui_tree"]
+    assert shots == [(0, 0, 3840, 1600)]
+
+
+def test_ui_preview_marks_a_host_of_its_own_size_as_emulated(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_host": "500 200 1306 518",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="500 200 1306 518")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview("a.layout", host="1306 518")
+    assert result.data["emulated"] is True

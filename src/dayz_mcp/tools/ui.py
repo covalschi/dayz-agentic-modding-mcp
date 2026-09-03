@@ -37,10 +37,13 @@ import json
 import time
 from pathlib import Path
 
+from .. import uicheck, uireport
 from .. import winui
 from ..bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
+from ..layoutparse import LayoutSyntaxError, parse_layout
 from ..procs import is_alive
+from ..profile import resolve_mod_dir
 from . import session
 from .client import client_profiles_dir
 from .project import require_project
@@ -512,3 +515,101 @@ def ui_load(layout: str, fixture: dict | str | None = None, host: str = "",
 def ui_unload(timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """Remove the preview ui_load put up, and give the HUD back."""
     return _run("ui_unload", {}, timeout)
+
+
+def _collect_nodes(root: str, first: Result, timeout: float) -> tuple[list[dict], int]:
+    """Every node of the tree, paging past the mod's 300-node ceiling."""
+    nodes = list(first.data.get("nodes", []))
+    total = first.data.get("total", -1)
+    while isinstance(total, int) and total > len(nodes):
+        page = ui_tree(root=root, offset=len(nodes), timeout=timeout)
+        if not page.ok or not page.data.get("nodes"):
+            break
+        nodes += page.data["nodes"]
+        total = page.data.get("total", total)
+    return nodes, total
+
+
+def _source_for(layout: str):
+    """The layout's source in this project, parsed, for the checks that need
+    the text (a style on an edit box). Empty with a reason when it is not
+    this project's file -- a vanilla layout, another mod's."""
+    prof = session.profile()
+    head, _, rest = layout.partition("/")
+    if head not in prof.build.mods:
+        return None, f"{head!r} is not a mod of this project, so the source was not read"
+    path = resolve_mod_dir(prof.root, prof.build.sources, head) / rest
+    if not path.is_file():
+        return None, f"source not found at {path}"
+    try:
+        return parse_layout(path.read_text(encoding="utf-8", errors="replace")), ""
+    except LayoutSyntaxError as exc:
+        return None, f"source does not parse: {exc}"
+
+
+def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = "",
+               live: bool = False, name: str = "",
+               timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """A layout as the engine draws it: screenshot, every widget's rectangle,
+    and the checks over those rectangles, written to one folder with an HTML
+    report.
+
+    `live=False` loads `layout` through ui_load (with `fixture` and `host` as
+    there) and shoots the preview host. `live=True` loads nothing: it walks the
+    OPEN scripted menu and shoots its root -- the way to look at the real PDA
+    with real data. A host of its own size is an emulation of a screen that
+    size and the report says so; the real check is the real window size.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    prof = session.profile()
+    if live:
+        first = ui_tree(root="menu", timeout=timeout)
+        root = "menu"
+    else:
+        if not layout:
+            return fail("ui_preview needs a layout, or live=True to look at the open menu")
+        first = ui_load(layout, fixture=fixture, host=host, timeout=timeout)
+        root = "preview"
+    if not first.ok:
+        return first
+
+    nodes, total = _collect_nodes(root, first, timeout)
+    if live:
+        top = next((n for n in nodes if n.get("path") == ""), None)
+        rect = _rect(top["rect"]) if top else None
+    else:
+        rect = first.data.get("host")
+    if rect is None:
+        return fail("the tree came back without a rectangle to shoot",
+                    hint="for live=True a scripted menu must be open; for a layout the bridge reports ui_host")
+
+    label = name or (Path(layout).stem if layout else "live")
+    out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"preview-{label}-{int(time.time() * 1000)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pid, _alive = _live_client()
+    shot = winui.shot(pid, out_dir / "shot.png", rect=rect)
+    notes: list[str] = []
+    shot_name = "shot.png" if shot.ok else None
+    if not shot.ok:
+        notes.append(f"no screenshot: {shot.error}")
+    elif shot.data.get("warning"):
+        notes.append(shot.data["warning"])
+
+    source, why = (None, "") if live else _source_for(layout)
+    if why:
+        notes.append(why)
+    issues, check_notes = uicheck.check(nodes, rect, source)
+    notes += check_notes
+    issue_dicts = [i.to_dict() for i in issues]
+    meta = {"layout": layout or first.data.get("ui", {}).get("ui_menu", "menu"), "host": rect,
+            "emulated": bool(host) and not live, "fixture": bool(fixture), "nodes": len(nodes), "total": total}
+    report = uireport.write_report(out_dir, shot_name, nodes, issue_dicts, notes, meta)
+    counts = {"error": sum(1 for i in issues if i.severity == uicheck.ERROR),
+              "warn": sum(1 for i in issues if i.severity == uicheck.WARN)}
+    return ok({
+        "dir": str(out_dir), "shot": str(out_dir / "shot.png") if shot_name else None,
+        "report": str(report), "count": len(nodes), "total": total, "issues": counts,
+        "notes": notes, "host": rect, "emulated": meta["emulated"],
+    })
