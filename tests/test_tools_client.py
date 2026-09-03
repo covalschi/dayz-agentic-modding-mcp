@@ -373,6 +373,46 @@ def test_readiness_is_the_player_count_not_a_timer(tmp_path, monkeypatch):
     assert "player" in job.summary
 
 
+def test_client_start_lowers_the_baseline_when_the_count_falls_below_it(tmp_path, monkeypatch):
+    """The restart race I1 fixes: `client_stop` just ran, but for a few
+    seconds afterwards the server has not yet noticed the disconnect, so the
+    baseline `client_start` reads right before spawning is still the OLD
+    client (1) -- exactly the scenario the comment beside `baseline` in
+    client.py describes. Without lowering the baseline once the published
+    count actually falls below it, `want` stays baseline+1 = 2 forever, and a
+    new client that only ever reaches 1 player times out despite connecting
+    cleanly.
+
+    The published count across four successive polls: 1 (still the stale old
+    client), 1 (still stale), 0 (the server finally notices the old
+    disconnect), 1 (the new client joins) -- the job must finish done on that
+    last one, not time out waiting for a count of 2 that was never coming.
+    """
+    root, stand, game = make_project(tmp_path)
+    with_pause_mode(stand, 2)
+    live_stand(monkeypatch, {777})
+    monkeypatch.setattr(client, "spawn", lambda cmd, cwd: 777)
+    monkeypatch.setattr(client, "CONNECT_POLL_SECONDS", 0.02)
+    # The baseline read right before spawn: the stale old client, still 1.
+    publish_state(stand, 1)
+
+    sequence = iter([1, 1, 0, 1])
+
+    def fake_is_alive(pid, image=""):
+        if pid == 777:
+            publish_state(stand, next(sequence, 1))
+        return True
+
+    monkeypatch.setattr(client, "is_alive", fake_is_alive)
+
+    started = client.client_start(timeout=5)
+    assert started.ok is True, started.error
+    job = wait_for_job(started.data["job_id"])
+
+    assert job.status == "done", job.error
+    assert "1 player" in job.summary, job.summary
+
+
 def test_client_start_fails_the_job_when_the_client_dies_before_connecting(tmp_path, monkeypatch):
     root, stand, game = make_project(tmp_path)
     with_pause_mode(stand, 2)

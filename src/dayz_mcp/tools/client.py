@@ -514,8 +514,8 @@ def client_start(
 
     `extra_args` appends launch arguments after the fixed ones, an explicit
     one-run opt-in. Arguments this tool computes (-connect, -port, -mod,
-    -profiles, -window, -nolauncher) are refused rather than allowed to
-    displace its own.
+    -profiles, -window, -nolauncher, -exe, -filePatching, -x, -y) are refused
+    rather than allowed to displace its own.
     """
     guard = require_project()
     if guard:
@@ -730,6 +730,15 @@ def client_start(
                 if players is not None:
                     ever_readable = True
                     last_seen = players
+                    # A count BELOW the baseline is the server catching up on
+                    # a disconnect the baseline itself predates -- see the
+                    # comment above `baseline`. Chasing it down to match is
+                    # what repairs "start soon after a stop": without this, a
+                    # baseline read while the old client still counted (1)
+                    # demands players >= 2 forever, and a new client that only
+                    # ever reaches 1 times out despite connecting cleanly.
+                    if baseline is not None and players < baseline:
+                        baseline = players
                     want = 1
                     if baseline is not None:
                         want = baseline + 1

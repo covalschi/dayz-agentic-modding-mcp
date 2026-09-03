@@ -619,10 +619,14 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
 
 def _restart_client(size: tuple[int, int], timeout: float) -> str:
     """Stop the client and start it again at `size`. Empty string on success,
-    the reason otherwise."""
-    stopped = client_stop()
-    if not stopped.ok and "nothing" not in (stopped.error or ""):
-        return f"could not stop the client: {stopped.error}"
+    the reason otherwise.
+
+    `client_stop` is called for its effect alone, not its answer: the real
+    one always reports ok, including "nothing was started" -- that is a fact
+    about the machine, not a refusal, so there is nothing here for a status
+    check to add.
+    """
+    client_stop()
     started = client_start(window=list(size))
     if not started.ok:
         return f"could not start the client at {size[0]}x{size[1]}: {started.error}"
