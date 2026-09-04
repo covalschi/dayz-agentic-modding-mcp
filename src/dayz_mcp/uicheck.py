@@ -219,24 +219,52 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
     trees = ([source] if source else []) + list(sources)
     by_root: dict[str, dict[str, LayoutNode]] = {}
     by_name: dict[str, LayoutNode] = {}
+    # Every node sharing a NAME, across every tree given -- unlike by_name
+    # (one winner per name), a full list so an UNSCOPED lookup (see
+    # `_scoped` below) can ask "did ANY of these mark it self-sized" rather
+    # than trust whichever tree happened to sort first.
+    by_name_all: dict[str, list[LayoutNode]] = {}
     for t in trees:
         # first tree wins a shared root name, the same way by_name settles
         # a shared widget name -- an order the caller controls
         by_root.setdefault(t.name, {s.name: s for _p, s in t.walk()})
         for _p, s in t.walk():
             by_name.setdefault(s.name, s)
+            by_name_all.setdefault(s.name, []).append(s)
+
+    def _root_scope(path: str) -> dict[str, LayoutNode] | None:
+        """The by_root name table of `path`'s nearest ancestor that names a
+        known root (a fixture row's own template -- or, when `sources` is
+        every layout of a live-walked project (task 32), whichever of those
+        a node happens to sit under), or None if no ancestor does."""
+        up = _parent_path(path)
+        while up is not None:
+            ancestor = shown.get(up)
+            if ancestor is not None and ancestor["name"] in by_root:
+                return by_root[ancestor["name"]]
+            up = _parent_path(up)
+        return None
 
     def src_of(path: str, name: str):
         found = source_by_path.get(path)
         if found is not None:
             return found
-        up = _parent_path(path)
-        while up is not None:
-            ancestor = shown.get(up)
-            if ancestor is not None and ancestor["name"] in by_root:
-                return by_root[ancestor["name"]].get(name)
-            up = _parent_path(up)
+        scope = _root_scope(path)
+        if scope is not None:
+            return scope.get(name)
         return by_name.get(name)
+
+    def _scoped(path: str) -> bool:
+        """True when `src_of` has an actual scope to trust for `path` -- an
+        exact page path, or an ancestor's own root template -- so its
+        answer is final even when it is None there (not found IN that
+        scope, unlike not being scoped at all). False for a bare name with
+        no page path and no known-root ancestor: exactly what a live walk's
+        `sources` gives when a widget's ancestors match none of the
+        project's other layouts either, and where the text-overflow check
+        below prefers ANY matching name over the one `by_name` picked by
+        sort order."""
+        return path in source_by_path or _root_scope(path) is not None
 
     for path, n in shown.items():
         rect = rect_of(n)
@@ -294,9 +322,23 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         # box grows to fit it instead of clipping it.
         text_size = n.get("text_size")
         if text_size:
-            src = src_of(path, name)
-            free_w = _flag(src, "size to text h") or _flag(src, "wrap")
-            free_h = _flag(src, "size to text v")
+            if _scoped(path):
+                src = src_of(path, name)
+                free_w = _flag(src, "size to text h") or _flag(src, "wrap")
+                free_h = _flag(src, "size to text v")
+            else:
+                # No scope to trust (see _scoped): by_name would pick
+                # whichever tree happened to sort first, and a live walk's
+                # `sources` is the WHOLE project's layouts with no page/row
+                # structure to prefer one by. ANY of them marking this name
+                # self-sized is enough -- preferring a missed overflow on
+                # two unrelated widgets that happen to share a name over
+                # the alternative this exists to fix: every self-sized
+                # label in a live walk reported as overflowing regardless
+                # (task 32; measured 2026-09-04, 11 false findings).
+                matches = by_name_all.get(name, ())
+                free_w = any(_flag(s, "size to text h") or _flag(s, "wrap") for s in matches)
+                free_h = any(_flag(s, "size to text v") for s in matches)
             too_wide = text_size[0] > w + OVERFLOW_TOLERANCE_PX and not free_w
             too_tall = text_size[1] > h + OVERFLOW_TOLERANCE_PX and not free_h
             if too_wide or too_tall:

@@ -304,6 +304,24 @@ def test_two_templates_sharing_a_root_name_resolve_to_the_first_one_given():
     assert rules(check(nodes, HOST, source=page, sources=[second, first])[0]) == [("text_overflow", "Label")]
 
 
+def test_an_unscoped_bare_name_prefers_any_flag_over_the_order_sources_were_given():
+    """Unlike a shared ROOT name (the test above, which stays scoped to one
+    template on purpose), a node whose ancestors match no known root at all
+    has no scope to trust -- exactly what live=True's `sources` gives (task
+    32): the WHOLE project's layouts, thrown together with no page/row
+    structure telling `check` which one describes THIS widget. There the
+    order `sources` happened to be given is not a reliable signal, so the
+    flag wins over it: self-sized if ANY layout declaring this name says
+    so, regardless of which one sorted first."""
+    unflagged = parse_layout('TextWidgetClass RowMeta {\n size 100 20\n}\n')
+    flagged = parse_layout('TextWidgetClass RowMeta {\n size 100 20\n "size to text h" 1\n}\n')
+    nodes = [node("", "FrameWidget", "Menu", "0 0 1000 600"),
+             node("0", "Widget", "SomeContainer", "0 0 1000 600"),
+             node("0.0", "TextWidget", "RowMeta", "10 10 100 20", text_size=(109, 20))]
+    assert rules(check(nodes, HOST, sources=[unflagged, flagged])[0]) == []
+    assert rules(check(nodes, HOST, sources=[flagged, unflagged])[0]) == []
+
+
 def test_a_fixture_rows_frame_candidate_is_read_from_the_same_template():
     """An edit box inside a fixture row is judged by its own template
     (`src_of`), but its framing CANDIDATE was still looked up by path in the

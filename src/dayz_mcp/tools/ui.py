@@ -42,7 +42,7 @@ from .. import uicheck, uireport
 from .. import winui
 from ..bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
-from ..layoutgen import LayoutGenError, build_project
+from ..layoutgen import LAYOUT_DIR, LayoutGenError, build_project
 from ..layoutlint import lint_layout
 from ..layoutparse import LayoutSyntaxError, parse_layout
 from ..lint import REFUSE, WARN
@@ -624,6 +624,44 @@ def _fixture_sources(fixture, root: Path) -> tuple[list, list[str]]:
     return found, notes
 
 
+def _live_sources(prof) -> tuple[list, list[str]]:
+    """Every `.layout` this project declares, parsed, for `live=True` to
+    hand `uicheck.check` as `sources`. A live walk has no ONE layout loaded
+    the way `_source_for` reads for a real ui_load -- it looks at whatever
+    menu is already open -- so the whole project stands in for it: a widget
+    the engine reports is looked up by NAME across every file instead of by
+    one page's own path (see `uicheck.check`'s `by_root`/`by_name_all` for
+    how a name shared by several files is then resolved).
+
+    Walks each of `[build] mods`' own `gui/layouts` -- not the whole mod
+    tree, just where a layout actually lives (LAYOUT_DIR, the same constant
+    layout_build targets). A mod with no such folder yet is skipped, not an
+    error. A file that fails to READ or PARSE is skipped and counted rather
+    than raised: one stray syntax error two mods over must never blind the
+    checks to every OTHER layout -- unlike `live=False`, nothing here is
+    about to hang the engine's own parser, so there is no REFUSE to stop
+    for. The counts travel in the returned note, never silently dropped.
+    """
+    found: list = []
+    loaded = unreadable = 0
+    for mod in prof.build.mods:
+        layout_dir = resolve_mod_dir(prof.root, prof.build.sources, mod) / LAYOUT_DIR
+        if not layout_dir.is_dir():
+            continue
+        for path in sorted(layout_dir.glob("*.layout")):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                found.append(parse_layout(text))
+            except (OSError, LayoutSyntaxError):
+                unreadable += 1
+                continue
+            loaded += 1
+    note = f"live sources: {loaded} layout{'' if loaded == 1 else 's'}"
+    if unreadable:
+        note += f", {unreadable} unreadable"
+    return found, [note]
+
+
 def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = "",
                live: bool = False, name: str = "",
                timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
@@ -636,6 +674,9 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     OPEN scripted menu and shoots its root -- the way to look at the real PDA
     with real data. A host of its own size is an emulation of a screen that
     size and the report says so; the real check is the real window size.
+    `live=True` still gives the checks something to judge a self-sized label
+    against: `sources` is built from every `.layout` the open project
+    declares (`_live_sources`), and `notes` says how many were read.
 
     `live=False` LINTS the source before ever reaching ui_load: a quote
     inside a text value parses fine here (it just splits into more tokens)
@@ -680,8 +721,11 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         ui_unload(timeout=timeout)
         source, text, why = None, None, ""
         # live=True walks the open menu directly -- ui_load never runs, so
-        # there is no fixture whose rows the checks would need sources for.
-        extra_sources, extra_notes = [], []
+        # there is no ONE layout `_source_for` could point at the way a real
+        # ui_load has one. Every `.layout` the open project declares stands
+        # in for it instead (_live_sources), so a self-sized label is still
+        # recognised even though nothing here loaded any single page.
+        extra_sources, extra_notes = _live_sources(prof)
         first = ui_tree(root="menu", timeout=timeout)
         root = "menu"
     else:

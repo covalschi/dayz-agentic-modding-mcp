@@ -587,6 +587,70 @@ def test_ui_preview_live_reads_the_open_menu_instead_of_loading(live, monkeypatc
     assert shots == [(0, 0, 3840, 1600)]
 
 
+def test_ui_preview_live_reads_the_projects_layouts_so_a_flagged_label_is_not_overflow(live, monkeypatch):
+    """Measured on the stand, 2026-09-04: GetTextSize overstates a self-sized
+    label's width by about 9%, and with no fixture or page source to check
+    the flag against -- live=True never runs ui_load -- every one of those
+    was reported as text_overflow (11 false findings in the last live news
+    walk). `sources` is now built from the project's own `.layout` files
+    (_live_sources) instead of staying empty, so a `"size to text h" 1`
+    label is recognised even here."""
+    root = Path(session.profile().root)
+    layouts = root / "MyMod" / "gui" / "layouts"
+    layouts.mkdir(parents=True, exist_ok=True)
+    (layouts / "row.layout").write_text(
+        'TextWidgetClass RowMeta {\n size 100 20\n "size to text h" 1\n}\n', encoding="utf-8")
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "menu", "ui_total": 1, "ui_host": "",
+        # 109 px of text in a 100 px box -- the measured ~9% GetTextSize
+        # over-report on a label the source marks self-sized.
+        "ui_nodes": [node_line(path="", cls="TextWidget", name="RowMeta", rect="0 0 100 20", metrics="109 20")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview(live=True, name="pda")
+    assert result.ok, result.error
+    assert result.data["issues"]["error"] == 0
+    assert any("live sources: 1 layout" in n for n in result.data["notes"]), result.data["notes"]
+
+
+def test_ui_preview_live_still_reports_overflow_with_no_flag_anywhere(live, monkeypatch):
+    """The suppression above is not a blank cheque: with the SAME shape but
+    no layout anywhere marking RowMeta self-sized, the overflow still
+    fires -- reading the project's layouts must not make every overflow
+    disappear, only the ones a source actually explains."""
+    root = Path(session.profile().root)
+    layouts = root / "MyMod" / "gui" / "layouts"
+    layouts.mkdir(parents=True, exist_ok=True)
+    (layouts / "row.layout").write_text(
+        'TextWidgetClass RowMeta {\n size 100 20\n}\n', encoding="utf-8")
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "menu", "ui_total": 1, "ui_host": "",
+        "ui_nodes": [node_line(path="", cls="TextWidget", name="RowMeta", rect="0 0 100 20", metrics="109 20")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview(live=True, name="pda")
+    assert result.ok, result.error
+    assert result.data["issues"]["error"] == 1
+
+
+def test_ui_preview_live_skips_an_unreadable_layout_and_notes_it(live, monkeypatch):
+    """A syntax error in one project layout (an unclosed widget, here) must
+    not fail the whole live walk -- it is skipped and counted, the same way
+    a locked or vanished file is elsewhere in this module."""
+    root = Path(session.profile().root)
+    layouts = root / "MyMod" / "gui" / "layouts"
+    layouts.mkdir(parents=True, exist_ok=True)
+    (layouts / "broken.layout").write_text("TextWidgetClass Broken {\n", encoding="utf-8")
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "menu", "ui_total": 1, "ui_host": "",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="MyRoot", rect="0 0 200 100")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview(live=True, name="pda")
+    assert result.ok, result.error
+    assert any("1 unreadable" in n for n in result.data["notes"]), result.data["notes"]
+
+
 def test_ui_preview_marks_a_host_of_its_own_size_as_emulated(live, monkeypatch):
     live.state = BridgeState(tick=9, session_id="client-1", world={
         "ui_root": "preview", "ui_total": 1, "ui_host": "500 200 1306 518",
