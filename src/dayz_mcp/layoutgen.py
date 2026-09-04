@@ -1,6 +1,6 @@
 """JSON page descriptions -> .layout text, one engine idiom per primitive.
 
-Spec: E:/openzone/docs/specs/2026-09-04-ui-layout-generator-design.md, §3.
+Spec: the UI layout generator design of 2026-09-04, §3.
 The engine lays out lists, stacks, rows of self-sized labels and wrapped
 text by itself (measured 2026-09-04, skill gui-layouts.md §24). What it
 cannot do -- a `fill` in a column, a flexible column in a row, the width of
