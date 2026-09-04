@@ -235,6 +235,8 @@ class Box:
     prop_w: bool = False
     ox: float = 0.0
     oy: float = 0.0
+    #: children are laid out by the engine: every child must be one widget
+    engine: bool = False
 
 
 @dataclass
@@ -365,24 +367,18 @@ def _avail(side: float | None, inset: float) -> float | None:
 
 
 def _size_leaf(attrs: dict, ctx: Ctx, box: Box, path: str, x: float, y: float, forced: tuple,
-               anchor: str, default_h, allow_auto: bool = False) -> tuple:
-    """`(w, h, hexact, vexact)` for a leaf.
-
-    `size: "fill"` at the true origin of an uninset parent is written as
-    `size 1 1` proportional -- a full-size background that follows its
-    parent whatever the engine makes of it; a child with no width of its own
-    at x = 0 in a proportional parent (a row under a scrollbar) is
-    `size 1 h`; every other fill is an exact remainder of the inner box."""
+               anchor: str, default_h, allow_auto: bool = False, exact_only: bool = False) -> tuple:
     inset_x = x - box.ox
     inset_y = y - box.oy
-    full = attrs.get("size") == "fill" and x == 0 and y == 0 and box.ox == 0 and box.oy == 0 and not anchor
+    full = (attrs.get("size") == "fill" and x == 0 and y == 0 and box.ox == 0 and box.oy == 0
+            and not anchor and forced == (None, None) and not exact_only)
     if full:
         return 1.0, 1.0, False, False
     w = forced[0] if forced[0] is not None else _dim(attrs, "w", ctx, path, _avail(box.w, inset_x), "fill", allow_auto)
     h = forced[1] if forced[1] is not None else _dim(attrs, "h", ctx, path, _avail(box.h, inset_y), default_h)
     hexact = True
     declared_w = "w" in attrs or "size" in attrs or forced[0] is not None
-    if w != "auto" and box.prop_w and inset_x == 0 and not anchor and not declared_w:
+    if w != "auto" and box.prop_w and inset_x == 0 and not anchor and not declared_w and not exact_only:
         w, hexact = 1.0, False
     if w == "auto":
         return 0.0, h, True, True
@@ -542,6 +538,232 @@ BUILDERS = {
     "frame": _b_frame, "panel": _b_panel, "label": _b_label,
     "rule": _b_rule, "chip": _b_chip, "gap": _b_gap,
 }
+
+
+def _declared(attrs: dict, which: str, ctx: Ctx, path: str):
+    """The main-axis size a container child declares: a number, "fill" or None."""
+    value = attrs.get(which)
+    if "size" in attrs:
+        size = attrs["size"]
+        if size == "fill":
+            return "fill"
+        value = ctx.tokens.pair(size, ctx.file, path)[0 if which == "w" else 1]
+    if value is None:
+        return None
+    if value == "fill":
+        return "fill"
+    if value == "auto":
+        raise LayoutGenError("auto is only a label's width, and only inside an hrow", ctx.file, path)
+    return ctx.tokens.number(value, ctx.file, path, which)
+
+
+def _default_main(kind: str, attrs: dict, ctx: Ctx, path: str, vertical: bool) -> float:
+    """What a child takes along a vbox/hbox's axis when it says nothing."""
+    if vertical:
+        if kind == "label":
+            font, _ = ctx.tokens.font_of(attrs.get("font", "body"), ctx.file, path)
+            return font["size"] + 9
+        if kind == "button" and "button" in ctx.tokens.size:
+            return ctx.tokens.size["button"]
+        if kind == "field" and "field" in ctx.tokens.size:
+            return ctx.tokens.size["field"]
+        if kind == "rule":
+            return 1.0
+        if kind == "section":
+            return 30.0
+        if kind == "text":
+            raise LayoutGenError("text needs h inside a vbox (its height is the engine's only inside a stack)", ctx.file, path)
+        raise LayoutGenError("h is required here", ctx.file, path)
+    raise LayoutGenError("w is required here", ctx.file, path)
+
+
+def _stackbox(attrs, ctx, box, path, x, y, forced, anchor, priority, vertical: bool) -> list[W]:
+    kind = "vbox" if vertical else "hbox"
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, "fill", exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError(f"{kind} needs an exact size to lay children out in", ctx.file, path)
+    gap = ctx.tokens.number(attrs.get("gap", 0), ctx.file, path, "gap")
+    kids = list(attrs.get("children", []))
+    main = height if vertical else width
+    which = "h" if vertical else "w"
+    sizes = []
+    fills = []
+    for i, kid in enumerate(kids):
+        kkind, kattrs = _unpack(kid, ctx.file, f"{path}.{i}")
+        value = _declared(kattrs, which, ctx, f"{path}.{i}")
+        if value is None:
+            value = _default_main(kkind, kattrs, ctx, f"{path}.{i}", vertical)
+        if value == "fill":
+            fills.append(i)
+        sizes.append(value)
+    used = sum(s for s in sizes if s != "fill") + gap * max(0, len(kids) - 1)
+    if used > main + 0.001:
+        raise LayoutGenError(f"{kind} does not fit: needs {fmt(used)}, has {fmt(main)}", ctx.file, path)
+    if fills:
+        # several fills share the remainder equally: two `fill` buttons in a
+        # row are two equal buttons, whatever the row's width becomes
+        each = (main - used) / len(fills)
+        for i in fills:
+            sizes[i] = each
+
+    wrap = bool(attrs.get("name")) or box.engine
+    if wrap:
+        frame = _common_leaf("FrameWidgetClass", attrs, ctx, path, ignore=False)
+        place(frame, x, y, width, height, anchor=anchor)
+        frame.set("priority", fmt(priority))
+        inner = Box(width, height)
+        base_x, base_y = 0.0, 0.0
+    else:
+        frame = None
+        inner = Box(width, height, ox=x, oy=y)
+        base_x, base_y = x, y
+    out: list[W] = []
+    cursor = 0.0
+    for i, kid in enumerate(kids):
+        kkind, kattrs = _unpack(kid, ctx.file, f"{path}.{i}")
+        size = sizes[i]
+        if kkind != "gap":
+            # the cross axis is the container's unless the child says otherwise
+            if vertical:
+                own_w = "w" in kattrs or "size" in kattrs
+                placed = (base_x, base_y + cursor, None if own_w else width, size)
+            else:
+                own_h = "h" in kattrs or "size" in kattrs
+                placed = (base_x + cursor, base_y, size, None if own_h else height)
+            out += emit(kid, ctx, inner, f"{path}.{i}", i, placed=placed)
+        cursor += size + gap
+    if frame is not None:
+        frame.children = out
+        return [frame]
+    return out
+
+
+def _b_vbox(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    return _stackbox(attrs, ctx, box, path, x, y, forced, anchor, priority, vertical=True)
+
+
+def _b_hbox(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    return _stackbox(attrs, ctx, box, path, x, y, forced, anchor, priority, vertical=False)
+
+
+def _b_text(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    cls = "MultilineTextWidgetClass" if attrs.get("plain") else "RichTextWidgetClass"
+    w = _common_leaf(cls, attrs, ctx, path)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, 20)
+    place(w, x, y, width, height, hx, vx, anchor)
+    _color(w, attrs, ctx, path, "$text")
+    w.set("priority", fmt(priority))
+    _text_font(w, attrs, ctx, path, "body")
+    w.set(key("text halign"), str(attrs.get("align", "left")))
+    w.set("wrap", "1")
+    w.set(key("size to text h"), "0")
+    w.set(key("size to text v"), "1")
+    return [w]
+
+
+def _b_button(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """Button + Edge + Bg + Text children: the one button idiom that keeps
+    its caption visible (vanilla button styles paint over children)."""
+    name = ctx.claim(attrs.get("name", ""), path)
+    btn = W("ButtonWidgetClass", name, comment=str(attrs.get("note", "")))
+    btn.set("visible", "0" if attrs.get("hidden") else "1")
+    default_h = ctx.tokens.size.get("button", 30)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, default_h, exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError("button needs an exact size", ctx.file, path)
+    place(btn, x, y, width, height, anchor=anchor)
+    btn.set("text", quoted("")).set("priority", fmt(priority))
+    kids: list[W] = []
+    if attrs.get("edge", True):
+        edge = W("PanelWidgetClass", ctx.claim(name + "Edge", path))
+        edge.set("visible", "1").set("ignorepointer", "1")
+        place(edge, -1, -1, width + 2, height + 2)
+        rgba, _ = ctx.tokens.color_of(attrs["edge"] if isinstance(attrs.get("edge"), str) else "$edge", ctx.file, path)
+        kids.append(edge.set("color", color_prop(rgba)).set("priority", "0").set("style", PANEL_STYLE))
+    if attrs.get("bg", True):
+        bg = W("PanelWidgetClass", ctx.claim(name + "Bg", path))
+        bg.set("visible", "1").set("ignorepointer", "1")
+        place(bg, 0, 0, width, height)
+        rgba, _ = ctx.tokens.color_of(attrs["bg"] if isinstance(attrs.get("bg"), str) else "$raised", ctx.file, path)
+        kids.append(bg.set("color", color_prop(rgba)).set("priority", "1").set("style", PANEL_STYLE))
+    label = W("TextWidgetClass", ctx.claim(name + "Text", path))
+    label.set("visible", "1").set("ignorepointer", "1")
+    place(label, 0, 0, width, height)
+    _color(label, attrs, ctx, path, "$accent")
+    label.set("priority", "2")
+    _text_font(label, attrs, ctx, path, "header" if attrs.get("glyph") else "small")
+    label.set(key("text halign"), "center").set(key("text valign"), "center")
+    kids.append(label)
+    btn.children = kids
+    return [btn]
+
+
+def _b_field(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """An edit box that always has a box around it: <Name>Frame (edge colour)
+    holding <Name>Fill (panel colour) and the EditBoxWidgetClass <Name>."""
+    name = ctx.claim(attrs.get("name", ""), path)
+    frame = W("PanelWidgetClass", ctx.claim(name + "Frame", path), comment=str(attrs.get("note", "")))
+    frame.set("visible", "0" if attrs.get("hidden") else "1")
+    default_h = ctx.tokens.size.get("field", 28)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, default_h, exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError("field needs an exact size", ctx.file, path)
+    place(frame, x, y, width, height, anchor=anchor)
+    rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
+    frame.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    fill = W("PanelWidgetClass", ctx.claim(name + "Fill", path))
+    fill.set("visible", "1").set("ignorepointer", "1")
+    place(fill, 1, 1, width - 2, height - 2)
+    rgba, _ = ctx.tokens.color_of("$panel", ctx.file, path)
+    fill.set("color", color_prop(rgba)).set("priority", "0").set("style", PANEL_STYLE)
+    lines = attrs.get("lines")
+    edit = W("MultilineEditBoxWidgetClass" if lines else "EditBoxWidgetClass", name)
+    edit.set("visible", "1")
+    if lines:
+        place(edit, 6, 4, width - 12, height - 8)
+    else:
+        place(edit, 6, 0, width - 12, height)
+    _color(edit, attrs, ctx, path, "$text")
+    edit.set("priority", "1").set("style", "Default")
+    _text_font(edit, attrs, ctx, path, "field")
+    if lines:
+        edit.set("lines", fmt(ctx.tokens.number(lines, ctx.file, path, "lines")))
+    frame.children = [fill, edit]
+    return [frame]
+
+
+def _b_section(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A VPP-style section head: <Name>Bar, <Name>Lbl, <Name>Rule."""
+    name = attrs.get("name", "")
+    if not name:
+        raise LayoutGenError("section needs a name prefix", ctx.file, path)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, 30, exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError("section needs an exact size", ctx.file, path)
+    accent, _ = ctx.tokens.color_of("$accent", ctx.file, path)
+    rule, _ = ctx.tokens.color_of("$rule", ctx.file, path)
+    bar = W("PanelWidgetClass", ctx.claim(name + "Bar", path), comment=str(attrs.get("note", "")))
+    bar.set("visible", "1").set("ignorepointer", "1")
+    place(bar, x, y + 4, 3, 16, anchor=anchor)
+    bar.set("color", color_prop(accent)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    lbl = W("TextWidgetClass", ctx.claim(name + "Lbl", path))
+    lbl.set("visible", "1").set("ignorepointer", "1")
+    place(lbl, x + 12, y, width - 12, 24, anchor=anchor)
+    _color(lbl, attrs, ctx, path, "$accent")
+    lbl.set("priority", fmt(priority))
+    _text_font(lbl, attrs, ctx, path, "header")
+    lbl.set(key("text halign"), "left").set(key("text valign"), "center")
+    line = W("PanelWidgetClass", ctx.claim(name + "Rule", path))
+    line.set("visible", "1").set("ignorepointer", "1")
+    place(line, x, y + height - 1, width, 1, anchor=anchor)
+    line.set("color", color_prop(rule)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    return [bar, lbl, line]
+
+
+BUILDERS.update({
+    "vbox": _b_vbox, "hbox": _b_hbox, "text": _b_text, "button": _b_button,
+    "field": _b_field, "section": _b_section,
+})
 
 
 def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> Emitted:

@@ -206,3 +206,100 @@ def test_a_gap_keeps_its_anchor():
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
     assert "PanelWidgetClass Gap1 {\n     visible 1\n     ignorepointer 1\n     halign right_ref\n     position 10 0\n     size 20 5\n" in text
     assert clean(text) == []
+
+
+def test_vbox_places_children_and_resolves_one_fill():
+    out = build(page({"vbox": {"gap": "$space.tight", "children": [
+        {"label": {"name": "Header", "h": "$size.header", "font": "title", "color": "$accent"}},
+        {"panel": {"name": "Body", "h": "fill", "color": "$panel"}},
+        {"label": {"name": "Hint", "h": "$size.hint", "font": "hint", "color": "$faint"}},
+        {"hbox": {"h": "$size.button", "gap": 30, "children": [
+            {"button": {"name": "BtnMsg", "w": "fill", "hidden": True}},
+            {"button": {"name": "BtnFriend", "w": "fill"}},
+        ]}},
+    ]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "TextWidgetClass Header {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 600 34\n" in text
+    # 478 inner - 34 - 22 - 30 - three gaps of 6 = 374
+    assert "PanelWidgetClass Body {\n   visible 1\n   ignorepointer 1\n   position 20 60\n   size 600 374\n" in text
+    assert "TextWidgetClass Hint {\n   visible 1\n   ignorepointer 1\n   position 20 440\n   size 600 22\n" in text
+    assert "ButtonWidgetClass BtnMsg {\n   visible 0\n   position 20 468\n   size 285 30\n" in text
+    assert "ButtonWidgetClass BtnFriend {\n   visible 1\n   position 335 468\n   size 285 30\n" in text
+    assert clean(text) == [] and out.notes == []
+
+
+def test_a_named_vbox_is_a_frame_with_relative_children():
+    out = build(page({"vbox": {"name": "Column", "w": 300, "h": 100, "children": [
+        {"label": {"name": "A", "h": 20}}, {"label": {"name": "B", "h": 20}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  FrameWidgetClass Column {\n   visible 1\n   position 20 20\n   size 300 100\n" in text
+    assert "    TextWidgetClass A {\n     visible 1\n     ignorepointer 1\n     position 0 0\n     size 300 20\n" in text
+    assert "    TextWidgetClass B {\n     visible 1\n     ignorepointer 1\n     position 0 20\n     size 300 20\n" in text
+
+
+def test_several_fills_share_the_remainder_equally():
+    out = build(page({"vbox": {"children": [{"panel": {"name": "A", "h": "fill", "color": "$panel"}},
+                                            {"panel": {"name": "B", "h": 78, "color": "$panel"}},
+                                            {"panel": {"name": "C", "h": "fill", "color": "$panel"}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "PanelWidgetClass A {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 600 200\n" in text
+    assert "PanelWidgetClass C {\n   visible 1\n   ignorepointer 1\n   position 20 298\n   size 600 200\n" in text
+
+
+@pytest.mark.parametrize("body, message", [
+    ({"vbox": {"children": [{"panel": {"name": "A", "h": 400, "color": "$panel"}},
+                            {"panel": {"name": "B", "h": 400, "color": "$panel"}}]}}, "does not fit: needs 800, has 478"),
+    ({"vbox": {"children": [{"panel": {"name": "A", "at": [1, 1], "h": 40, "color": "$panel"}}]}}, "`at` is not allowed under a vbox/hbox"),
+    ({"hbox": {"h": 30, "children": [{"label": {"name": "A", "text": "x"}}]}}, "w is required here"),
+    ({"vbox": {"children": [{"text": {"name": "T", "text": "x"}}]}}, "text needs h inside a vbox"),
+])
+def test_vbox_and_hbox_refusals(body, message):
+    with pytest.raises(LayoutGenError, match=message):
+        build(page(body))
+
+
+def test_button_writes_the_edge_bg_text_idiom():
+    out = build(page({"button": {"name": "BtnHide", "size": [195, 30], "text": "#STR_HIDE", "font": "small"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert (
+        "  ButtonWidgetClass BtnHide {\n   visible 1\n   position 20 20\n   size 195 30\n"
+        "   hexactpos 1\n   vexactpos 1\n   hexactsize 1\n   vexactsize 1\n   text \"\"\n   priority 0\n   {\n"
+        "    PanelWidgetClass BtnHideEdge {\n     visible 1\n     ignorepointer 1\n     position -1 -1\n     size 197 32\n"
+    ) in text
+    assert "    PanelWidgetClass BtnHideBg {\n     visible 1\n     ignorepointer 1\n     position 0 0\n     size 195 30\n" in text
+    assert "     color 0.135 0.18 0.225 1\n     priority 1\n" in text
+    assert "    TextWidgetClass BtnHideText {\n     visible 1\n     ignorepointer 1\n     position 0 0\n     size 195 30\n" in text
+    assert '     text "#STR_HIDE"\n' in text and '     "text halign" center\n' in text
+    assert clean(text) == []
+
+
+def test_field_puts_the_edit_box_inside_a_frame_and_a_fill():
+    out = build(page({"field": {"name": "ChatInput", "size": [472, 28]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  PanelWidgetClass ChatInputFrame {\n   visible 1\n   position 20 20\n   size 472 28\n" in text
+    assert "    PanelWidgetClass ChatInputFill {\n     visible 1\n     ignorepointer 1\n     position 1 1\n     size 470 26\n" in text
+    assert "    EditBoxWidgetClass ChatInput {\n     visible 1\n     position 6 0\n     size 460 28\n" in text
+    assert "     style Default\n" in text and '     font "gui/fonts/MetronBook14"\n' in text
+    assert '"exact text size"' not in text.split("EditBoxWidgetClass ChatInput")[1]
+    assert clean(text) == []
+    out = build(page({"field": {"name": "Body", "size": [400, 200], "lines": 8}}))
+    assert "MultilineEditBoxWidgetClass Body {" in out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "     lines 8\n" in out.files["MyMod/gui/layouts/oz_page.layout"]
+
+
+def test_text_wraps_and_sizes_its_height_to_the_text():
+    out = build(page({"text": {"name": "Story", "w": 400, "text": "long", "font": "body"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  RichTextWidgetClass Story {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 400 20\n" in text
+    assert '   wrap 1\n   "size to text h" 0\n   "size to text v" 1\n' in text
+    out = build(page({"text": {"name": "Plain", "w": 400, "plain": True}}))
+    assert "MultilineTextWidgetClass Plain {" in out.files["MyMod/gui/layouts/oz_page.layout"]
+
+
+def test_section_writes_bar_label_and_rule():
+    out = build(page({"section": {"name": "SecSpZ", "w": 560, "text": "#STR_SPAWNS"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "PanelWidgetClass SecSpZBar {\n   visible 1\n   ignorepointer 1\n   position 20 24\n   size 3 16\n" in text
+    assert "TextWidgetClass SecSpZLbl {\n   visible 1\n   ignorepointer 1\n   position 32 20\n   size 548 24\n" in text
+    assert "PanelWidgetClass SecSpZRule {\n   visible 1\n   ignorepointer 1\n   position 20 49\n   size 560 1\n" in text
+    assert clean(text) == []
