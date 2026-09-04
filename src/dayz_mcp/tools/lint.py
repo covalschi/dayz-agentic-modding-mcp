@@ -35,6 +35,15 @@ from .project import require_project
 MAX_FILES = 5000
 
 
+def _read_text(path: Path) -> tuple[str | None, str]:
+    """A file's text, or None and the reason: a locked or vanished layout is
+    a finding, never a crash of the whole verdict."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace"), ""
+    except OSError as exc:
+        return None, str(exc)
+
+
 def _first_difference(a: str, b: str) -> int:
     """1-based line where `a` and `b` first differ (CRLF read as LF)."""
     left = a.replace("\r\n", "\n").split("\n")
@@ -68,7 +77,12 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
             out.append(Finding("layout-stale", REFUSE, f"{target} is described by {src} but has not been built",
                                "run layout_build", target, 0))
             continue
-        line = _first_difference(disk.read_text(encoding="utf-8", errors="replace"), report.files[target])
+        current, why = _read_text(disk)
+        if current is None:
+            out.append(Finding("unreadable", WARN, f"{target} could not be read: {why}",
+                               "check the file is not locked by another program", target, 0))
+            continue
+        line = _first_difference(current, report.files[target])
         out.append(Finding("layout-stale", REFUSE, f"{target} is behind {src} (first difference at line {line})",
                            "run layout_build and commit the result", target, line))
     generated = set(report.files)
@@ -81,9 +95,12 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
                 rel = path.as_posix()
             if rel in generated:
                 continue
-            with path.open(encoding="utf-8", errors="replace") as fh:
-                first = fh.readline()
-            if first.startswith(GENERATED_MARK):
+            text, why = _read_text(path)
+            if text is None:
+                out.append(Finding("unreadable", WARN, f"{rel} could not be read: {why}",
+                                   "check the file is not locked by another program", rel, 0))
+                continue
+            if text.startswith(GENERATED_MARK):
                 out.append(Finding("layout-orphan", WARN,
                                    f"{rel} says it is generated but no description under ui/ makes it",
                                    "delete it, or restore its description", rel, 1))
