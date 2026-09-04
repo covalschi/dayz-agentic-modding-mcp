@@ -290,3 +290,15 @@ def test_two_fixture_rows_may_reuse_an_inner_name_without_sharing_flags():
     issues, _ = check(nodes, HOST, source=page, sources=[wrapped, fixed])
     assert rules(issues) == [("text_overflow", "Label")]
     assert issues[0].path == "0.1.0"
+
+
+def test_two_templates_sharing_a_root_name_resolve_to_the_first_one_given():
+    page = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    first = parse_layout('WrapSpacerWidgetClass Row {\n size 1 0\n {\n  RichTextWidgetClass Label {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
+    second = parse_layout('FrameWidgetClass Row {\n size 1 30\n {\n  TextWidgetClass Label {\n   size 100 25\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "List", "0 0 600 200"),
+             node("0.0", "WrapSpacerWidget", "Row", "0 0 600 80"),
+             node("0.0.0", "RichTextWidget", "Label", "0 0 590 52", text_size=(815, 52))]
+    assert rules(check(nodes, HOST, source=page, sources=[first, second])[0]) == []
+    assert rules(check(nodes, HOST, source=page, sources=[second, first])[0]) == [("text_overflow", "Label")]

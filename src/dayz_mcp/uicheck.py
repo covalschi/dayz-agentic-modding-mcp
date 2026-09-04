@@ -217,9 +217,12 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
     # under no known root falls back to a name lookup across every source
     # (names are unique within a file -- the layout-dup-name lint sees to that).
     trees = ([source] if source else []) + list(sources)
-    by_root = {t.name: {s.name: s for _p, s in t.walk()} for t in trees}
+    by_root: dict[str, dict[str, LayoutNode]] = {}
     by_name: dict[str, LayoutNode] = {}
     for t in trees:
+        # first tree wins a shared root name, the same way by_name settles
+        # a shared widget name -- an order the caller controls
+        by_root.setdefault(t.name, {s.name: s for _p, s in t.walk()})
         for _p, s in t.walk():
             by_name.setdefault(s.name, s)
 
