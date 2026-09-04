@@ -104,23 +104,39 @@ class Tokens:
         return t
 
     def number(self, value, file: str, node: str, what: str = "size") -> float:
-        """A number, or a `$space.<name>` / `$size.<name>` reference."""
+        """A number, or a `$space.<name>` / `$size.<name>` / `$device.<name>` reference.
+
+        `device` is not a table of plain floats like `space`/`size` -- a
+        `device` name can name either shape (`pair()` reads the other one) --
+        so a name found there that turns out to be a `[w, h]` pair is refused
+        by its OWN name, the same way `pair()` refuses a scalar below."""
         if isinstance(value, bool):
             raise LayoutGenError(f"{what} must be a number, not a bool", file, node)
         if _is_number(value):
             return float(value)
         if isinstance(value, str) and value.startswith("$"):
             group, _, name = value[1:].partition(".")
+            if group == "device":
+                if name not in self.device:
+                    raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
+                got = self.device[name]
+                if _is_number(got):
+                    return float(got)
+                if isinstance(got, list) and len(got) == 2 and all(_is_number(v) for v in got):
+                    raise LayoutGenError(f"{value!r} is a pair, not a number", file, node)
+                raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
             table = {"space": self.space, "size": self.size}.get(group)
             if table is None or name not in table:
                 raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
             return table[name]
-        raise LayoutGenError(f"{what} must be a number or a $space/$size token, got {value!r}", file, node)
+        raise LayoutGenError(f"{what} must be a number or a $space/$size/$device token, got {value!r}", file, node)
 
     def pair(self, value, file: str, node: str, what: str = "size") -> tuple[float, float]:
         """`[w, h]` of numbers or tokens, or `$device.<name>` naming a two-number token."""
         if isinstance(value, str) and value.startswith("$device."):
             got = self.device.get(value[len("$device."):])
+            if _is_number(got):
+                raise LayoutGenError(f"{value!r} is a number, not a pair", file, node)
             if not (isinstance(got, list) and len(got) == 2 and all(_is_number(v) for v in got)):
                 raise LayoutGenError(f"{value!r} is not a [w, h] device token", file, node)
             return float(got[0]), float(got[1])
@@ -639,9 +655,22 @@ def _default_main(kind: str, attrs: dict, ctx: Ctx, path: str, vertical: bool) -
             return 1.0
         if kind == "section":
             return 30.0
+        if kind == "header":
+            # The same default `_b_header` falls back to internally
+            # (`row.setdefault`-style, via `"h" not in row`) when it is not
+            # itself inside a vbox/hbox. Resolved here so a vbox can size
+            # the row BEFORE dispatching to _b_header, which by then only
+            # ever sees the forced height this returns (forced wins over
+            # $size.header inside _b_header's own _stackbox call).
+            return ctx.tokens.number("$size.header", ctx.file, path, "h")
         if kind == "text":
             raise LayoutGenError("text needs h inside a vbox (its height is the engine's only inside a stack)", ctx.file, path)
         raise LayoutGenError("h is required here", ctx.file, path)
+    # No case for "header" here: a vbox's default is a ROW's height
+    # ($size.header, one token), but an hbox's main axis is width, and no
+    # single token stands for a header row's default width. So a header
+    # inside an hbox keeps demanding an explicit w, same as every other
+    # kind that falls through to this same line.
     raise LayoutGenError("w is required here", ctx.file, path)
 
 

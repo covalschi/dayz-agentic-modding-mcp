@@ -20,7 +20,7 @@ TOKENS = {
              "field": {"face": "gui/fonts/MetronBook14", "size": 14, "fixed": True}},
     "space": {"page": 20, "gap": 10, "tight": 6},
     "size": {"button": 30, "field": 28, "header": 34, "hint": 22, "contactRow": 55},
-    "device": {"page": [1306, 518], "iconset": "my_icons"},
+    "device": {"page": [1306, 518], "iconset": "my_icons", "rail": 60},
 }
 
 
@@ -47,6 +47,20 @@ def test_tokens_resolve_numbers_colors_and_fonts():
     assert t.font_of("field", "f", "n")[0]["fixed"] is True
     assert t.pair("$device.page", "f", "n") == (1306.0, 518.0)
     assert t.pair([640, "$size.contactRow"], "f", "n") == (640.0, 55.0)
+
+
+def test_device_group_scalars_resolve_and_shapes_refuse_each_other():
+    """A `$device.<name>` token can hold either shape. `number()` used to
+    know only `space`/`size`, so a scalar device token (a rail width, say)
+    never reached it, and there was no dedicated message for a pair used
+    where a scalar is expected, or a scalar used where a pair is expected."""
+    t = tokens()
+    assert t.number("$device.rail", "f", "n") == 60.0
+    assert t.number("$size.header", "f", "n") == 34.0
+    with pytest.raises(LayoutGenError, match=r"is a pair, not a number"):
+        t.number("$device.page", "f", "n")
+    with pytest.raises(LayoutGenError, match=r"is a number, not a pair"):
+        t.pair("$device.rail", "f", "n")
 
 
 @pytest.mark.parametrize("value, what", [
@@ -125,6 +139,21 @@ def test_a_frame_root_with_one_label_renders_the_vanilla_shape():
     ) in text
     assert clean(text) == []
     assert out.notes == []
+
+
+def test_frame_w_and_a_size_element_resolve_a_device_scalar():
+    """`"w": "$device.rail"` used to raise "unknown token": `number()` never
+    consulted the device group, only `pair()` did, and only for the whole
+    `size`. A `size` element goes through `number()` too, so it had the
+    same gap."""
+    out = build(page({"frame": {"name": "Rail", "w": "$device.rail", "h": 40}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "FrameWidgetClass Rail {\n   visible 1\n   position 20 20\n   size 60 40\n" in text
+    assert clean(text) == []
+    out = build(page({"frame": {"name": "Rail", "size": ["$device.rail", 40]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "FrameWidgetClass Rail {\n   visible 1\n   position 20 20\n   size 60 40\n" in text
+    assert clean(text) == []
 
 
 def test_root_props_inset_and_children_offsets():
@@ -312,6 +341,10 @@ def test_several_fills_share_the_remainder_equally():
     # `at`, and refused the same way.
     ({"vbox": {"children": [{"panel": {"name": "A", "anchor": "bottom", "h": 40, "color": "$panel"}}]}}, "`anchor` is not allowed under a vbox/hbox"),
     ({"hbox": {"h": 30, "children": [{"label": {"name": "A", "text": "x"}}]}}, "w is required here"),
+    # A header's default is a ROW's height ($size.header) -- an hbox needs
+    # a default WIDTH instead, which no single token stands for, so a
+    # header inside an hbox keeps demanding an explicit w, same as before.
+    ({"hbox": {"h": 30, "children": [{"header": {"title": {"name": "H"}}}]}}, "w is required here"),
     ({"vbox": {"children": [{"text": {"name": "T", "text": "x"}}]}}, "text needs h inside a vbox"),
 ])
 def test_vbox_and_hbox_refusals(body, message):
@@ -724,6 +757,20 @@ def test_header_accepts_size_instead_of_h():
     out = build(page({"header": {"title": {"name": "ContactsHeader"}, "size": [600, 40]}}))
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
     assert "  TextWidgetClass ContactsHeader {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 600 40\n" in text
+    assert clean(text) == []
+
+
+def test_a_header_inside_a_vbox_defaults_its_height_to_size_header():
+    """`_default_main`'s vertical branch had no `header` case, so a vbox
+    child header without an explicit h hit "h is required here" before
+    `_b_header` ever got a chance to fall back to $size.header itself."""
+    out = build(page({"vbox": {"children": [
+        {"header": {"title": {"name": "ContactsHeader"}}},
+        {"panel": {"name": "Body", "h": "fill", "color": "$panel"}},
+    ]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "TextWidgetClass ContactsHeader {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 600 34\n" in text
+    assert "PanelWidgetClass Body {\n   visible 1\n   ignorepointer 1\n   position 20 54\n   size 600 444\n" in text
     assert clean(text) == []
 
 
