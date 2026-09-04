@@ -16,11 +16,11 @@ TOKENS = {
               "alert": [0.94, 0.54, 0.14, 1], "rule": [1, 1, 1, 0.08],
               "pick": [0.31, 0.71, 0.91, 0.18], "none": [0, 0, 0, 0], "white": [1, 1, 1, 1]},
     "font": {"title": {"size": 18}, "header": {"size": 16}, "body": {"size": 15},
-             "hint": {"size": 14}, "small": {"size": 13},
+             "hint": {"size": 14}, "small": {"size": 13}, "tiny": {"size": 10},
              "field": {"face": "gui/fonts/MetronBook14", "size": 14, "fixed": True}},
     "space": {"page": 20, "gap": 10, "tight": 6},
     "size": {"button": 30, "field": 28, "header": 34, "hint": 22, "contactRow": 55},
-    "device": {"page": [1306, 518]},
+    "device": {"page": [1306, 518], "iconset": "my_icons"},
 }
 
 
@@ -629,3 +629,116 @@ def test_main_refuses_an_unknown_mod_and_builds_a_known_one(tmp_path, capsys):
     assert layoutgen.main([str(root), "MyMod"]) == 0
     assert "wrote MyMod/gui/layouts/oz_page.layout" in capsys.readouterr().out
     assert layoutgen.main([]) == 2
+
+
+def test_icon_writes_an_imageset_sprite_tinted_by_a_token():
+    out = build(page({"icon": {"name": "TabIcon", "at": [17, 8], "size": [26, 26], "image": "tab_chat", "color": "$muted"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert (
+        "  ImageWidgetClass TabIcon {\n   visible 1\n   ignorepointer 1\n   position 37 28\n   size 26 26\n"
+        "   hexactpos 1\n   vexactpos 1\n   hexactsize 1\n   vexactsize 1\n   color 0.58 0.65 0.71 1\n   priority 0\n"
+        '   image0 "set:my_icons image:tab_chat"\n   mode blend\n   "src alpha" 1\n  }\n'
+    ) in text
+    assert clean(text) == []
+    with pytest.raises(LayoutGenError, match="icon needs image"):
+        build(page({"icon": {"name": "X", "size": [10, 10]}}))
+
+
+def test_icon_needs_a_set_when_the_tokens_name_none():
+    t = Tokens.from_text(json.dumps({**TOKENS, "device": {"page": [1306, 518]}}), "ui/tokens.json")
+    with pytest.raises(LayoutGenError, match="icon needs set, or device.iconset"):
+        build_layout(page({"icon": {"name": "X", "size": [10, 10], "image": "a"}}), t, "ui/MyMod/x.json", "MyMod/gui/layouts")
+    out = build_layout(page({"icon": {"name": "X", "size": [10, 10], "image": "a", "set": "other_set"}}), t, "ui/MyMod/x.json", "MyMod/gui/layouts")
+    assert 'image0 "set:other_set image:a"' in out.files["MyMod/gui/layouts/oz_page.layout"]
+
+
+def test_image_writes_the_three_texture_traps_once():
+    out = build(page({"image": {"name": "Bezel", "size": [1403, 590], "file": "MyMod/gui/textures/bezel_ca.paa", "color": "$white"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert '   image0 "MyMod/gui/textures/bezel_ca.paa"\n   mode blend\n   "src alpha" 1\n   "stretch mode" stretch_w_h\n' in text
+    assert clean(text) == []
+    out = build(page({"image": {"name": "Bezel", "size": [10, 10], "file": "MyMod/gui/textures/b_ca.paa", "stretch": False}}))
+    assert '"stretch mode"' not in out.files["MyMod/gui/layouts/oz_page.layout"]
+    with pytest.raises(LayoutGenError, match="image needs file"):
+        build(page({"image": {"name": "Bezel", "size": [10, 10], "file": "bezel.png"}}))
+
+
+def test_badge_is_a_hidden_disc_with_a_count():
+    out = build(page({"badge": {"name": "TabBadge", "anchor": "right", "at": [6, 4]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert (
+        "  ImageWidgetClass TabBadge {\n   visible 0\n   ignorepointer 1\n   halign right_ref\n   position 26 24\n   size 18 18\n"
+        "   hexactpos 1\n   vexactpos 1\n   hexactsize 1\n   vexactsize 1\n   color 0.94 0.54 0.14 1\n   priority 0\n"
+        '   image0 "set:my_icons image:badge"\n   mode blend\n   "src alpha" 1\n   {\n'
+        "    TextWidgetClass TabBadgeText {\n     visible 1\n     ignorepointer 1\n     position 0 0\n     size 18 18\n"
+    ) in text
+    assert '     "exact text size" 10\n' in text and '     "text halign" center\n' in text
+    assert clean(text) == []
+
+
+def test_header_is_a_row_of_icon_title_and_actions():
+    out = build(page({"header": {"icon": "tab_contacts", "title": {"name": "ContactsHeader"}, "actions": [
+        {"button": {"name": "BtnHide", "w": 195, "font": "small"}},
+        {"button": {"name": "BtnHideContacts", "w": 195, "font": "small"}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    # 34 high; the 22-unit icon is centred: y = 20 + (34 - 22) / 2 = 26
+    assert "  ImageWidgetClass ContactsHeaderIcon {\n   visible 1\n   ignorepointer 1\n   position 20 26\n   size 22 22\n" in text
+    assert "   color 0.31 0.71 0.91 1\n" in text
+    # icon 22 + gap 10 -> title at x 52, width 600 - 22 - 195 - 195 - 3 gaps of 10 = 158
+    assert "  TextWidgetClass ContactsHeader {\n   visible 1\n   ignorepointer 1\n   position 52 20\n   size 158 34\n" in text
+    assert '   "exact text size" 18\n' in text
+    assert "  ButtonWidgetClass BtnHide {\n   visible 1\n   position 220 20\n   size 195 34\n" in text
+    assert "  ButtonWidgetClass BtnHideContacts {\n   visible 1\n   position 425 20\n   size 195 34\n" in text
+    assert clean(text) == []
+    with pytest.raises(LayoutGenError, match="header needs title"):
+        build(page({"header": {"icon": "x"}}))
+
+
+def test_hbox_centres_a_child_that_declares_its_own_height():
+    out = build(page({"hbox": {"h": 40, "children": [
+        {"panel": {"name": "Tall", "w": 100, "color": "$panel"}},
+        {"panel": {"name": "Short", "w": 100, "h": 20, "color": "$panel"}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "PanelWidgetClass Tall {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 100 40\n" in text
+    assert "PanelWidgetClass Short {\n   visible 1\n   ignorepointer 1\n   position 120 30\n   size 100 20\n" in text
+
+
+def test_a_screen_root_is_proportional_and_holds_anchored_exact_children():
+    out = build_layout({"layout": "oz_menu", "root": {"frame": {"name": "Root", "size": "screen", "priority": 2, "children": [
+        {"panel": {"name": "Backdrop", "size": "fill", "color": "$none", "priority": 1}},
+        {"frame": {"name": "Device", "anchor": "center", "size": [1403, 590], "priority": 2}}]}}},
+        tokens(), "ui/MyMod/oz_menu.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/oz_menu.layout"]
+    assert "FrameWidgetClass Root {\n visible 1\n position 0 0\n size 1 1\n hexactpos 1\n vexactpos 1\n hexactsize 0\n vexactsize 0\n priority 2\n" in text
+    assert "  PanelWidgetClass Backdrop {\n   visible 1\n   ignorepointer 1\n   position 0 0\n   size 1 1\n   hexactpos 1\n   vexactpos 1\n   hexactsize 0\n   vexactsize 0\n" in text
+    assert "  FrameWidgetClass Device {\n   visible 1\n   halign center_ref\n   valign center_ref\n   position 0 0\n   size 1403 590\n" in text
+    assert clean(text) == []
+    with pytest.raises(LayoutGenError, match="fill needs an exact ancestor"):
+        build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", "children": [
+            {"panel": {"name": "P", "w": "fill", "h": 10, "color": "$none"}}]}}}, tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+    with pytest.raises(LayoutGenError, match="only a frame root can be the whole screen"):
+        build_layout({"layout": "x", "root": {"panel": {"name": "R", "size": "screen"}}}, tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+
+
+def test_a_button_root_is_bare():
+    out = build_layout({"layout": "oz_tab", "root": {"button": {"name": "MyTab", "size": [60, 60], "children": [
+        {"panel": {"name": "TabActive", "size": "fill", "color": "$pick", "hidden": True}}]}}},
+        tokens(), "ui/MyMod/oz_tab.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/oz_tab.layout"]
+    assert text.splitlines()[1] == "ButtonWidgetClass MyTab {"
+    assert ' text ""\n' in text and "MyTabEdge" not in text and "MyTabText" not in text
+    assert clean(text) == []
+
+
+def test_a_list_may_hold_static_children_in_its_spacer():
+    out = build(page({"list": {"name": "PostScroll", "stack": "PostStack", "size": [400, 300], "children": [
+        {"text": {"name": "PostBody", "plain": True, "font": "body"}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "    WrapSpacerWidgetClass PostStack {\n" in text
+    assert "      MultilineTextWidgetClass PostBody {\n       visible 1\n       ignorepointer 1\n       position 0 0\n       size 1 20\n       hexactpos 1\n       vexactpos 1\n       hexactsize 0\n       vexactsize 1\n" in text
+    assert clean(text) == []
+
+
+def test_bottom_center_anchor():
+    out = build(page({"label": {"name": "LockHint", "anchor": "bottom-center", "at": [0, 18], "size": [800, 24], "text": "hint"}}))
+    assert "   halign center_ref\n   valign bottom_ref\n   position 0 38\n   size 800 24\n" in out.files["MyMod/gui/layouts/oz_page.layout"]

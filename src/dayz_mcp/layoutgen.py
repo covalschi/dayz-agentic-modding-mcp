@@ -203,7 +203,8 @@ def render(w: W, indent: int = 0) -> str:
 
 
 ANCHORS = {"right": ("right_ref", None), "bottom": (None, "bottom_ref"),
-           "center": ("center_ref", "center_ref"), "bottom-right": ("right_ref", "bottom_ref")}
+           "center": ("center_ref", "center_ref"), "bottom-right": ("right_ref", "bottom_ref"),
+           "bottom-center": ("center_ref", "bottom_ref")}
 
 
 def place(w: W, x: float, y: float, width: float, height: float,
@@ -303,22 +304,28 @@ ALLOWED: dict[str, set[str]] = {
     # second, disagreeing schema for one key -- it admitted `at`/`anchor`,
     # which _build_row rejects, and omitted `click`/`stack`, which it needs.
     "grid":    COMMON | {"cols", "rows", "gap", "children"},
-    "list":    COMMON | {"stack", "rows"},
+    "list":    COMMON | {"stack", "rows", "children"},
     "keypad":  COMMON | {"cols", "rows", "gap", "keys", "font"},
     "label":   COMMON | {"text", "font", "align", "valign"},
     "text":    COMMON | {"text", "font", "align", "plain", "grow"},
     "field":   COMMON | {"text", "font", "lines"},
-    "button":  COMMON | {"text", "font", "bg", "edge", "glyph"},
+    # "children" is a root-only capability (a button root holds page
+    # content the way a frame/panel root does) -- a plain child button
+    # still gets its Edge/Bg/Text idiom from `_b_button`, which never reads it.
+    "button":  COMMON | {"text", "font", "bg", "edge", "glyph", "children"},
     "rule":    COMMON,
     "gap":     COMMON,
     "chip":    COMMON,
     "section": COMMON | {"text", "font"},
-    "image":   COMMON | {"props"},
+    "icon":    COMMON | {"set", "image"},
+    "image":   COMMON | {"file", "stretch", "props"},
+    "badge":   COMMON | {"font"},
+    "header":  COMMON | {"icon", "title", "actions", "gap", "font"},
     "listbox": COMMON | {"font", "props"},
     "preview": COMMON | {"props"},
     "raw":     COMMON | {"class", "props", "children"},
 }
-ROOT_KINDS = ("frame", "panel")
+ROOT_KINDS = ("frame", "panel", "button")
 
 
 def _unpack(desc, file: str, path: str) -> tuple[str, dict]:
@@ -472,10 +479,8 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
         raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", ctx.file, path)
     if placed is None:
         ax, ay = ctx.tokens.pair(attrs.get("at", [0, 0]), ctx.file, path, "at")
-        if anchor == "center":
-            x, y = ax, ay
-        else:
-            x, y = ax + box.ox, ay + box.oy
+        x = ax if anchor in ("center", "bottom-center") else ax + box.ox
+        y = ay if anchor == "center" else ay + box.oy
         forced = (None, None)
         if on_page and "at" in attrs and not attrs.get("hidden"):
             ctx.note(path, "`at` on a page child -- build the page with vbox/hbox")
@@ -692,7 +697,12 @@ def _stackbox(attrs, ctx, box, path, x, y, forced, anchor, priority, vertical: b
                 placed = (base_x, base_y + cursor, None if own_w else width, size)
             else:
                 own_h = "h" in kattrs or "size" in kattrs
-                placed = (base_x + cursor, base_y, size, None if own_h else height)
+                cy = base_y
+                if own_h:
+                    declared_h = _declared(kattrs, "h", ctx, f"{path}.{i}")
+                    if isinstance(declared_h, float) and declared_h < height:
+                        cy = base_y + (height - declared_h) / 2
+                placed = (base_x + cursor, cy, size, None if own_h else height)
             out += emit(kid, ctx, inner, f"{path}.{i}", i, placed=placed)
         cursor += size + gap
     if frame is not None:
@@ -1035,6 +1045,8 @@ def _b_list(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     place(spacer, 0, 0, 1, 0, hexact=False)
     spacer.set("priority", "0").set("Padding", "0").set("Margin", "0").set(key("Size To Content V"), "1")
     scroll.children = [spacer]
+    if attrs.get("children"):
+        spacer.children = _engine_children(attrs, ctx, Box(width - SCROLLBAR_UNITS, None, prop_w=True, engine=True), path, None)
     rows = attrs.get("rows", {})
     if not isinstance(rows, dict):
         raise LayoutGenError("rows must be an object of {file: {row: ...}}", ctx.file, path)
@@ -1067,10 +1079,6 @@ def _b_listbox(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]
     return _b_raw_like("TextListboxWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
 
 
-def _b_image(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
-    return _b_raw_like("ImageWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
-
-
 def _b_preview(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     worst = max(ctx.chain) if ctx.chain else 0
     if worst > PREVIEW_PRIORITY_MAX:
@@ -1089,8 +1097,104 @@ def _b_raw(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 
 BUILDERS.update({
     "stack": _b_stack, "hrow": _b_hrow, "grid": _b_grid, "list": _b_list, "keypad": _b_keypad,
-    "listbox": _b_listbox, "image": _b_image, "preview": _b_preview, "raw": _b_raw,
+    "listbox": _b_listbox, "preview": _b_preview, "raw": _b_raw,
 })
+
+
+def _iconset(attrs: dict, ctx: Ctx, path: str) -> str:
+    iconset = attrs.get("set") or ctx.tokens.device.get("iconset")
+    if not isinstance(iconset, str) or not iconset:
+        raise LayoutGenError("icon needs set, or device.iconset in the tokens", ctx.file, path)
+    return iconset
+
+
+def _b_icon(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A sprite of an imageset, alpha-blended and tinted by `color`."""
+    image = attrs.get("image")
+    if not isinstance(image, str) or not image:
+        raise LayoutGenError("icon needs image: the sprite's name in the set", ctx.file, path)
+    iconset = _iconset(attrs, ctx, path)
+    w = _common_leaf("ImageWidgetClass", attrs, ctx, path)
+    width, height, _hx, _vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None, exact_only=True)
+    place(w, x, y, width, height, anchor=anchor)
+    _color(w, attrs, ctx, path, "$text")
+    w.set("priority", fmt(priority))
+    w.set("image0", quoted(f"set:{iconset} image:{image}"))
+    w.set("mode", "blend").set(key("src alpha"), "1")
+    return [w]
+
+
+def _b_image(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A texture file: `mode blend` + `"src alpha" 1` so alpha counts, and
+    `"stretch mode" stretch_w_h` so the picture is scaled, not cropped --
+    the three ImageWidget traps of gui-layouts.md §12, written once."""
+    file = attrs.get("file")
+    if not isinstance(file, str) or not file.endswith(".paa"):
+        raise LayoutGenError("image needs file: a .paa path relative to the pbo prefix", ctx.file, path)
+    w = _common_leaf("ImageWidgetClass", attrs, ctx, path)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
+    place(w, x, y, width, height, hx, vx, anchor)
+    _color(w, attrs, ctx, path, "$white")
+    w.set("priority", fmt(priority))
+    w.set("image0", quoted(file)).set("mode", "blend").set(key("src alpha"), "1")
+    if attrs.get("stretch", True):
+        w.set(key("stretch mode"), "stretch_w_h")
+    _props(w, attrs.get("props"), ctx, path)
+    return [w]
+
+
+def _b_badge(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A count on a coloured disc (the set's `badge` sprite): <Name> holds
+    <Name>Text. Hidden until a script shows it with a number."""
+    iconset = _iconset(attrs, ctx, path)
+    name = ctx.claim(attrs.get("name", ""), path)
+    disc = W("ImageWidgetClass", name, comment=str(attrs.get("note", "")))
+    disc.set("visible", "0" if attrs.get("hidden", True) else "1").set("ignorepointer", "1")
+    sized = dict(attrs)
+    sized.setdefault("size", [18, 18])
+    width, height, _hx, _vx = _size_leaf(sized, ctx, box, path, x, y, forced, anchor, None, exact_only=True)
+    place(disc, x, y, width, height, anchor=anchor)
+    _color(disc, attrs, ctx, path, "$alert")
+    disc.set("priority", fmt(priority))
+    disc.set("image0", quoted(f"set:{iconset} image:badge")).set("mode", "blend").set(key("src alpha"), "1")
+    label = W("TextWidgetClass", ctx.claim(name + "Text", path))
+    label.set("visible", "1").set("ignorepointer", "1")
+    place(label, 0, 0, width, height)
+    rgba, _ = ctx.tokens.color_of("$screen", ctx.file, path)
+    label.set("color", color_prop(rgba)).set("priority", "0")
+    _text_font(label, {"font": attrs.get("font", "tiny")}, ctx, path, "tiny")
+    label.set(key("text halign"), "center").set(key("text valign"), "center")
+    disc.children = [label]
+    return [disc]
+
+
+def _b_header(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A page head: the page's icon, its title, its actions -- one row for
+    every page, so switching tabs moves nothing."""
+    title = attrs.get("title")
+    if not isinstance(title, dict) or not title.get("name"):
+        raise LayoutGenError('header needs title: {"name": ..., ...label attributes}', ctx.file, path)
+    children = []
+    if attrs.get("icon"):
+        children.append({"icon": {"name": str(title["name"]) + "Icon", "image": attrs["icon"],
+                                  "size": [22, 22], "color": "$accent"}})
+    label = dict(title)
+    label.setdefault("font", attrs.get("font", "title"))
+    label.setdefault("color", "$accent")
+    label["w"] = "fill"
+    children.append({"label": label})
+    actions = attrs.get("actions", [])
+    if not isinstance(actions, list):
+        raise LayoutGenError("header actions must be a list of nodes", ctx.file, path)
+    children += actions
+    row = {k: v for k, v in attrs.items() if k in ("name", "note", "hidden", "priority", "w", "h", "size", "anchor", "at")}
+    row.setdefault("h", "$size.header")
+    row["gap"] = attrs.get("gap", "$space.gap")
+    row["children"] = children
+    return _stackbox(row, ctx, box, path, x, y, forced, anchor, priority, vertical=False)
+
+
+BUILDERS.update({"icon": _b_icon, "image": _b_image, "badge": _b_badge, "header": _b_header})
 
 
 def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> Emitted:
@@ -1116,9 +1220,8 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
         raise LayoutGenError(f"root must be a frame or a panel, not {kind}", file, "root")
     if "size" not in attrs or attrs["size"] == "fill":
         raise LayoutGenError("root needs an exact size [w, h]", file, "root")
-    width, height = tokens.pair(attrs["size"], file, "root")
-    root = W("FrameWidgetClass" if kind == "frame" else "PanelWidgetClass",
-             ctx.claim(attrs.get("name", name), "root"), comment=str(attrs.get("note", "")))
+    root_cls = {"frame": "FrameWidgetClass", "panel": "PanelWidgetClass", "button": "ButtonWidgetClass"}[kind]
+    root = W(root_cls, ctx.claim(attrs.get("name", name), "root"), comment=str(attrs.get("note", "")))
     root.set("visible", "0" if attrs.get("hidden") else "1")
     # The root places itself the same way any other node does: a window
     # centred in its host is `anchor: "center"`, not a proportional position
@@ -1126,15 +1229,26 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     anchor = attrs.get("anchor", "")
     if anchor and anchor not in ANCHORS:
         raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", file, "root")
-    ax, ay = tokens.pair(attrs.get("at", [0, 0]), file, "root", "at")
-    place(root, ax, ay, width, height, anchor=anchor)
+    if attrs.get("size") == "screen":
+        if kind != "frame":
+            raise LayoutGenError("only a frame root can be the whole screen", file, "root")
+        if "inset" in attrs:
+            ctx.note("root", "inset is ignored on a screen root")
+        place(root, 0, 0, 1, 1, hexact=False, vexact=False)
+        inner = Box(None, None)
+    else:
+        width, height = tokens.pair(attrs["size"], file, "root")
+        ax, ay = tokens.pair(attrs.get("at", [0, 0]), file, "root", "at")
+        place(root, ax, ay, width, height, anchor=anchor)
+        inset = tokens.number(attrs.get("inset", 0), file, "root", "inset")
+        inner = Box(width - 2 * inset, height - 2 * inset, ox=inset, oy=inset)
+    if kind == "button":
+        root.set("text", quoted(""))
     if kind == "panel":
         _color(root, attrs, ctx, "root", "$screen")
         root.set("style", PANEL_STYLE)
     if "priority" in attrs:
         root.set("priority", fmt(_priority(attrs, ctx, "root", 0)))
-    inset = tokens.number(attrs.get("inset", 0), file, "root", "inset")
-    inner = Box(width - 2 * inset, height - 2 * inset, ox=inset, oy=inset)
     children = list(attrs.get("children", []))
     if "body" in desc:
         children.append(desc["body"])
