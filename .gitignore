@@ -15,3 +15,7 @@ dayz-mcp.local.toml
 
 # local Claude Code permissions, not part of the product
 .claude/
+
+# the project installs with pip into .venv; uv.lock is left behind by a
+# stray `uv` run, not a file this project's own tooling produces or reads
+uv.lock

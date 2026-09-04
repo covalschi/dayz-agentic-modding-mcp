@@ -785,13 +785,13 @@ def test_ui_gallery_strict_fails_on_any_error(live, monkeypatch, tmp_path):
     assert Path(strict.data["index"]).exists()
 
 
-def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatch):
-    from dayz_mcp.tools import session
-    root = Path(session.profile().root)
-    (root / "preview").mkdir(exist_ok=True)
-    (root / "preview" / "index.json").write_text(json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
-    calls = []
-
+def gallery_fakes(root, calls):
+    """The `ui_preview`/`_restart_client` fake pair every round test below
+    needs: `ui_preview` answers ok() with one bare, unremarkable report and
+    records `("preview", name)`; `_restart_client` succeeds and records
+    `("restart", size, language)`. `calls` collects both in call order so a
+    test can assert the interleaving, not just how many of each happened.
+    Four byte-identical copies of this pair used to live one per test."""
     def fake_preview(**kw):
         from dayz_mcp.errors import ok as _ok
         calls.append(("preview", kw["name"]))
@@ -799,14 +799,27 @@ def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatc
                     "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
 
     def fake_restart(size, timeout, language=None):
-        calls.append(("restart", size))
+        calls.append(("restart", size, language))
         return ""
 
+    return fake_preview, fake_restart
+
+
+def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatch):
+    from dayz_mcp.tools import session
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+    fake_preview, fake_restart = gallery_fakes(root, calls)
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     monkeypatch.setattr(ui, "_restart_client", fake_restart)
     result = ui.ui_gallery(sizes=[[3840, 1600], [1920, 1080]])
     assert result.ok, result.error
-    assert calls == [("restart", (3840, 1600)), ("preview", "t"), ("restart", (1920, 1080)), ("preview", "t")]
+    assert calls == [
+        ("restart", (3840, 1600), None), ("preview", "t"),
+        ("restart", (1920, 1080), None), ("preview", "t"),
+    ]
     assert [e["size"] for e in result.data["entries"]] == ["3840x1600", "1920x1080"]
     # No langs given: every entry still carries the key, empty.
     assert [e["language"] for e in result.data["entries"]] == ["", ""]
@@ -821,17 +834,7 @@ def test_ui_gallery_rounds_are_the_product_of_sizes_and_langs(live, monkeypatch)
     (root / "preview" / "index.json").write_text(
         json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
     calls = []
-
-    def fake_preview(**kw):
-        from dayz_mcp.errors import ok as _ok
-        calls.append(("preview", kw["name"]))
-        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
-                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
-
-    def fake_restart(size, timeout, language=None):
-        calls.append(("restart", size, language))
-        return ""
-
+    fake_preview, fake_restart = gallery_fakes(root, calls)
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     monkeypatch.setattr(ui, "_restart_client", fake_restart)
     result = ui.ui_gallery(sizes=[[3840, 1600], [1920, 1080]], langs=["English", "Russian"])
@@ -850,7 +853,7 @@ def test_ui_gallery_rounds_are_the_product_of_sizes_and_langs(live, monkeypatch)
 
 
 def test_ui_gallery_skips_the_restart_when_a_round_repeats_the_previous_size_and_language(live, monkeypatch):
-    """The "no-op when unchanged" guarantee (`ui.py:944`,
+    """The "no-op when unchanged" guarantee (the predicate
     `if (size, lang) != previous:`) proved by the suite itself rather than by
     reading the code: every OTHER test in this file gives `sizes`/`langs`
     lists whose entries are pairwise distinct, so `itertools.product` never
@@ -864,17 +867,7 @@ def test_ui_gallery_skips_the_restart_when_a_round_repeats_the_previous_size_and
     (root / "preview" / "index.json").write_text(
         json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
     calls = []
-
-    def fake_preview(**kw):
-        from dayz_mcp.errors import ok as _ok
-        calls.append(("preview", kw["name"]))
-        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
-                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
-
-    def fake_restart(size, timeout, language=None):
-        calls.append(("restart", size, language))
-        return ""
-
+    fake_preview, fake_restart = gallery_fakes(root, calls)
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     monkeypatch.setattr(ui, "_restart_client", fake_restart)
     result = ui.ui_gallery(sizes=[[1920, 1080], [1920, 1080], [3840, 1600]])
@@ -895,17 +888,7 @@ def test_ui_gallery_langs_alone_restarts_for_language_only_and_leaves_size_curre
     (root / "preview" / "index.json").write_text(
         json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
     calls = []
-
-    def fake_preview(**kw):
-        from dayz_mcp.errors import ok as _ok
-        calls.append(("preview", kw["name"]))
-        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
-                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
-
-    def fake_restart(size, timeout, language=None):
-        calls.append(("restart", size, language))
-        return ""
-
+    fake_preview, fake_restart = gallery_fakes(root, calls)
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     monkeypatch.setattr(ui, "_restart_client", fake_restart)
     result = ui.ui_gallery(langs=["English", "Russian"])
@@ -916,6 +899,54 @@ def test_ui_gallery_langs_alone_restarts_for_language_only_and_leaves_size_curre
     ]
     assert [e["size"] for e in result.data["entries"]] == ["current", "current"]
     assert [e["language"] for e in result.data["entries"]] == ["English", "Russian"]
+
+
+def test_ui_gallery_labels_each_entry_with_the_language_ui_preview_measured(live, monkeypatch):
+    """`ui_preview` reads the client's own current language and reports it
+    in `result.data["language"]`; the gallery card used to show only the
+    language the ROUND asked for, discarding that measurement -- so a
+    client that had not actually finished switching showed a caption that
+    did not match what its own screenshot shows."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False,
+                    "language": "Russian"})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", lambda size, timeout, language=None: "")
+    result = ui.ui_gallery(langs=["English"])
+    assert result.ok, result.error
+    assert result.data["entries"][0]["language"] == "Russian"
+
+
+def test_ui_gallery_falls_back_to_the_requested_language_when_a_preview_fails(live, monkeypatch):
+    """A failed `ui_preview` call carries `data=None` (`fail()`'s own
+    default -- it never reaches the point where it would set `"language"`),
+    so the gallery must not crash reading `.get("language")` off that, and
+    must still show the round's own requested language rather than going
+    blank."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import fail as _fail
+        return _fail("ui_preview needs a layout, or live=True to look at the open menu")
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", lambda size, timeout, language=None: "")
+    result = ui.ui_gallery(langs=["English"])
+    assert result.ok, result.error
+    entry = result.data["entries"][0]
+    assert entry["ok"] is False
+    assert entry["language"] == "English"
 
 
 def test_ui_gallery_refuses_an_unknown_language_before_any_restart(live, monkeypatch):
