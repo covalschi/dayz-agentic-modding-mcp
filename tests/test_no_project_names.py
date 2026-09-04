@@ -84,14 +84,16 @@ def offending_tokens(text: str, *, is_python: bool = False) -> set[str]:
 # repository -- one of them a module docstring in `src/` -- while the guard
 # above watched for `@`-prefixed folders alone. Case-SENSITIVE and whole
 # tokens: these are spellings, not words, and a lowercase `oz` on its own is
-# ordinary text. Assembled at runtime for the same reason every token in the
-# tests below is: spelled out, each would be an offender sitting in a file
-# this very sweep reads.
-OWNER_TOKEN = re.compile("|".join([
-    r"\bOpen" + r"Zone\w*",
-    r"\bOZ" + r"_\w+",
-    r"\boz" + r"_pda\w*",
-]))
+# ordinary text.
+#
+# Split into (head, tail) pairs joined at RUN time for the same reason every
+# token in the tests below is assembled: spelled out, each would be an
+# offender sitting in a file this very sweep reads. The pairs are joined by a
+# generator rather than by `"Open" + "Zone..."` on purpose -- the compiler
+# folds two adjacent literals into one, and the whole token would then sit
+# spelled out in this file's own .pyc, where a grep across the tree finds it.
+OWNER_PREFIXES = (("Open", r"Zone\w*"), ("OZ", r"_\w+"), ("oz", r"_pda\w*"))
+OWNER_TOKEN = re.compile("|".join(r"\b" + head + tail for head, tail in OWNER_PREFIXES))
 #: Where the owner's prefixes are swept: the server, its tests, and the one
 #: document that describes it to a stranger. Plan folders and notes are the
 #: owner's own workspace and name his projects on purpose.
@@ -155,7 +157,8 @@ def test_the_owner_prefix_guard_still_bites():
     """Each of the three shapes that actually leaked, and one generic name
     that must stay legal -- otherwise the guard could pass by matching
     nothing at all."""
-    for token in ("Open" + "Zone_PDA", "OZ" + "_PdaMenu", "oz" + "_pda_tab"):
+    for head, tail in (("Open", "Zone_PDA"), ("OZ", "_PdaMenu"), ("oz", "_pda_tab")):
+        token = head + tail  # joined at run time -- see OWNER_PREFIXES
         assert owner_tokens(f"the layout {token} sits here") == {token}, token
         assert owner_tokens(f'"{token}/gui/layouts/x.layout"') == {token}, token
     assert owner_tokens("MyMod/gui/layouts/tab.layout MyPage ContactRow") == set()
