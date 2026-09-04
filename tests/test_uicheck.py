@@ -239,3 +239,39 @@ def test_overflow_beyond_the_border_and_spacer_tolerances_still_flags():
              node("0.0", "TextWidget", "Label", "10 10 205 20")]
     issues, _ = check(nodes, HOST, scale=1.0)
     assert rules(issues) == [("overflow", "Label")]
+
+
+def test_text_overflow_trusts_a_self_sized_width_from_the_source():
+    src = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  TextWidgetClass Auto {\n   size 0 25\n   "size to text h" 1\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "TextWidget", "Auto", "10 10 174 34", text_size=(188, 34))]
+    assert rules(check(nodes, HOST, source=src)[0]) == []
+
+
+def test_text_overflow_judges_only_the_height_of_wrapped_text():
+    src = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  RichTextWidgetClass Body {\n   size 400 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "RichTextWidget", "Body", "10 10 593 82", text_size=(636, 82))]
+    assert rules(check(nodes, HOST, source=src)[0]) == []
+    fixed = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  RichTextWidgetClass Body {\n   size 400 20\n   wrap 1\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "RichTextWidget", "Body", "10 10 593 40", text_size=(636, 82))]
+    assert rules(check(nodes, HOST, source=fixed)[0]) == [("text_overflow", "Body")]
+
+
+def test_text_overflow_still_fires_without_flags():
+    src = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  TextWidgetClass T {\n   size 100 25\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "TextWidget", "T", "10 10 100 25", text_size=(150, 25))]
+    assert rules(check(nodes, HOST, source=src)[0]) == [("text_overflow", "T")]
+
+
+def test_a_fixture_row_is_judged_by_its_own_source_found_by_name():
+    page = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    row = parse_layout('WrapSpacerWidgetClass OZ_ChatLine {\n size 1 0\n {\n  RichTextWidgetClass LineText {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "List", "0 0 600 100"),
+             node("0.0", "WrapSpacerWidget", "OZ_ChatLine", "0 0 600 80"),
+             node("0.0.0", "RichTextWidget", "LineText", "0 20 590 52", text_size=(815, 52))]
+    assert rules(check(nodes, HOST, source=page)[0]) == [("text_overflow", "LineText")]
+    assert rules(check(nodes, HOST, source=page, sources=[row])[0]) == []

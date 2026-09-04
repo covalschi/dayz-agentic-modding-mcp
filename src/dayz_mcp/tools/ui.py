@@ -573,6 +573,32 @@ def _source_for(layout: str):
         return None, text, f"source does not parse: {exc}"
 
 
+def _fixture_sources(fixture, root: Path) -> tuple[list, list[str]]:
+    """The parsed sources of every layout a fixture's `add` ops bring in,
+    for the checks to judge fixture rows by their own flags. Unreadable or
+    foreign layouts are named in the notes, never fatal: the fixture itself
+    is validated by the bridge."""
+    text, _note = _fixture_text(fixture, root)
+    if not text:
+        return [], []
+    try:
+        ops = json.loads(text).get("ops", [])
+    except (json.JSONDecodeError, AttributeError):
+        return [], []
+    found, notes, seen = [], [], set()
+    for op in ops if isinstance(ops, list) else []:
+        layout = op.get("layout") if isinstance(op, dict) and op.get("op") == "add" else None
+        if not isinstance(layout, str) or layout in seen:
+            continue
+        seen.add(layout)
+        node, _text, why = _source_for(layout.replace("\\", "/"))
+        if node is None:
+            notes.append(f"fixture row {layout}: {why}")
+        else:
+            found.append(node)
+    return found, notes
+
+
 def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = "",
                live: bool = False, name: str = "",
                timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
@@ -621,12 +647,16 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         # client from before this call started, not a failure of this one.
         ui_unload(timeout=timeout)
         source, text, why = None, None, ""
+        # live=True walks the open menu directly -- ui_load never runs, so
+        # there is no fixture whose rows the checks would need sources for.
+        extra_sources, extra_notes = [], []
         first = ui_tree(root="menu", timeout=timeout)
         root = "menu"
     else:
         if not layout:
             return fail("ui_preview needs a layout, or live=True to look at the open menu")
         source, text, why = _source_for(layout)
+        extra_sources, extra_notes = _fixture_sources(fixture, Path(prof.root))
         if text is not None:
             findings = lint_layout(text, layout, extra_classes=prof.build.layout_classes)
             refusal = next((f for f in findings if f.severity == REFUSE), None)
@@ -663,6 +693,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     scale, scale_note = _window_scale(pid)
     shot = winui.shot(pid, out_dir / "shot.png", rect=rect)
     notes: list[str] = list(lint_notes)
+    notes += extra_notes
     if scale_note:
         notes.append(scale_note)
     shot_name = "shot.png" if shot.ok else None
@@ -673,7 +704,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
 
     if why:
         notes.append(why)
-    issues, check_notes = uicheck.check(nodes, rect, source, scale=scale)
+    issues, check_notes = uicheck.check(nodes, rect, source, scale=scale, sources=extra_sources)
     notes += check_notes
     issue_dicts = [i.to_dict() for i in issues]
     meta = {"layout": layout or first.data.get("ui", {}).get("ui_menu", "menu"), "host": rect,

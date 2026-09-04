@@ -21,6 +21,7 @@ what draws a frame behind an edit box.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 
 from .layoutparse import LayoutNode
@@ -191,8 +192,14 @@ def _proportional_magnitude_note(src: LayoutNode | None) -> str:
     return ""
 
 
+def _flag(src, key: str) -> bool:
+    """Whether the SOURCE node sets `key` to 1 (`"size to text h" 1`, `wrap 1`)."""
+    return src is not None and src.prop(key) == ["1"]
+
+
 def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
-          source: LayoutNode | None = None, scale: float = 1.0) -> tuple[list[Issue], list[str]]:
+          source: LayoutNode | None = None, scale: float = 1.0,
+          sources: Iterable[LayoutNode] = ()) -> tuple[list[Issue], list[str]]:
     issues: list[Issue] = []
     notes: list[str] = []
     shown = {n["path"]: n for n in nodes if "path" in n and n.get("shown", True) and rect_of(n)}
@@ -202,6 +209,17 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         if parent is not None:
             children.setdefault(parent, []).append(n)
     source_by_path = {p: s for p, s in source.walk()} if source else {}
+    # Rows a fixture (or a script) adds have no path in the page's source;
+    # their own source is looked up by NAME (unique within a file -- the
+    # layout-dup-name lint sees to that), page first, then the extra sources.
+    source_by_name: dict[str, LayoutNode] = {}
+    for tree in ([source] if source else []) + list(sources):
+        for _p, s in tree.walk():
+            source_by_name.setdefault(s.name, s)
+
+    def src_of(path: str, name: str):
+        found = source_by_path.get(path)
+        return found if found is not None else source_by_name.get(name)
 
     for path, n in shown.items():
         rect = rect_of(n)
@@ -250,13 +268,26 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                 issues.append(Issue("overflow", ERROR, path, name, cls,
                                     f"{rect} pokes out of its parent {parent['name']!r} {prect}", parent_path))
 
+        # Measured on the stand, 2026-09-04: the engine's GetTextSize
+        # overstates the width of a self-sized text ("size to text h" 1) by
+        # about 9%, and for a wrapped text (`wrap 1`) reports the width the
+        # text would take UNWRAPPED, not the wrapped width that actually fits
+        # the box -- so the width axis is not trusted for either flag, and
+        # the height axis is not trusted when "size to text v" 1 says the
+        # box grows to fit it instead of clipping it.
         text_size = n.get("text_size")
-        if text_size and (text_size[0] > w + OVERFLOW_TOLERANCE_PX or text_size[1] > h + OVERFLOW_TOLERANCE_PX):
-            issues.append(Issue("text_overflow", ERROR, path, name, cls,
-                                f"the text measures {text_size[0]}x{text_size[1]} px in a {w}x{h} px box"))
+        if text_size:
+            src = src_of(path, name)
+            free_w = _flag(src, "size to text h") or _flag(src, "wrap")
+            free_h = _flag(src, "size to text v")
+            too_wide = text_size[0] > w + OVERFLOW_TOLERANCE_PX and not free_w
+            too_tall = text_size[1] > h + OVERFLOW_TOLERANCE_PX and not free_h
+            if too_wide or too_tall:
+                issues.append(Issue("text_overflow", ERROR, path, name, cls,
+                                    f"the text measures {text_size[0]}x{text_size[1]} px in a {w}x{h} px box"))
 
         if cls == EDITBOX_CLASS:
-            src = source_by_path.get(path)
+            src = src_of(path, name)
             if src is None:
                 unjudged = "editbox_bare: no source layout was given, so edit boxes were not judged"
                 if not source and unjudged not in notes:

@@ -504,6 +504,34 @@ def test_ui_preview_loads_shoots_checks_and_reports(live, monkeypatch):
     assert result.data["emulated"] is False
 
 
+def test_ui_preview_hands_the_fixture_rows_sources_to_the_checks(live, monkeypatch, tmp_path):
+    """The bridge state and the shot are faked the way
+    test_ui_preview_loads_shoots_checks_and_reports fakes them; what is new
+    is a row layout the fixture adds, whose source the checks must see."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 2, "ui_host": "100 50 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Page", rect="100 50 400 300", metrics=""),
+                     node_line(path="0", cls="WrapSpacerWidget", name="List", rect="100 50 400 0", metrics="")],
+    })
+    root = Path(session.profile().root)
+    layouts = root / "MyMod" / "gui" / "layouts"
+    layouts.mkdir(parents=True, exist_ok=True)
+    (layouts / "page.layout").write_text("FrameWidgetClass Page {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n", encoding="utf-8")
+    (layouts / "row.layout").write_text('WrapSpacerWidgetClass Row {\n size 1 0\n {\n  RichTextWidgetClass LineText {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n', encoding="utf-8")
+    seen = {}
+
+    def recording_check(nodes, host, source=None, scale=1.0, sources=()):
+        seen["sources"] = [s.name for s in sources]
+        return [], []
+
+    monkeypatch.setattr(ui.uicheck, "check", recording_check)
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    res = ui.ui_preview("MyMod/gui/layouts/page.layout", host="100 100",
+                        fixture={"ops": [{"op": "add", "layout": "MyMod/gui/layouts/row.layout", "into": "List", "count": 2}]})
+    assert res.ok, res.error
+    assert seen["sources"] == ["Row"]
+
+
 def test_ui_preview_pages_through_a_big_tree(live, monkeypatch):
     first = [node_line(path=str(i), cls="TextWidget", name=f"N{i}", rect=f"{i} 0 10 10") for i in range(300)]
     second = [node_line(path=str(i), cls="TextWidget", name=f"N{i}", rect=f"{i} 0 10 10") for i in range(300, 350)]
