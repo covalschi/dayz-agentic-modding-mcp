@@ -11,9 +11,10 @@ contain child widgets or be special blocks like `ScriptParamsClass { ... }`).
 
 The tree keeps line numbers, because the consumer that matters most is a
 linter, and a finding without a line is a finding nobody fixes. `walk()`
-numbers children the way the bridge's DZMCP_Ui.Walk does -- depth-first, in
-declaration order, dotted indexes, root is "" -- so an engine node and its
-source can be paired by path.
+numbers children depth-first in DECLARATION order, dotted indexes, root is "".
+That is not the order the engine walks them (ascending `priority`, stable --
+measured 2026-09-04), so an engine path is paired with a source node through
+uicheck's priority-sorted walk, never by this index directly.
 """
 from __future__ import annotations
 

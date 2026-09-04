@@ -122,10 +122,12 @@ class DZMCP_Ui
     // Walk depth-first from `node`, recording at most `walk.limit` nodes and
     // counting every one it visits.
     //
-    // Depth-first and in declaration order, so a path recorded now means the
-    // same node in the next walk of an unchanged tree. That is the whole basis
-    // of addressing a widget by path, and it is why the order is not "whatever
-    // the engine hands back".
+    // Depth-first, in the order GetChildren/GetSibling hand the siblings back:
+    // ascending `priority`, stable for equal values (measured 2026-09-04, skill
+    // gui-layouts.md before section 25) -- NOT the declaration order of the
+    // .layout file. The order is fixed for an unchanged tree, so a path recorded
+    // now means the same node in the next walk; pairing a path with its source
+    // node is the eyes' job (uicheck walks the source the same way).
     static void Walk(Widget node, string path, int depth, DZMCP_UiWalk walk)
     {
         if (!node)
