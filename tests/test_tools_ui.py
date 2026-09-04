@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from dayz_mcp import winui
+from dayz_mcp import tools, winui
 from dayz_mcp.bridge.protocol import BridgeState, Command, CommandState
 from dayz_mcp.tools import session, ui
 
@@ -1057,3 +1057,39 @@ def test_ui_gallery_records_a_still_stalled_entry_after_one_retry(live, monkeypa
     assert entry["ok"] is False
     assert "not ticking" in entry["error"]
     assert entry["retried"] is True
+
+
+# --------------------------------------------------------------- layout_build
+
+
+def test_layout_build_generates_the_project_layouts(tmp_path):
+    root = make_project(tmp_path / "proj")
+    (root / "ui").mkdir()
+    (root / "ui" / "tokens.json").write_text(json.dumps({"color": {"text": [1, 1, 1, 1]}, "font": {"body": {"size": 15}}}), encoding="utf-8")
+    (root / "ui" / "MyMod").mkdir()
+    (root / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(
+        {"layout": "oz_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+         "body": {"label": {"name": "T", "h": 20, "text": "Hi", "color": "$text"}}}), encoding="utf-8")
+    session.reset()
+    assert tools.project_open(str(root)).ok
+    res = tools.layout_build()
+    assert res.ok, res.error
+    assert res.data["written"] == ["MyMod/gui/layouts/oz_page.layout"]
+    assert res.data["descriptions"] == ["ui/MyMod/oz_page.json"]
+    assert (root / "MyMod" / "gui" / "layouts" / "oz_page.layout").is_file()
+    again = tools.layout_build()
+    assert again.data["written"] == [] and again.data["unchanged"] == ["MyMod/gui/layouts/oz_page.layout"]
+    assert tools.layout_build(mod="Other").ok is False
+
+
+def test_layout_build_refuses_with_the_description_and_node(tmp_path):
+    root = make_project(tmp_path / "proj")
+    (root / "ui").mkdir()
+    (root / "ui" / "tokens.json").write_text("{}", encoding="utf-8")
+    (root / "ui" / "MyMod").mkdir()
+    (root / "ui" / "MyMod" / "bad.json").write_text('{"layout": "bad", "root": {"frame": {"name": "R", "size": [10, 10]}}, "body": {"nope": {}}}', encoding="utf-8")
+    session.reset()
+    assert tools.project_open(str(root)).ok
+    res = tools.layout_build()
+    assert not res.ok and "ui/MyMod/bad.json root.0: unknown primitive 'nope'" in res.error
+    assert not (root / "MyMod" / "gui").exists()

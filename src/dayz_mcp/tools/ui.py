@@ -41,6 +41,7 @@ from .. import uicheck, uireport
 from .. import winui
 from ..bridge.channel import CLIENT_CMD_FILENAME, CLIENT_STATE_FILENAME, Channel
 from ..errors import Result, fail, ok
+from ..layoutgen import LayoutGenError, build_project
 from ..layoutlint import lint_layout
 from ..layoutparse import LayoutSyntaxError, parse_layout
 from ..lint import REFUSE, WARN
@@ -860,3 +861,34 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     index_path.write_text(uireport.render_gallery(entries), encoding="utf-8")
     failed = sum(1 for e in entries if not e["ok"])
     return ok({"dir": str(out_dir), "index": str(index_path), "entries": entries, "failed": failed})
+
+
+def layout_build(mod: str = "") -> Result:
+    """Generate every .layout described under `ui/<Mod>/` from `ui/tokens.json`.
+
+    A description is one JSON file per layout (spec 2026-09-04 §3.3): a page
+    is containers and tokens, and every number the engine cannot derive --
+    the remainder a `fill` takes, the width of a row under a scrollbar -- is
+    derived here once. Only files that differ are written (LF endings); the
+    first bad description refuses the whole call with its file, node and
+    reason, and nothing is written.
+
+    `mod` limits the build to one of the project's mods; empty builds all.
+    `mod_lint` refuses a build whose generated file is behind its description
+    (layout-stale), so run this before `mod_build` after editing a
+    description. Until the MCP server is restarted, the same build is
+    `python -m dayz_mcp.layoutgen <project root> [mod]`.
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    prof = session.profile()
+    if mod and mod not in prof.build.mods:
+        return fail(f"{mod!r} is not a mod of this project",
+                    hint="the project declares: " + ", ".join(prof.build.mods))
+    try:
+        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod)
+    except LayoutGenError as exc:
+        return fail(f"refused: {exc}", hint="fix the description under ui/; nothing was written")
+    return ok({"written": report.written, "unchanged": report.unchanged, "notes": report.notes,
+               "descriptions": sorted(set(report.sources.values()))})
