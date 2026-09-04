@@ -533,7 +533,7 @@ def _b_gap(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     it must say its `w`."""
     w = W("PanelWidgetClass", ctx.gap_name(path)).set("visible", "1").set("ignorepointer", "1")
     width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, 0)
-    place(w, x, y, width, height, hx, vx)
+    place(w, x, y, width, height, hx, vx, anchor)
     rgba, _ = ctx.tokens.color_of("$none", ctx.file, path)
     return [w.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)]
 
@@ -549,7 +549,7 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
 
     `file` is the description's project-relative path (named in errors and
     in the GENERATED header); `layout_dir` is where the files go
-    (`OpenZone_PDA/gui/layouts`), so the keys of `files` are project-relative.
+    (`MyMod/gui/layouts`), so the keys of `files` are project-relative.
     """
     if not isinstance(desc, dict):
         raise LayoutGenError("a description is a JSON object", file)

@@ -198,3 +198,11 @@ def test_literal_colors_and_fonts_are_allowed_but_noted():
         "ui/MyMod/oz_page.json root.0: color given as a literal -- use a $color token",
         "ui/MyMod/oz_page.json root.0: font given as a literal -- use a $font token",
     ]
+
+
+def test_a_gap_keeps_its_anchor():
+    out = build(page({"frame": {"name": "Row", "size": [300, 40], "children": [
+        {"gap": {"anchor": "right", "at": [10, 0], "w": 20, "h": 5}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "PanelWidgetClass Gap1 {\n     visible 1\n     ignorepointer 1\n     halign right_ref\n     position 10 0\n     size 20 5\n" in text
+    assert clean(text) == []
