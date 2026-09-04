@@ -305,9 +305,58 @@ def test_text_wraps_and_sizes_its_height_to_the_text():
 def test_section_writes_bar_label_and_rule():
     out = build(page({"section": {"name": "SecSpZ", "w": 560, "text": "#STR_SPAWNS"}}))
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
-    assert "PanelWidgetClass SecSpZBar {\n   visible 1\n   ignorepointer 1\n   position 20 24\n   size 3 16\n" in text
-    assert "TextWidgetClass SecSpZLbl {\n   visible 1\n   ignorepointer 1\n   position 32 20\n   size 548 24\n" in text
-    assert "PanelWidgetClass SecSpZRule {\n   visible 1\n   ignorepointer 1\n   position 20 49\n   size 560 1\n" in text
+    assert ("  FrameWidgetClass SecSpZ {\n   visible 1\n   position 20 20\n   size 560 30\n"
+            "   hexactpos 1\n   vexactpos 1\n   hexactsize 1\n   vexactsize 1\n   priority 0\n   {\n") in text
+    assert "    PanelWidgetClass SecSpZBar {\n     visible 1\n     ignorepointer 1\n     position 0 4\n     size 3 16\n" in text
+    assert "    TextWidgetClass SecSpZLbl {\n     visible 1\n     ignorepointer 1\n     position 12 0\n     size 548 24\n" in text
+    assert "    PanelWidgetClass SecSpZRule {\n     visible 1\n     ignorepointer 1\n     position 0 29\n     size 560 1\n" in text
+    assert clean(text) == []
+
+
+SHEET = {"frame": {"name": "Sheet", "size": [640, 518]}}
+#: The edge sibling per anchor: its position, and the alignments it inherits.
+EDGE_ANCHORS = [
+    ("right", "19 19", ("halign right_ref",)),
+    ("bottom", "19 19", ("valign bottom_ref",)),
+    ("center", "20 20", ("halign center_ref", "valign center_ref")),
+    ("bottom-right", "19 19", ("halign right_ref", "valign bottom_ref")),
+]
+
+
+@pytest.mark.parametrize("anchor, edge_pos, aligns", EDGE_ANCHORS)
+def test_a_panel_edge_offsets_only_the_axes_the_anchor_does_not_centre(anchor, edge_pos, aligns):
+    """`halign right_ref position X` puts the widget X units INSIDE the
+    parent's right edge, so a border one unit outside the panel is still
+    `X - 1` with a size two units larger -- the same arithmetic as the
+    unanchored case. `center_ref` is the exception: it measures from the
+    middle, where growing by 2 is the whole of it and the -1 would push the
+    border a unit up and left, leaving no border at all on the other two
+    sides (verified against the generated file, 2026-09-04)."""
+    out = build(page({"panel": {"name": "Card", "anchor": anchor, "at": [20, 20], "size": [200, 100],
+                                "color": "$panel", "edge": True}}, root=SHEET))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    edge = text.split("PanelWidgetClass CardEdge {")[1].split("}")[0]
+    card = text.split("PanelWidgetClass Card {")[1].split("}")[0]
+    for align in aligns:
+        assert align in edge and align in card
+    assert f" position {edge_pos}\n" in edge and " size 202 102\n" in edge
+    assert " position 20 20\n" in card and " size 200 100\n" in card
+    assert clean(text) == []
+
+
+def test_an_anchored_section_moves_as_one_piece():
+    """The bar, the label and the rule are placed INSIDE the section's own
+    frame, so their offsets are the same whatever the anchor is. As three
+    anchored siblings they each measured from the anchored edge, and under
+    `right` the label ended up entirely to the LEFT of the bar it follows."""
+    out = build(page({"section": {"name": "Sec", "anchor": "right", "at": [20, 20], "w": 560,
+                                  "text": "#STR_SPAWNS"}}, root=SHEET))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  FrameWidgetClass Sec {\n   visible 1\n   halign right_ref\n   position 20 20\n   size 560 30\n" in text
+    assert "    PanelWidgetClass SecBar {\n     visible 1\n     ignorepointer 1\n     position 0 4\n     size 3 16\n" in text
+    assert "    TextWidgetClass SecLbl {\n     visible 1\n     ignorepointer 1\n     position 12 0\n     size 548 24\n" in text
+    assert "    PanelWidgetClass SecRule {\n     visible 1\n     ignorepointer 1\n     position 0 29\n     size 560 1\n" in text
+    assert "halign right_ref" not in text.split("FrameWidgetClass Sec {")[1].split("{", 1)[1]
     assert clean(text) == []
 
 

@@ -495,7 +495,17 @@ def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
             raise LayoutGenError("edge needs an exact size", ctx.file, path)
         edge = W("PanelWidgetClass", ctx.claim(w.name + "Edge", path))
         edge.set("visible", "0" if attrs.get("hidden") else "1").set("ignorepointer", "1")
-        place(edge, x - 1, y - 1, width + 2, height + 2, anchor=anchor)
+        # A border one unit outside the panel on every side. `right_ref` and
+        # `bottom_ref` measure INTO the parent from that edge, so a position
+        # one unit smaller still moves the border outwards there, exactly as
+        # it does for an unanchored top-left one. `center_ref` measures from
+        # the middle: growing by 2 is the whole of it, and the -1 would push
+        # the border off-centre, leaving a 2-unit border on two sides and
+        # none on the other two (measured 2026-09-04).
+        ha, va = ANCHORS.get(anchor, (None, None))
+        ex = x if ha == "center_ref" else x - 1
+        ey = y if va == "center_ref" else y - 1
+        place(edge, ex, ey, width + 2, height + 2, anchor=anchor)
         rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
         edge.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
         out.append(edge)
@@ -753,31 +763,46 @@ def _b_field(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 
 
 def _b_section(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
-    """A VPP-style section head: <Name>Bar, <Name>Lbl, <Name>Rule."""
+    """A VPP-style section head: a frame <Name> holding <Name>Bar,
+    <Name>Lbl and <Name>Rule at fixed offsets INSIDE it.
+
+    The wrapper is what makes the head survive an anchor. As three anchored
+    siblings the parts each measured from the anchored edge, so under
+    `right` the bar landed 20 units from the right, the label's right edge
+    32 units from it -- the label entirely to the LEFT of the bar it is
+    supposed to follow -- and the rule spanned a different band again
+    (measured 2026-09-04). Inside the wrapper the offsets are plain top-left
+    numbers and the anchor moves the head as one piece.
+    """
     name = attrs.get("name", "")
     if not name:
         raise LayoutGenError("section needs a name prefix", ctx.file, path)
     width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, 30, exact_only=True)
     if not (hx and vx):
         raise LayoutGenError("section needs an exact size", ctx.file, path)
+    head = W("FrameWidgetClass", ctx.claim(name, path), comment=str(attrs.get("note", "")))
+    head.set("visible", "0" if attrs.get("hidden") else "1")
+    place(head, x, y, width, height, anchor=anchor)
+    head.set("priority", fmt(priority))
     accent, _ = ctx.tokens.color_of("$accent", ctx.file, path)
     rule, _ = ctx.tokens.color_of("$rule", ctx.file, path)
-    bar = W("PanelWidgetClass", ctx.claim(name + "Bar", path), comment=str(attrs.get("note", "")))
+    bar = W("PanelWidgetClass", ctx.claim(name + "Bar", path))
     bar.set("visible", "1").set("ignorepointer", "1")
-    place(bar, x, y + 4, 3, 16, anchor=anchor)
-    bar.set("color", color_prop(accent)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    place(bar, 0, 4, 3, 16)
+    bar.set("color", color_prop(accent)).set("priority", "0").set("style", PANEL_STYLE)
     lbl = W("TextWidgetClass", ctx.claim(name + "Lbl", path))
     lbl.set("visible", "1").set("ignorepointer", "1")
-    place(lbl, x + 12, y, width - 12, 24, anchor=anchor)
+    place(lbl, 12, 0, width - 12, 24)
     _color(lbl, attrs, ctx, path, "$accent")
-    lbl.set("priority", fmt(priority))
+    lbl.set("priority", "1")
     _text_font(lbl, attrs, ctx, path, "header")
     lbl.set(key("text halign"), "left").set(key("text valign"), "center")
     line = W("PanelWidgetClass", ctx.claim(name + "Rule", path))
     line.set("visible", "1").set("ignorepointer", "1")
-    place(line, x, y + height - 1, width, 1, anchor=anchor)
-    line.set("color", color_prop(rule)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
-    return [bar, lbl, line]
+    place(line, 0, height - 1, width, 1)
+    line.set("color", color_prop(rule)).set("priority", "2").set("style", PANEL_STYLE)
+    head.children = [bar, lbl, line]
+    return [head]
 
 
 BUILDERS.update({
