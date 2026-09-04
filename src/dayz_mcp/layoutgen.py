@@ -248,6 +248,7 @@ class Ctx:
     files: dict[str, str] = field(default_factory=dict)
     names: set[str] = field(default_factory=set)
     gaps: int = 0
+    chain: list[int] = field(default_factory=list)
 
     def claim(self, name, path: str) -> str:
         if not isinstance(name, str) or not name:
@@ -282,16 +283,17 @@ class Emitted:
 COMMON = {"name", "note", "hidden", "priority", "anchor", "at", "w", "h", "size", "color"}
 ALLOWED: dict[str, set[str]] = {
     "frame":   COMMON | {"inset", "children"},
-    "panel":   COMMON | {"edge", "click", "children"},
+    "panel":   COMMON | {"edge", "click", "inset", "children"},
     "vbox":    COMMON | {"gap", "children"},
     "hbox":    COMMON | {"gap", "children"},
     "stack":   COMMON | {"children"},
+    "hrow":    COMMON | {"children"},
     "row":     COMMON | {"children"},
     "grid":    COMMON | {"cols", "rows", "gap", "children"},
     "list":    COMMON | {"stack", "rows"},
     "keypad":  COMMON | {"cols", "rows", "gap", "keys", "font"},
     "label":   COMMON | {"text", "font", "align", "valign"},
-    "text":    COMMON | {"text", "font", "align", "plain"},
+    "text":    COMMON | {"text", "font", "align", "plain", "grow"},
     "field":   COMMON | {"text", "font", "lines"},
     "button":  COMMON | {"text", "font", "bg", "edge", "glyph"},
     "rule":    COMMON,
@@ -451,7 +453,12 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
     builder = BUILDERS.get(kind)
     if builder is None:
         raise LayoutGenError(f"{kind} is not implemented", ctx.file, path)
-    return builder(attrs, ctx, box, path, x, y, forced, anchor, _priority(attrs, ctx, path, index))
+    priority = _priority(attrs, ctx, path, index)
+    ctx.chain.append(priority)
+    try:
+        return builder(attrs, ctx, box, path, x, y, forced, anchor, priority)
+    finally:
+        ctx.chain.pop()
 
 
 def _b_frame(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
@@ -483,7 +490,10 @@ def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
         rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
         edge.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
         out.append(edge)
-    inner = Box(width if hx else box.w, height if vx else box.h, prop_w=not hx)
+    inset = ctx.tokens.number(attrs.get("inset", 0), ctx.file, path, "inset")
+    inner_w = width - 2 * inset if hx else box.w
+    inner_h = height - 2 * inset if vx else box.h
+    inner = Box(inner_w, inner_h, prop_w=not hx, ox=inset, oy=inset)
     w.children = _children(attrs, ctx, inner, path)
     return out + [w]
 
@@ -655,9 +665,10 @@ def _b_text(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     w.set("priority", fmt(priority))
     _text_font(w, attrs, ctx, path, "body")
     w.set(key("text halign"), str(attrs.get("align", "left")))
+    w.set(key("text valign"), "top")
     w.set("wrap", "1")
     w.set(key("size to text h"), "0")
-    w.set(key("size to text v"), "1")
+    w.set(key("size to text v"), "1" if attrs.get("grow", True) else "0")
     return [w]
 
 
@@ -766,6 +777,244 @@ BUILDERS.update({
 })
 
 
+ROW_ATTRS = {"name", "note", "h", "click", "stack", "color", "children"}
+#: Property values the engine wants bare (identifiers), not quoted.
+BARE_KEYS = frozenset({"style", "mode", "stretch mode", "text halign", "text valign",
+                       "fixaspect", "halign", "valign", "content_halign", "content_valign"})
+
+
+def _props(w: W, props, ctx: Ctx, path: str) -> W:
+    """Literal `key value` pairs for what the primitives do not model."""
+    if props is None:
+        return w
+    if not isinstance(props, dict):
+        raise LayoutGenError("props must be an object of key: value", ctx.file, path)
+    for k, v in props.items():
+        if isinstance(v, bool):
+            w.set(key(k), "1" if v else "0")
+        elif _is_number(v):
+            w.set(key(k), fmt(v))
+        elif isinstance(v, str):
+            if '"' in v:
+                raise LayoutGenError(f"a quote inside {k!r} hangs the engine's layout parser", ctx.file, path)
+            w.set(key(k), v if k in BARE_KEYS else quoted(v))
+        else:
+            raise LayoutGenError(f"{k}: a prop is a number, a string or a bool", ctx.file, path)
+    return w
+
+
+def _engine_children(attrs: dict, ctx: Ctx, inner: Box, path: str, forced_h) -> list[W]:
+    """Children of an engine container: each at 0 0, one widget apiece."""
+    out: list[W] = []
+    for i, child in enumerate(attrs.get("children", [])):
+        _kind, kattrs = _unpack(child, ctx.file, f"{path}.{i}")
+        if kattrs.get("size") == "fill" or kattrs.get("h") == "fill" or kattrs.get("w") == "fill":
+            raise LayoutGenError("a stack child cannot fill: the container's size is its children's",
+                                 ctx.file, f"{path}.{i}")
+        own_h = "h" in kattrs or "size" in kattrs
+        made = emit(child, ctx, inner, f"{path}.{i}", i, placed=(0.0, 0.0, None, None if own_h else forced_h))
+        if len(made) != 1:
+            raise LayoutGenError("an engine container's child must be one widget", ctx.file, f"{path}.{i}")
+        out += made
+    return out
+
+
+def _b_stack(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("WrapSpacerWidgetClass", attrs, ctx, path, ignore=False)
+    width, _h, hx, _vx = _size_leaf(attrs, ctx, box, path, x, y, (forced[0], 0.0), anchor, 0)
+    place(w, x, y, width, 0, hx, True, anchor)
+    w.set("priority", fmt(priority)).set("Padding", "0").set("Margin", "0").set(key("Size To Content V"), "1")
+    inner = Box(width if hx else box.w, None, prop_w=not hx, engine=True)
+    w.children = _engine_children(attrs, ctx, inner, path, None)
+    return [w]
+
+
+def _b_hrow(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A GridSpacer of one row that sizes itself: children keep their pixel
+    widths, labels may be `auto`, gaps are empty panels."""
+    name = attrs.get("name") or f"HRow{len([n for n in ctx.names if n.startswith('HRow')]) + 1}"
+    w = W("GridSpacerWidgetClass", ctx.claim(name, path), comment=str(attrs.get("note", "")))
+    w.set("visible", "0" if attrs.get("hidden") else "1")
+    height = forced[1] if forced[1] is not None else attrs.get("h")
+    if height is None:
+        raise LayoutGenError("hrow needs h", ctx.file, path)
+    height = ctx.tokens.number(height, ctx.file, path, "h")
+    place(w, x, y, 0, 0, anchor=anchor)
+    kids = list(attrs.get("children", []))
+    w.set("priority", fmt(priority)).set("Padding", "0").set("Margin", "0")
+    w.set(key("Size To Content H"), "1").set(key("Size To Content V"), "1")
+    w.set("Columns", fmt(max(1, len(kids)))).set("Rows", "1")
+    inner = Box(None, height, engine=True)
+    w.children = _engine_children(attrs, ctx, inner, path, height)
+    return [w]
+
+
+def _b_grid(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("GridSpacerWidgetClass", attrs, ctx, path, ignore=False)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None, exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError("grid needs an exact size", ctx.file, path)
+    cols = int(ctx.tokens.number(attrs.get("cols", 1), ctx.file, path, "cols"))
+    rows = int(ctx.tokens.number(attrs.get("rows", 1), ctx.file, path, "rows"))
+    gap = ctx.tokens.number(attrs.get("gap", 0), ctx.file, path, "gap")
+    if cols < 1 or rows < 1:
+        raise LayoutGenError("cols and rows must be at least 1", ctx.file, path)
+    place(w, x, y, width, height, anchor=anchor)
+    w.set("priority", fmt(priority)).set("Padding", fmt(gap)).set("Margin", "0")
+    w.set("Columns", fmt(cols)).set("Rows", fmt(rows))
+    cell_w = (width - gap * (cols - 1)) / cols
+    cell_h = (height - gap * (rows - 1)) / rows
+    inner = Box(cell_w, cell_h, engine=True)
+    out: list[W] = []
+    for i, child in enumerate(attrs.get("children", [])):
+        made = emit(child, ctx, inner, f"{path}.{i}", i, placed=(0.0, 0.0, cell_w, cell_h))
+        if len(made) != 1:
+            raise LayoutGenError("a grid cell must be one widget", ctx.file, f"{path}.{i}")
+        out += made
+    w.children = out
+    return [w]
+
+
+def _b_keypad(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    keys = attrs.get("keys")
+    if not isinstance(keys, list) or not keys:
+        raise LayoutGenError("keypad needs keys: [{name, glyph}, ...]", ctx.file, path)
+    children = []
+    for i, k in enumerate(keys):
+        if not (isinstance(k, dict) and isinstance(k.get("name"), str) and isinstance(k.get("glyph"), str)):
+            raise LayoutGenError(f"keys[{i}] must be {{name, glyph}}", ctx.file, path)
+        children.append({"button": {"name": k["name"], "text": k["glyph"], "glyph": True,
+                                    "font": attrs.get("font", "header")}})
+    grid_attrs = {k: v for k, v in attrs.items() if k in ALLOWED["grid"]}
+    grid_attrs["children"] = children
+    return _b_grid(grid_attrs, ctx, box, path, x, y, forced, anchor, priority)
+
+
+def _build_row(fname: str, rdesc, ctx: Ctx, row_w: float) -> None:
+    """One row template of a list, written as its own file `<fname>.layout`."""
+    if not isinstance(fname, str) or not fname:
+        raise LayoutGenError("a row file needs a name", ctx.file, "rows")
+    node = f"rows.{fname}"
+    if not (isinstance(rdesc, dict) and list(rdesc) == ["row"] and isinstance(rdesc["row"], dict)):
+        raise LayoutGenError('a row template is {"row": {...}}', ctx.file, node)
+    attrs = rdesc["row"]
+    extra = sorted(set(attrs) - ROW_ATTRS)
+    if extra:
+        raise LayoutGenError(f"row does not take {extra}", ctx.file, node)
+    rctx = ctx.fresh()
+    name = rctx.claim(attrs.get("name", ""), node)
+    if attrs.get("stack"):
+        root = W("WrapSpacerWidgetClass", name)
+        root.set("visible", "1")
+        place(root, 0, 0, 1, 0, hexact=False)
+        root.set("Padding", "0").set("Margin", "0").set(key("Size To Content V"), "1")
+        inner = Box(row_w, None, prop_w=True, engine=True)
+        rctx.chain.append(0)
+        root.children = _engine_children(attrs, rctx, inner, node, None)
+    else:
+        height = attrs.get("h")
+        if height is None:
+            raise LayoutGenError("a row needs h (or stack: true)", ctx.file, node)
+        height = rctx.tokens.number(height, ctx.file, node, "h")
+        if attrs.get("click"):
+            root = W("ButtonWidgetClass", name)
+        elif "color" in attrs:
+            root = W("PanelWidgetClass", name)
+        else:
+            root = W("FrameWidgetClass", name)
+        root.set("visible", "1")
+        place(root, 0, 0, 1, height, hexact=False)
+        if attrs.get("click"):
+            root.set("text", quoted(""))
+        if root.cls == "PanelWidgetClass":
+            _color(root, attrs, rctx, node, "$panel")
+            root.set("style", PANEL_STYLE)
+        inner = Box(row_w, height, prop_w=True)
+        rctx.chain.append(0)
+        for i, child in enumerate(attrs.get("children", [])):
+            root.children += emit(child, rctx, inner, f"{node}.{i}", i)
+    root.comment = str(attrs.get("note", ""))
+    head = [GENERATED_MARK + ctx.file + f" ({node}) -- edit the source, not this file."]
+    text = "\n".join(head) + "\n" + render(root) + "\n"
+    target = f"{ctx.layout_dir}/{fname}.layout" if ctx.layout_dir else f"{fname}.layout"
+    if target in ctx.files:
+        raise LayoutGenError(f"row file {fname!r} is emitted twice", ctx.file, node)
+    ctx.files[target] = text
+
+
+def _b_list(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    scroll = _common_leaf("ScrollWidgetClass", attrs, ctx, path, ignore=False)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None, exact_only=True)
+    if not (hx and vx):
+        raise LayoutGenError("list needs an exact size", ctx.file, path)
+    place(scroll, x, y, width, height, anchor=anchor)
+    scroll.set("priority", fmt(priority)).set("clipchildren", "1").set(key("Scrollbar V"), "1")
+    stack_name = attrs.get("stack")
+    if not isinstance(stack_name, str) or not stack_name:
+        raise LayoutGenError("list needs stack: the name of its spacer (scripts add rows into it)", ctx.file, path)
+    spacer = W("WrapSpacerWidgetClass", ctx.claim(stack_name, path))
+    spacer.set("visible", "1")
+    place(spacer, 0, 0, 1, 0, hexact=False)
+    spacer.set("priority", "0").set("Padding", "0").set("Margin", "0").set(key("Size To Content V"), "1")
+    scroll.children = [spacer]
+    rows = attrs.get("rows", {})
+    if not isinstance(rows, dict):
+        raise LayoutGenError("rows must be an object of {file: {row: ...}}", ctx.file, path)
+    for fname, rdesc in rows.items():
+        _build_row(fname, rdesc, ctx, width - SCROLLBAR_UNITS)
+    return [scroll]
+
+
+def _b_raw_like(cls: str, attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf(cls, attrs, ctx, path, ignore=False)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
+    place(w, x, y, width, height, hx, vx, anchor)
+    if "color" in attrs:
+        _color(w, attrs, ctx, path, "$text")
+    w.set("priority", fmt(priority))
+    if "font" in attrs:
+        font, from_token = ctx.tokens.font_of(attrs["font"], ctx.file, path)
+        if not from_token:
+            ctx.note(path, "font given as a literal -- use a $font token")
+        w.set("font", quoted(font["face"])).set(key("exact text"), "1")
+        if not font["fixed"]:
+            w.set(key("exact text size"), fmt(font["size"]))
+    _props(w, attrs.get("props"), ctx, path)
+    inner = Box(width if hx else box.w, height if vx else box.h, prop_w=not hx)
+    w.children = _children(attrs, ctx, inner, path)
+    return [w]
+
+
+def _b_listbox(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    return _b_raw_like("TextListboxWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
+
+
+def _b_image(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    return _b_raw_like("ImageWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
+
+
+def _b_preview(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    worst = max(ctx.chain) if ctx.chain else 0
+    if worst > PREVIEW_PRIORITY_MAX:
+        raise LayoutGenError(f"priority {worst} above {PREVIEW_PRIORITY_MAX} on the way to the preview -- "
+                             "the engine silently draws no model", ctx.file, path)
+    return _b_raw_like("ItemPreviewWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
+
+
+def _b_raw(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    cls = attrs.get("class")
+    if not isinstance(cls, str) or not cls.endswith("Class"):
+        raise LayoutGenError("raw needs class: a *WidgetClass name", ctx.file, path)
+    ctx.note(path, f"raw {cls}: the generator does not vouch for it")
+    return _b_raw_like(cls, attrs, ctx, box, path, x, y, forced, anchor, priority)
+
+
+BUILDERS.update({
+    "stack": _b_stack, "hrow": _b_hrow, "grid": _b_grid, "list": _b_list, "keypad": _b_keypad,
+    "listbox": _b_listbox, "image": _b_image, "preview": _b_preview, "raw": _b_raw,
+})
+
+
 def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> Emitted:
     """One page description -> its .layout text plus the row files it owns.
 
@@ -804,6 +1053,7 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     children = list(attrs.get("children", []))
     if "body" in desc:
         children.append(desc["body"])
+    ctx.chain.append(_priority(attrs, ctx, "root", 0))
     for i, child in enumerate(children):
         root.children += emit(child, ctx, inner, f"root.{i}", i, on_page=True)
     head = [GENERATED_MARK + file + " -- edit the source, not this file."]
