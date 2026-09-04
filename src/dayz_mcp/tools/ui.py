@@ -273,15 +273,27 @@ def _is_within(path: Path, base: Path) -> bool:
     return True
 
 
-def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
-    """The fixture as the JSON text the mod will parse, or an error.
+#: The engine truncates a JSON string longer than this, silently (measured
+#: 2026-09-04: a 953-byte minified fixture file, re-serialised at 1029 bytes
+#: with Python's default separators, arrived cut). Everything below is what
+#: keeps a fixture under it: compact separators, non-ASCII left unescaped
+#: (one UTF-8 character instead of six `\uXXXX` ones), and a note before the
+#: cliff rather than a mystery at the far end of the bridge.
+FIXTURE_LIMIT_BYTES = 1023
+FIXTURE_NOTE_BYTES = 1000
+
+
+def _fixture_text(fixture, root: Path) -> tuple[str | None, str, list[str]]:
+    """The fixture as the JSON text the mod will parse, an error, and notes.
 
     A dict is serialised; a string is a project-relative path to a JSON file,
     or JSON text itself when it starts with `{`. Validated HERE, before the
-    round trip: the mod's own refusal costs a tick and names less.
+    round trip: the mod's own refusal costs a tick and names less. Text that
+    is already JSON is re-serialised the same compact way, so a hand-minified
+    file does not get 8% of spaces added back on its way out.
     """
     if fixture is None:
-        return None, ""
+        return None, "", []
     if isinstance(fixture, str):
         if fixture.lstrip().startswith("{"):
             text = fixture
@@ -289,23 +301,29 @@ def _fixture_text(fixture, root: Path) -> tuple[str | None, str]:
             root_resolved = root.resolve()
             path = (root / fixture).resolve()
             if not _is_within(path, root_resolved):
-                return None, f"fixture path must stay inside the project: {path}"
+                return None, f"fixture path must stay inside the project: {path}", []
             if not path.is_file():
-                return None, f"fixture file not found: {path}"
+                return None, f"fixture file not found: {path}", []
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                return None, f"fixture file could not be read: {path}: {exc}"
+                return None, f"fixture file could not be read: {path}: {exc}", []
         try:
             fixture = json.loads(text)
         except ValueError as exc:
-            return None, f"fixture is not valid JSON: {exc}"
+            return None, f"fixture is not valid JSON: {exc}", []
     if not isinstance(fixture, dict) or not isinstance(fixture.get("ops"), list):
-        return None, 'fixture must be an object with an "ops" list'
+        return None, 'fixture must be an object with an "ops" list', []
     for index, op in enumerate(fixture["ops"]):
         if not isinstance(op, dict) or not isinstance(op.get("op"), str):
-            return None, f'fixture op {index} must be an object with an "op" string'
-    return json.dumps(fixture, ensure_ascii=False), ""
+            return None, f'fixture op {index} must be an object with an "op" string', []
+    out = json.dumps(fixture, ensure_ascii=False, separators=(",", ":"))
+    size = len(out.encode("utf-8"))
+    notes = []
+    if size > FIXTURE_NOTE_BYTES:
+        notes.append(f"fixture is {size} bytes; the engine truncates a JSON string "
+                     f"above {FIXTURE_LIMIT_BYTES} -- shorten it")
+    return out, "", notes
 
 
 # ------------------------------------------------------------------ the tools
@@ -524,11 +542,14 @@ def ui_load(layout: str, fixture: dict | str | None = None, host: str = "",
     if not layout:
         return fail("ui_load needs a layout path",
                     hint="relative to the pbo prefix, e.g. MyMod/gui/layouts/x.layout")
-    text, error = _fixture_text(fixture, Path(session.profile().root))
+    text, error, fixture_notes = _fixture_text(fixture, Path(session.profile().root))
     if error:
         return fail(error, hint='a fixture is {"ops": [{"op": "add", "layout": "...", "into": "...", "count": 3}, ...]}')
     args = _args(layout=layout, host=host or None, fixture=text, depth=depth, limit=limit, offset=offset)
-    return _run("ui_load", args, timeout, offset)
+    result = _run("ui_load", args, timeout, offset)
+    if fixture_notes and result.ok and isinstance(result.data, dict):
+        result.data["notes"] = list(result.data.get("notes") or []) + fixture_notes
+    return result
 
 
 def ui_unload(timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
@@ -578,14 +599,14 @@ def _fixture_sources(fixture, root: Path) -> tuple[list, list[str]]:
     for the checks to judge fixture rows by their own flags. Unreadable or
     foreign layouts are named in the notes, never fatal: the fixture itself
     is validated by the bridge."""
-    text, _note = _fixture_text(fixture, root)
+    text, _error, size_notes = _fixture_text(fixture, root)
     if not text:
-        return [], []
+        return [], list(size_notes)
     try:
         ops = json.loads(text).get("ops", [])
     except (json.JSONDecodeError, AttributeError):
-        return [], []
-    found, notes, seen = [], [], set()
+        return [], list(size_notes)
+    found, notes, seen = [], list(size_notes), set()
     for op in ops if isinstance(ops, list) else []:
         layout = op.get("layout") if isinstance(op, dict) and op.get("op") == "add" else None
         if not isinstance(layout, str) or layout in seen:
@@ -897,7 +918,11 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     failed = sum(1 for e in entries if not e["ok"])
     data = {"dir": str(out_dir), "index": str(index_path), "entries": entries, "failed": failed}
     if strict:
-        bad = [e["name"] for e in entries if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
+        # `name@size`: the same page is one entry per requested size, so a
+        # failure naming the page alone cannot say which size failed -- nor,
+        # for a "(client)" restart failure, which round it belongs to.
+        bad = [f"{e['name']}@{e['size']}" for e in entries
+               if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
         if bad:
             return Result(False, data, f"{len(bad)} entries with errors: {', '.join(bad)}",
                           "open index.html -- every error is a rectangle the engine drew, not a guess")

@@ -449,6 +449,28 @@ def test_a_fixture_file_that_cannot_be_decoded_is_reported_not_raised(live):
     assert live.sent == []
 
 
+def test_a_fixture_travels_minified_and_a_long_one_is_noted(live):
+    """The engine truncates a JSON string above 1023 bytes (measured
+    2026-09-04: a 953-byte minified file went out re-serialised at 1029 and
+    came back cut). Python's default separators add ~8% of spaces to a
+    fixture that was already at the limit, so the fixture goes out compact --
+    and non-ASCII stays unescaped, which is six times cheaper than \\uXXXX."""
+    root = Path(session.profile().root)
+    text, error, notes = ui._fixture_text({"ops": [{"op": "add", "layout": "MyMod/gui/layouts/row.layout",
+                                                    "text": "Привіт"}]}, root)
+    assert error == "" and notes == []
+    assert '", "' not in text and '": "' not in text
+    assert "Привіт" in text and "\\u" not in text
+    big = {"ops": [{"op": "add", "layout": "MyMod/gui/layouts/row.layout", "text": "x" * 1100}]}
+    text, error, notes = ui._fixture_text(big, root)
+    size = len(text.encode("utf-8"))
+    assert size > 1000 and error == ""
+    assert notes == [f"fixture is {size} bytes; the engine truncates a JSON string above 1023 -- shorten it"]
+    # And the note reaches a caller that has somewhere to put it: ui_preview
+    # folds _fixture_sources' notes into its own report.
+    assert ui._fixture_sources(big, root)[1][:1] == notes
+
+
 def test_ui_load_reports_the_host_rectangle(live):
     live.state = BridgeState(tick=9, session_id="client-1", world={
         "ui_root": "preview", "ui_total": 1, "ui_nodes": [node_line(path="")],
@@ -727,7 +749,10 @@ def test_ui_gallery_strict_fails_on_any_error(live, monkeypatch, tmp_path):
     relaxed = ui.ui_gallery()
     assert relaxed.ok
     strict = ui.ui_gallery(strict=True)
-    assert not strict.ok and strict.error == "1 entries with errors: bad"
+    # `name@size`: the same page appears once per requested size, and a
+    # failure naming only the page cannot say which size it failed at (nor
+    # which round a "(client)" restart failure belongs to).
+    assert not strict.ok and strict.error == "1 entries with errors: bad@current"
     assert strict.data["entries"][1]["issues"] == {"error": 1, "warn": 0}
     assert Path(strict.data["index"]).exists()
 

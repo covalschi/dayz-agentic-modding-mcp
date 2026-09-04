@@ -6,6 +6,11 @@ ALLOWED = {
     "@MyMod", "@Dep", "@SomeDependency", "@CF", "@B",
     # Generic examples, placeholders and test fixtures
     "@Name", "@ModName", "@ServerOnlyMod", "@folder",
+    # Not mod folders at all: ui_gallery names an entry `name@size`
+    # (`page@1920x1080`, `page@current`), so a strict failure can say WHICH
+    # size failed. Allow-listed rather than spelled around, because this is
+    # the format the tool prints and the README documents.
+    "@size", "@current",
     # The bridge mod this server packs and ships itself (bridge/, tools/bridge.py).
     # It is NOT a concrete project's mod: it belongs to the server, is built from
     # sources inside THIS repository, and every project that uses it uses the same

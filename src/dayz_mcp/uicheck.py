@@ -309,7 +309,7 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                 unjudged = "editbox_bare: no source layout was given, so edit boxes were not judged"
                 if not source and unjudged not in notes:
                     notes.append(unjudged)
-            elif src.prop("style") is None and not _framed(n, shown, children, parent_path, source_by_path, scale):
+            elif src.prop("style") is None and not _framed(n, shown, children, parent_path, src_of, scale):
                 issues.append(Issue("editbox_bare", ERROR, path, name, cls,
                                     "no style and no panel behind it -- the field draws no frame"))
 
@@ -361,7 +361,7 @@ def _hugs(inner: tuple, outer: tuple, slack_px: int) -> bool:
 
 
 def _framed(node: dict, shown: dict, children: dict, parent_path: str | None,
-            source_by_path: dict, scale: float = 1.0) -> bool:
+            src_of, scale: float = 1.0) -> bool:
     """A panel behind the edit box: the parent itself, or an earlier sibling,
     whose rectangle HUGS it -- encloses it with no more than
     `FRAME_SLACK_UNITS` (scaled) of margin on any of the four sides.
@@ -378,26 +378,27 @@ def _framed(node: dict, shown: dict, children: dict, parent_path: str | None,
     the SOURCE layout when one is known there (PanelWidgetClass or
     ImageWidgetClass) -- the reliable read, since the engine's own
     ClassName() cannot tell a panel from a frame apart, both report "Widget"
-    (spec F4). A candidate absent from the source -- most often one a
-    fixture added at runtime, which never has a counterpart in the STATIC
-    file `source_by_path` was built from -- falls back to FRAMING_CLASSES
-    against the engine's own class instead of being silently ignored.
+    (spec F4). `src_of` is the caller's own lookup, so a candidate inside a
+    fixture row resolves in the row's TEMPLATE exactly as the edit box it
+    frames does; a candidate no source knows -- one a script built at
+    runtime -- falls back to FRAMING_CLASSES against the engine's own class
+    instead of being silently ignored.
     """
-    def frames(candidate_path: str, engine_cls: str) -> bool:
-        src = source_by_path.get(candidate_path)
+    def frames(candidate: dict) -> bool:
+        src = src_of(candidate["path"], candidate["name"])
         if src is not None:
             return src.cls in FRAMING_SOURCE_CLASSES
-        return engine_cls in FRAMING_CLASSES
+        return candidate["class"] in FRAMING_CLASSES
 
     rect = rect_of(node)
     slack_px = round(FRAME_SLACK_UNITS * scale) + 1
     if parent_path is not None:
         parent = shown.get(parent_path)
-        if parent and frames(parent_path, parent["class"]) and _hugs(rect, rect_of(parent), slack_px):
+        if parent and frames(parent) and _hugs(rect, rect_of(parent), slack_px):
             return True
         for sibling in children.get(parent_path, []):
             if sibling is node:
                 break
-            if frames(sibling["path"], sibling["class"]) and _hugs(rect, rect_of(sibling), slack_px):
+            if frames(sibling) and _hugs(rect, rect_of(sibling), slack_px):
                 return True
     return False

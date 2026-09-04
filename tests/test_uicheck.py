@@ -302,3 +302,26 @@ def test_two_templates_sharing_a_root_name_resolve_to_the_first_one_given():
              node("0.0.0", "RichTextWidget", "Label", "0 0 590 52", text_size=(815, 52))]
     assert rules(check(nodes, HOST, source=page, sources=[first, second])[0]) == []
     assert rules(check(nodes, HOST, source=page, sources=[second, first])[0]) == [("text_overflow", "Label")]
+
+
+def test_a_fixture_rows_frame_candidate_is_read_from_the_same_template():
+    """An edit box inside a fixture row is judged by its own template
+    (`src_of`), but its framing CANDIDATE was still looked up by path in the
+    page's source alone -- absent there, so it fell back to the engine's own
+    class name, which reports "Widget" for a frame and a panel alike (F4).
+    A row whose box sits in a FrameWidgetClass slot therefore counted as
+    framed. The candidate now resolves the same way the box does."""
+    page = parse_layout('FrameWidgetClass Page {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    row = parse_layout("FrameWidgetClass Row {\n size 1 30\n {\n  FrameWidgetClass Slot {\n   size 104 24\n"
+                       "   {\n    EditBoxWidgetClass Box {\n     size 100 20\n    }\n   }\n  }\n }\n}\n")
+    nodes = [node("", "FrameWidget", "Page", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "List", "0 0 1000 100"),
+             node("0.0", "Widget", "Row", "0 0 1000 30"),
+             node("0.0.0", "Widget", "Slot", "10 5 104 24"),
+             node("0.0.0.0", "EditBoxWidget", "Box", "12 7 100 20")]
+    assert rules(check(nodes, HOST, source=page, sources=[row])[0]) == [("editbox_bare", "Box")]
+    # The same shape with a PANEL slot is framed, which is what proves the
+    # template is being read rather than everything being called bare.
+    panelled = parse_layout("FrameWidgetClass Row {\n size 1 30\n {\n  PanelWidgetClass Slot {\n   size 104 24\n"
+                            "   {\n    EditBoxWidgetClass Box {\n     size 100 20\n    }\n   }\n  }\n }\n}\n")
+    assert rules(check(nodes, HOST, source=page, sources=[panelled])[0]) == []
