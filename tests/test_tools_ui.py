@@ -849,6 +849,46 @@ def test_ui_gallery_rounds_are_the_product_of_sizes_and_langs(live, monkeypatch)
     ]
 
 
+def test_ui_gallery_skips_the_restart_when_a_round_repeats_the_previous_size_and_language(live, monkeypatch):
+    """The "no-op when unchanged" guarantee (`ui.py:944`,
+    `if (size, lang) != previous:`) proved by the suite itself rather than by
+    reading the code: every OTHER test in this file gives `sizes`/`langs`
+    lists whose entries are pairwise distinct, so `itertools.product` never
+    actually produces two consecutive equal rounds anywhere else. Two
+    identical `sizes` entries do here -- the repeated round must still
+    produce its own preview entries, but the restart between them must not
+    happen a second time, and the round after that (a genuinely new size)
+    must restart again."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import ok as _ok
+        calls.append(("preview", kw["name"]))
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
+
+    def fake_restart(size, timeout, language=None):
+        calls.append(("restart", size, language))
+        return ""
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", fake_restart)
+    result = ui.ui_gallery(sizes=[[1920, 1080], [1920, 1080], [3840, 1600]])
+    assert result.ok, result.error
+    assert calls == [
+        ("restart", (1920, 1080), None), ("preview", "t"),
+        ("preview", "t"),
+        ("restart", (3840, 1600), None), ("preview", "t"),
+    ]
+    restarts = [c for c in calls if c[0] == "restart"]
+    assert len(restarts) == 2, calls
+    assert [e["size"] for e in result.data["entries"]] == ["1920x1080", "1920x1080", "3840x1600"]
+
+
 def test_ui_gallery_langs_alone_restarts_for_language_only_and_leaves_size_current(live, monkeypatch):
     root = Path(session.profile().root)
     (root / "preview").mkdir(exist_ok=True)

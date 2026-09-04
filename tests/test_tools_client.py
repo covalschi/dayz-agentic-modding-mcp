@@ -621,46 +621,108 @@ def test_language_name_covers_every_measured_engine_column():
 
 
 def test_write_language_line_replaces_an_existing_line_and_keeps_everything_else_byte_identical():
-    text = 'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
-    out = client._write_language_line(text, "Russian")
-    assert out == 'language="Russian";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+    data = b'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+    out = client._write_language_line(data, "Russian")
+    assert out == b'language="Russian";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
 
 
 def test_write_language_line_inserts_as_the_first_line_when_there_is_none():
-    text = "GPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n"
-    out = client._write_language_line(text, "English")
-    assert out == 'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+    data = b"GPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n"
+    out = client._write_language_line(data, "English")
+    assert out == b'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
 
 
 def test_write_language_line_preserves_crlf_line_endings():
-    text = 'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
-    out = client._write_language_line(text, "German")
-    assert out == 'language="German";\r\nGPU_MaxFramesAhead=3;\r\n'
-    assert "\r\n" in out and "\r\r" not in out
+    data = b'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
+    out = client._write_language_line(data, "German")
+    assert out == b'language="German";\r\nGPU_MaxFramesAhead=3;\r\n'
+    assert b"\r\n" in out and b"\r\r" not in out
 
 
 def test_write_language_line_preserves_lf_only_files_without_adding_carriage_returns():
-    text = 'language="English";\nGPU_MaxFramesAhead=3;\n'
-    out = client._write_language_line(text, "German")
-    assert out == 'language="German";\nGPU_MaxFramesAhead=3;\n'
-    assert "\r" not in out
+    data = b'language="English";\nGPU_MaxFramesAhead=3;\n'
+    out = client._write_language_line(data, "German")
+    assert out == b'language="German";\nGPU_MaxFramesAhead=3;\n'
+    assert b"\r" not in out
 
 
 def test_write_language_line_replaces_the_line_wherever_it_sits_not_only_first():
-    text = 'GPU_MaxFramesAhead=3;\r\nlanguage="English";\r\nsceneComplexity=200000;\r\n'
-    out = client._write_language_line(text, "Czech")
-    assert out == 'GPU_MaxFramesAhead=3;\r\nlanguage="Czech";\r\nsceneComplexity=200000;\r\n'
+    data = b'GPU_MaxFramesAhead=3;\r\nlanguage="English";\r\nsceneComplexity=200000;\r\n'
+    out = client._write_language_line(data, "Czech")
+    assert out == b'GPU_MaxFramesAhead=3;\r\nlanguage="Czech";\r\nsceneComplexity=200000;\r\n'
+
+
+def test_write_language_line_preserves_a_non_utf8_byte_elsewhere_in_the_file():
+    """The critical case the byte-preserving rewrite exists for: decoding the
+    whole file with `errors="replace"` (this rewrite's previous shape) turns
+    ANY non-UTF-8 byte into U+FFFD on the way back out, silently and
+    irreversibly. 0x92 is exactly that kind of byte -- the sort a
+    CP-1252/legacy-encoded name produces -- sitting in a field this tool
+    never touches. It must survive untouched, not become three UTF-8 bytes
+    that were never in the file."""
+    data = b'language="English";\r\nsomeName="Caf\x92 owner";\r\n'
+    out = client._write_language_line(data, "Russian")
+    assert out == b'language="Russian";\r\nsomeName="Caf\x92 owner";\r\n'
+
+
+def test_write_language_line_handles_a_file_with_no_trailing_newline():
+    data = b'GPU_MaxFramesAhead=3;\r\nlanguage="English";'
+    out = client._write_language_line(data, "Czech")
+    assert out == b'GPU_MaxFramesAhead=3;\r\nlanguage="Czech";'
+
+
+def test_write_language_line_replaces_a_boms_first_line_without_duplicating_it():
+    """The mirror of the BOM read bug: `^[ \\t]*language` never matched a
+    line preceded by a UTF-8 BOM (`^` does not consume it), so the old
+    text-mode rewrite treated the line as absent and inserted a SECOND
+    `language=` line above the now-orphaned original -- two such lines in
+    one file. The BOM is split off before the regex ever runs, so the line
+    is found and replaced in place, and the BOM stays the file's first three
+    bytes rather than sitting between two competing lines."""
+    data = b"\xef\xbb\xbf" + b'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
+    out = client._write_language_line(data, "Russian")
+    assert out == b"\xef\xbb\xbf" + b'language="Russian";\r\nGPU_MaxFramesAhead=3;\r\n'
+    assert out.count(b"language=") == 1
+
+
+def test_write_language_line_inserts_after_a_leading_bom_when_there_is_no_language_line():
+    data = b"\xef\xbb\xbf" + b"GPU_MaxFramesAhead=3;\r\n"
+    out = client._write_language_line(data, "English")
+    assert out == b"\xef\xbb\xbf" + b'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
+    assert out.startswith(b"\xef\xbb\xbf")
 
 
 def test_read_language_line_finds_the_value_or_none():
-    assert client._read_language_line('language="Czech";\r\nX=1;\r\n') == "Czech"
-    assert client._read_language_line("X=1;\r\nY=2;\r\n") is None
-    assert client._read_language_line("") is None
+    assert client._read_language_line(b'language="Czech";\r\nX=1;\r\n') == "Czech"
+    assert client._read_language_line(b"X=1;\r\nY=2;\r\n") is None
+    assert client._read_language_line(b"") is None
+
+
+def test_read_language_line_finds_the_value_through_a_leading_bom():
+    """The read-side mirror of the write-side BOM fix: before it, this
+    silently returned None for a language that was actually set -- which
+    would have made `client_language()`, and therefore `ui_preview`'s
+    "language" key, lie about a BOM'd client's real language."""
+    data = b"\xef\xbb\xbf" + b'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
+    assert client._read_language_line(data) == "English"
 
 
 def test_find_client_cfg_refuses_when_there_is_none(tmp_path):
     profiles = tmp_path / "clientprofile"
     (profiles / "Users" / "Survivor").mkdir(parents=True)
+    result = client._find_client_cfg(profiles)
+    assert result.ok is False
+    assert "DayZ.cfg" in result.error
+    assert "client_start" in result.hint
+
+
+def test_find_client_cfg_refuses_when_users_is_missing_entirely(tmp_path):
+    """Not merely an empty Users/ directory (the case above) but no Users/ at
+    all -- the shape of a freshly-created clientprofile directory before the
+    engine has ever run once. `Path.glob` on a nonexistent directory raises
+    nothing and yields nothing, so this must refuse the same way, not blow up."""
+    profiles = tmp_path / "clientprofile"
+    profiles.mkdir(parents=True)
     result = client._find_client_cfg(profiles)
     assert result.ok is False
     assert "DayZ.cfg" in result.error

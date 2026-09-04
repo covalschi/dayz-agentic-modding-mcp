@@ -475,7 +475,13 @@ def window_size(value) -> tuple[int, int] | None:  # noqa: ANN001 - anything a c
 #: (2026-09-04): twelve named languages plus "original", the stringtable
 #: column a mod falls back to when it has nothing in the player's own. Kept
 #: lowercase here -- `language_name` is the one place that turns a name from
-#: this list into the capitalised spelling DayZ.cfg itself stores.
+#: this list into the capitalised spelling DayZ.cfg itself stores. Accepting
+#: "original" as a `language=` value is a deliberate choice, not an
+#: oversight: it is a column name the engine's own DayZ.cfg key takes the
+#: same way it takes any other (measured, not guessed, the same way the
+#: other eleven non-Chinese spellings were), and a client set to it shows that
+#: fallback column instead of a translation -- exactly the case this axis
+#: exists to let a caller check for.
 ENGINE_LANGUAGES = (
     "original", "english", "czech", "german", "russian", "polish", "hungarian",
     "italian", "spanish", "french", "chinese", "japanese", "portuguese", "chinesesimp",
@@ -509,46 +515,68 @@ def language_name(value: str) -> str | None:
     return None
 
 
+#: The UTF-8 byte-order mark some tools -- and possibly the engine itself --
+#: write as a file's first three bytes. Split off before the regex ever
+#: runs, rather than folded into the pattern: `^` (even with MULTILINE) only
+#: matches the true start of the string or right after a `\n`, so a BOM
+#: sitting before `language=` on the first line would otherwise make that
+#: line invisible to `^[ \t]*language` -- both write (inserting a SECOND,
+#: duplicate line above the now-orphaned original) and read (returning None
+#: for a value that is actually there) got this wrong before the BOM was
+#: handled explicitly here.
+_BOM = b"\xef\xbb\xbf"
+
 #: DayZ.cfg's own `language="...";` line -- case-sensitive, because the
 #: engine writes the key lowercase and this only ever reads what the engine
-#: (or this tool, in the same shape) wrote. MULTILINE so the same compiled
-#: pattern also `.search()`es a whole file for the line wherever it sits;
-#: `.match()` against one already-split line does not need the flag but is
-#: not hurt by it either.
-_LANGUAGE_LINE = re.compile(r'^[ \t]*language[ \t]*=[ \t]*"([^"]*)"[ \t]*;', re.MULTILINE)
+#: (or this tool, in the same shape) wrote. Matched against raw BYTES, not a
+#: decoded str: DayZ.cfg is not guaranteed to be valid UTF-8 (a legacy-
+#: encoded name elsewhere in the file, say), and decoding the whole file --
+#: the previous shape of this rewrite -- silently and irreversibly replaced
+#: every such byte with U+FFFD on the way back out. The captured value is
+#: always ASCII (one of the capitalised spellings `language_name` produces),
+#: so matching bytes costs nothing there. MULTILINE so the same compiled
+#: pattern also `.search()`es a whole file for the line wherever it sits.
+_LANGUAGE_LINE_BYTES = re.compile(rb'^[ \t]*language[ \t]*=[ \t]*"([^"]*)"[ \t]*;', re.MULTILINE)
 
 
-def _read_language_line(text: str) -> str | None:
+def _read_language_line(data: bytes) -> str | None:
     """The value inside DayZ.cfg's `language="...";` line, or None when
-    `text` has no such line. Pure -- the read half of the pair with
-    `_write_language_line`, both driven by tests with plain strings and no
-    filesystem at all."""
-    found = _LANGUAGE_LINE.search(text)
-    return found.group(1) if found else None
+    `data` has no such line. Pure -- the read half of the pair with
+    `_write_language_line`, both driven by tests with plain bytes and no
+    filesystem at all. `data` is the file's raw bytes, BOM included where the
+    file has one -- stripped here the same way `_write_language_line` strips
+    it, so a BOM'd file's line is found rather than silently read as absent.
+    """
+    if data.startswith(_BOM):
+        data = data[len(_BOM):]
+    found = _LANGUAGE_LINE_BYTES.search(data)
+    return found.group(1).decode("utf-8", errors="replace") if found else None
 
 
-def _write_language_line(text: str, name: str) -> str:
-    """`text` -- a DayZ.cfg's exact content -- with its `language=` line set
-    to `name`: the existing line replaced wherever it sits, or a new one
-    inserted as the FIRST line when there is none. Every other line is
-    carried through untouched, including the file's own line ending (CRLF
-    stays CRLF) -- the rest of DayZ.cfg is graphics settings the owner may
-    have hand-tuned, and reflowing them would show up as a whole-file change
-    in every diff they look at again.
+def _write_language_line(data: bytes, name: str) -> bytes:
+    """`data` -- a DayZ.cfg's exact BYTES -- with its `language=` line set to
+    `name`: the existing line replaced wherever it sits, or a new one
+    inserted as the FIRST line when there is none (right after a leading
+    UTF-8 BOM, when `data` has one, so the BOM stays the file's first three
+    bytes rather than ending up sandwiched between two `language=` lines).
+    Every other byte is carried through untouched -- the file's own line
+    ending (CRLF stays CRLF), any non-UTF-8 byte elsewhere in the file, all
+    of it -- the rest of DayZ.cfg is graphics settings the owner may have
+    hand-tuned, and reflowing or corrupting them would show up as a
+    whole-file change, or silent data loss, in every diff they look at again.
 
-    Pure by design (text and a name in, text out, no path and no I/O): the
+    Pure by design (bytes and a name in, bytes out, no path and no I/O): the
     file-finding lives in `_find_client_cfg` and the actual read/write in
     `client_start`, so this is the one piece a test can drive directly.
     """
-    keep = "\r\n" if "\r\n" in text else "\n"
-    lines = text.split(keep)
-    new_line = f'language="{name}";'
-    for index, line in enumerate(lines):
-        if _LANGUAGE_LINE.match(line):
-            lines[index] = new_line
-            return keep.join(lines)
-    lines.insert(0, new_line)
-    return keep.join(lines)
+    bom = _BOM if data.startswith(_BOM) else b""
+    body = data[len(bom):]
+    new_line = f'language="{name}";'.encode("ascii")
+    match = _LANGUAGE_LINE_BYTES.search(body)
+    if match:
+        return bom + body[:match.start()] + new_line + body[match.end():]
+    keep = b"\r\n" if b"\r\n" in body else b"\n"
+    return bom + new_line + keep + body
 
 
 def _find_client_cfg(profiles: Path) -> Result:
@@ -643,9 +671,11 @@ def client_start(
     `ENGINE_LANGUAGES` and in the refusal's own hint), then written as
     `language="<Name>";` into the LIVE client's own DayZ.cfg -- replacing the
     line if one is already there, inserting it as the first line otherwise,
-    every other line untouched -- before the process is spawned. The engine
-    reads this file once, at its own startup, so there is no way to change a
-    running client's language without restarting it; `ui_gallery`'s `langs`
+    every other BYTE untouched (the file is rewritten as bytes throughout, so
+    a BOM or a non-UTF-8 byte elsewhere survives the round trip too) -- before
+    the process is spawned. The engine reads this file once, at its own
+    startup, so there is no way to change a running client's language without
+    restarting it; `ui_gallery`'s `langs`
     does exactly that, one round per language. DayZ.cfg is written by the
     engine itself, not by this tool, so a project whose client has never run
     is refused with a hint to start it once first, with no `language=` --
@@ -770,9 +800,8 @@ def client_start(
             return found_cfg
         cfg_path = found_cfg.data
         try:
-            cfg_text = cfg_path.read_bytes().decode("utf-8", errors="replace")
             cfg_path.write_bytes(
-                _write_language_line(cfg_text, canonical_language).encode("utf-8")
+                _write_language_line(cfg_path.read_bytes(), canonical_language)
             )
         except OSError as exc:
             return fail(
@@ -1077,10 +1106,10 @@ def client_language() -> str | None:
     if not found.ok:
         return None
     try:
-        text = found.data.read_bytes().decode("utf-8", errors="replace")
+        data = found.data.read_bytes()
     except OSError:
         return None
-    return _read_language_line(text)
+    return _read_language_line(data)
 
 
 # ---------------------------------------------------------------------------
