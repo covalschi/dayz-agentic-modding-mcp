@@ -343,3 +343,71 @@ def test_a_fixture_rows_frame_candidate_is_read_from_the_same_template():
     panelled = parse_layout("FrameWidgetClass Row {\n size 1 30\n {\n  PanelWidgetClass Slot {\n   size 104 24\n"
                             "   {\n    EditBoxWidgetClass Box {\n     size 100 20\n    }\n   }\n  }\n }\n}\n")
     assert rules(check(nodes, HOST, source=page, sources=[panelled])[0]) == []
+
+
+def test_children_are_matched_to_their_source_by_priority_walk_not_declared_slot():
+    """Source declares A (priority 5), B (priority 0), C (priority 0), in
+    that order; the ENGINE draws B, C, A -- ascending priority, stable for
+    the tie between B and C, so the declaration order of the tied pair
+    survives (measured 2026-09-04: `GetChildren`/`GetSibling` walk siblings
+    this way, not declaration order). Each drawn node needs ITS OWN flag to
+    avoid `text_overflow`: B needs `"size to text v"`, A needs `wrap`; C
+    fits its box regardless and is along for the ride. Matching by
+    declaration-order child index instead (the bug) rotates the three
+    sources by one step -- drawn B would be judged by A's flags, drawn A by
+    C's -- and reports both as overflowing."""
+    src = parse_layout(
+        'FrameWidgetClass Root {\n size 1 1\n {\n'
+        '  TextWidgetClass A {\n   size 100 20\n   priority 5\n   wrap 1\n  }\n'
+        '  TextWidgetClass B {\n   size 100 20\n   priority 0\n   "size to text v" 1\n  }\n'
+        '  TextWidgetClass C {\n   size 100 20\n   priority 0\n  }\n'
+        ' }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "TextWidget", "B", "10 10 100 20", text_size=(90, 40)),
+             node("1", "TextWidget", "C", "10 40 100 20", text_size=(90, 20)),
+             node("2", "TextWidget", "A", "10 70 100 20", text_size=(140, 20))]
+    assert rules(check(nodes, HOST, source=src)[0]) == []
+
+
+def test_a_wrapped_label_declared_late_but_drawn_early_keeps_its_wrap_flag():
+    """A source may declare a low-priority child AFTER a higher-priority
+    sibling; the engine still draws the low-priority one first. A panel
+    (priority 10) declared before a wrapped label (priority 0) is drawn
+    SECOND, so the label -- declared late, drawn early -- lands at engine
+    path "0". Matching that path by DECLARATION index instead finds the
+    panel there, and the label's `wrap` flag is lost, reporting a correctly
+    wrapped label as overflowing its box."""
+    src = parse_layout(
+        'FrameWidgetClass Root {\n size 1 1\n {\n'
+        '  PanelWidgetClass SomePanel {\n   size 100 30\n   priority 10\n  }\n'
+        '  RichTextWidgetClass Note {\n   size 100 30\n   wrap 1\n   priority 0\n  }\n'
+        ' }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "RichTextWidget", "Note", "10 10 100 30", text_size=(130, 30)),
+             node("1", "Widget", "SomePanel", "10 50 100 30")]
+    assert rules(check(nodes, HOST, source=src)[0]) == []
+
+
+def test_two_flattened_rows_restarting_priority_resolve_the_second_rows_own_child():
+    """A generator that restarts `priority` at 0 inside every flattened
+    `hbox`/`header` (measured 2026-09-04) can splice two three-child rows
+    into one parent where BOTH rows carry priorities 0, 1, 2. Stable-sorting
+    by priority interleaves them: row two's first child (declared 4th,
+    priority 0) ties with row one's first child (declared 1st, priority 0)
+    and, because the tie keeps declaration order, is drawn SECOND -- engine
+    path "1". That is the same slot row one's SECOND child (declared index
+    1) occupies in the source file, so matching by declared slot finds row
+    one's child instead; matching by the priority walk finds row two's own,
+    which is the only one carrying the flag this test excuses."""
+    src = parse_layout(
+        'FrameWidgetClass Root {\n size 1 1\n {\n'
+        '  TextWidgetClass R1A {\n   size 100 20\n   priority 0\n  }\n'
+        '  TextWidgetClass R1B {\n   size 100 20\n   priority 1\n  }\n'
+        '  TextWidgetClass R1C {\n   size 100 20\n   priority 2\n  }\n'
+        '  TextWidgetClass R2A {\n   size 100 20\n   priority 0\n   "size to text h" 1\n  }\n'
+        '  TextWidgetClass R2B {\n   size 100 20\n   priority 1\n  }\n'
+        '  TextWidgetClass R2C {\n   size 100 20\n   priority 2\n  }\n'
+        ' }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("1", "TextWidget", "R2A", "10 10 100 20", text_size=(140, 20))]
+    assert rules(check(nodes, HOST, source=src)[0]) == []

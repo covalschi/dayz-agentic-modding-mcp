@@ -21,7 +21,7 @@ what draws a frame behind an edit box.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 
 from .layoutparse import LayoutNode
@@ -197,6 +197,57 @@ def _flag(src, key: str) -> bool:
     return src is not None and src.prop(key) == ["1"]
 
 
+def _source_priority(node: LayoutNode) -> float:
+    """A source node's own `priority` (default 0), as a sort key -- what the
+    ENGINE itself walks `GetChildren`/`GetSibling` by: ascending, stable for
+    ties (measured 2026-09-04). Unparsable is 0, not a crash, the same
+    defensiveness `_gt1` uses for a malformed layout value."""
+    values = node.prop("priority")
+    if not values:
+        return 0.0
+    try:
+        return float(values[0])
+    except ValueError:
+        return 0.0
+
+
+def _priority_walk(node: LayoutNode, path: str = "") -> Iterator[tuple[str, LayoutNode]]:
+    """`LayoutNode.walk()`, but children are visited in ascending `priority`
+    order (stable for ties) instead of declaration order -- the ENGINE's own
+    walk, not the file's. `sorted` is stable, so two children tied at the
+    same priority keep the order they were declared in, exactly like the
+    engine's own tie-break."""
+    yield path, node
+    for index, child in enumerate(sorted(node.children, key=_source_priority)):
+        child_path = f"{path}.{index}" if path else str(index)
+        yield from _priority_walk(child, child_path)
+
+
+def _source_by_engine_path(source: LayoutNode) -> dict[str, LayoutNode]:
+    """`source`'s own nodes, keyed by the path the ENGINE draws them at --
+    not the path `LayoutNode.walk()` would number them at.
+
+    `LayoutNode.walk()` numbers children in DECLARATION order; `ui_tree`'s
+    own dotted path numbers them in DRAW order, which is ascending
+    `priority`, stable for ties. The two coincide whenever a file never sets
+    `priority` -- everything then sorts equal, and a stable sort changes
+    nothing -- which is the common case, and why matching a drawn node to
+    its source by child index along the path worked for as long as it did.
+    They diverge the moment one sibling's `priority` puts it out of step
+    with its declared position: measured on a hand-written layout (a
+    wrapped label dozens of slots from where it was declared) and on a
+    generated one (the generator restarts `priority` at 0 inside every
+    flattened `hbox`/`header`, so two flattened rows sharing one parent tie
+    at every rank).
+
+    Building this table by the engine's own rule instead of
+    `LayoutNode.walk()`'s keeps `src_of`'s fast path a single dict lookup --
+    only the order a path counts against changes; `by_root`, `by_name` and
+    `by_name_all` below are keyed by NAME and untouched by any of this.
+    """
+    return dict(_priority_walk(source))
+
+
 def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
           source: LayoutNode | None = None, scale: float = 1.0,
           sources: Iterable[LayoutNode] = ()) -> tuple[list[Issue], list[str]]:
@@ -208,7 +259,10 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         parent = _parent_path(path)
         if parent is not None:
             children.setdefault(parent, []).append(n)
-    source_by_path = {p: s for p, s in source.walk()} if source else {}
+    # Keyed by DRAW order (see _source_by_engine_path), not by source.walk()'s
+    # declaration order -- the two differ whenever a sibling's `priority`
+    # moves it out of step with where it was declared.
+    source_by_path = _source_by_engine_path(source) if source else {}
     # Rows a fixture (or a script) adds have no path in the page's source.
     # Each extra source is a row TEMPLATE whose root name is the name the
     # engine reports for that row; a node under such a row is looked up by
@@ -246,8 +300,19 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         return None
 
     def src_of(path: str, name: str):
+        """The SOURCE node a drawn node (`path`, `name`) corresponds to.
+
+        `source_by_path` is keyed by DRAW order (see
+        `_source_by_engine_path`), so a same-path hit is right almost
+        always -- but a fixture or a script can still insert a sibling that
+        table never saw, shifting everything after it, so the hit is
+        cross-checked against `name` before it is trusted. A mismatch falls
+        through to the slower, always-by-name lookups below instead of
+        confidently answering with the wrong node -- a plausible-looking
+        neighbour instead of the widget actually asked about.
+        """
         found = source_by_path.get(path)
-        if found is not None:
+        if found is not None and found.name == name:
             return found
         scope = _root_scope(path)
         if scope is not None:
