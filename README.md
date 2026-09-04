@@ -101,8 +101,7 @@ in its notes.
 | `world_weather_set(what, value, seconds, duration)` | move overcast, rain, fog, snowfall or wind. A **nudge, not a lock**: the engine keeps simulating weather afterwards, and both the tool and the mod say so |
 | `world_action(action_class, target_class, subject, radius, pos)` | run a mod's own action through the engine's gate — see below |
 | `world_exec(verb, args)` | the escape hatch: an arbitrary verb through the same transport, marked non-standard in every answer |
-| `client_start(timeout, extra_args)` | start the game client and connect it to the stand; returns a job id. Always windowed. Finishes when the bridge reports `players >= 1` — a count, not a timer |
-
+| `client_start(timeout, extra_args, window, language)` | start the game client and connect it to the stand; returns a job id. Always windowed (`window` overrides the machine's own configured size for one launch). `language`, when given, is validated against the engine's own columns and rewritten as `language="<Name>";` into the client's own DayZ.cfg before launch — every other byte untouched — since the engine reads it once, at its own startup, and has no such launch argument. Finishes when the bridge reports `players >= 1` — a count, not a timer |
 | `client_status()` | pid, window geometry, whether the window is minimized or in front, the background setting, the player count, and whether a virtual controller is attached |
 | `client_stop()` | stop the client this session started, and unplug the virtual controller |
 | `client_shot(path)` | capture the client's window to a PNG, with `lit_fraction` — the number that tells a real frame from an all-black one. No focus needed |

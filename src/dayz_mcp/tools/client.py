@@ -472,16 +472,19 @@ def window_size(value) -> tuple[int, int] | None:  # noqa: ANN001 - anything a c
 
 
 #: The engine's own language columns, measured off `dta/languagecore.pbo`
-#: (2026-09-04): twelve named languages plus "original", the stringtable
+#: (2026-09-04): thirteen named languages plus "original", the stringtable
 #: column a mod falls back to when it has nothing in the player's own. Kept
 #: lowercase here -- `language_name` is the one place that turns a name from
 #: this list into the capitalised spelling DayZ.cfg itself stores. Accepting
 #: "original" as a `language=` value is a deliberate choice, not an
-#: oversight: it is a column name the engine's own DayZ.cfg key takes the
-#: same way it takes any other (measured, not guessed, the same way the
-#: other eleven non-Chinese spellings were), and a client set to it shows that
-#: fallback column instead of a translation -- exactly the case this axis
-#: exists to let a caller check for.
+#: oversight: it is a column the engine is KNOWN to have -- read off the
+#: same stringtable structure as every other name here -- and a client set
+#: to it would show that fallback column instead of a translation, exactly
+#: the case this axis exists to let a caller check for. Unlike the other
+#: eleven non-Chinese spellings, though, nobody has actually switched a live
+#: client TO "original" and read DayZ.cfg back to confirm it sticks (see
+#: `language_name` below) -- accepted on the strength of the column
+#: existing at all, not on a measurement of a client accepting it.
 ENGINE_LANGUAGES = (
     "original", "english", "czech", "german", "russian", "polish", "hungarian",
     "italian", "spanish", "french", "chinese", "japanese", "portuguese", "chinesesimp",
@@ -499,14 +502,17 @@ def language_name(value: str) -> str | None:
     both have to answer the same question against the same list, rather than
     two copies quietly drifting apart the way two copies always do here.
 
-    Every spelling but two was read off a live client's own DayZ.cfg after
-    switching the in-game language to it, one at a time. `chinese` and
-    `chinesesimp` were never switched to -- their capitalised spelling here
-    (`Chinese`, `Chinesesimp`) follows the same rule the other twelve
-    measured spellings do, but it is this function's own guess at the
-    pattern, not a measurement of it. Accepted anyway: refusing a language
-    the engine may well support, over a spelling nobody has confirmed, would
-    cost more than the guess risks.
+    Eleven spellings -- every named language but the two Chinese ones and
+    "original" -- were read off a live client's own DayZ.cfg after
+    switching the in-game language to it, one at a time. `chinese`,
+    `chinesesimp` and `original` were never switched to: their capitalised
+    spelling here (`Chinese`, `Chinesesimp`, `Original`) follows the same
+    rule the eleven measured spellings do, but it is this function's own
+    guess at the pattern, not a measurement of it -- and for `original`,
+    even whether a client CAN be set to it at all is unmeasured, only that
+    the column exists (`ENGINE_LANGUAGES` above). Accepted anyway: refusing
+    a language the engine may well support, over a spelling nobody has
+    confirmed, would cost more than the guess risks.
     """
     lowered = value.strip().lower()
     for lang in ENGINE_LANGUAGES:

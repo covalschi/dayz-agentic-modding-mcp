@@ -963,15 +963,23 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
                 time.sleep(GALLERY_RETRY_SECONDS)
                 result = ui_preview(**preview_args)
                 retried = True
+            # `ui_preview` reads the client's OWN current language and
+            # reports what it actually measured -- prefer that over the
+            # round's mere request, so a client that has not really finished
+            # switching shows a caption that matches its own screenshot. A
+            # failed call's `data` is `fail()`'s own default, `None` (never
+            # reaching the point where "language" would be set), hence the
+            # `or {}` -- and then the round's requested value either way.
+            entry_lang = (result.data or {}).get("language") or lang_label
             if result.ok:
                 report = Path(result.data["report"])
                 shot = result.data.get("shot")
-                e = {"name": name, "size": label, "language": lang_label, "ok": True,
+                e = {"name": name, "size": label, "language": entry_lang, "ok": True,
                     "report": Path("..") / report.parent.name / report.name,
                     "shot": (Path("..") / report.parent.name / "shot.png") if shot else "",
                     "issues": result.data["issues"], "error": ""}
             else:
-                e = {"name": name, "size": label, "language": lang_label, "ok": False,
+                e = {"name": name, "size": label, "language": entry_lang, "ok": False,
                     "report": "", "shot": "", "issues": {}, "error": result.error}
             if retried:
                 e["retried"] = True
