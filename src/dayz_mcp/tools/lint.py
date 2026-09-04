@@ -67,8 +67,14 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
         return [Finding("layout-desc", REFUSE, str(exc), "fix the description under ui/", exc.file, 0)]
     for note in report.notes:
         where, _, message = note.partition(": ")
-        out.append(Finding("layout-desc", WARN, message, "tokens instead of literals, containers instead of coordinates",
-                           where.split(" ")[0], 0))
+        # `where` is "<description file> <node>". The file becomes the
+        # finding's own field; the node stays in the message, because a page
+        # of forty widgets warning "color given as a literal" with nothing
+        # to point at is a finding nobody can act on.
+        desc_file, _, node = where.partition(" ")
+        out.append(Finding("layout-desc", WARN, f"{node}: {message}" if node else message,
+                           "tokens instead of literals, containers instead of coordinates",
+                           desc_file, 0))
     for target in report.written:
         src = report.sources[target]
         disk = target_path(prof.root, prof.build.sources, target)

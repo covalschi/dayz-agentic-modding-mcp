@@ -283,7 +283,11 @@ def test_a_description_that_does_not_build_refuses_and_a_note_warns(tmp_path):
     assert tools.layout_build().ok
     res = tools.mod_lint()
     desc = by_check(res, "layout-desc")
-    assert len(desc) == 1 and desc[0]["severity"] == WARN and "color given as a literal" in desc[0]["message"]
+    # The node the note came from is kept in the message: a page with forty
+    # widgets warning "color given as a literal" with nothing to point at is
+    # a finding nobody can act on.
+    assert len(desc) == 1 and desc[0]["severity"] == WARN
+    assert desc[0]["message"] == "root.0: color given as a literal -- use a $color token"
     assert desc[0]["file"] == "ui/MyMod/oz_page.json"
 
 

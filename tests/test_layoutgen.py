@@ -185,11 +185,66 @@ def test_at_on_a_page_child_is_noted_but_hidden_overlays_are_not():
     ({"layout": "x", "root": {"frame": {"name": "R"}}}, "root needs an exact size"),
     ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
       "body": {"label": {"name": "A", "h": "auto"}}}, "auto is only a label's width"),
+    # `size` used to win over a sibling `w`/`h` without a word, so a node
+    # carrying both was read one way by the container and another by the leaf.
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
+      "body": {"label": {"name": "A", "size": [10, 10], "h": 20}}}, "size and w/h on one node -- use one"),
+    # A row template lives in a list's `rows`, never as a node of the page:
+    # `ALLOWED["row"]` admitted it here and then it died on "not implemented".
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
+      "body": {"row": {"name": "A", "h": 20}}}, "unknown primitive 'row'"),
 ])
 def test_refusals_name_the_node(desc, message):
     with pytest.raises(LayoutGenError) as caught:
         build_layout(desc, tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
     assert message in str(caught.value) and "ui/MyMod/x.json" in str(caught.value)
+
+
+def test_a_root_can_anchor_and_offset_itself():
+    """The root's own `anchor` and `at` were accepted and then dropped: the
+    page was always placed at 0 0. Phase C centres the settings window with
+    an anchor instead of a proportional position, so both are applied."""
+    out = build(page({"label": {"name": "A", "h": 20}},
+                     root={"frame": {"name": "Win", "size": [640, 518], "anchor": "center"}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "FrameWidgetClass Win {\n visible 1\n halign center_ref\n valign center_ref\n position 0 0\n size 640 518\n" in text
+    assert clean(text) == []
+    out = build(page({"label": {"name": "A", "h": 20}},
+                     root={"frame": {"name": "Win", "size": [640, 518], "at": [40, 30]}}))
+    assert "FrameWidgetClass Win {\n visible 1\n position 40 30\n size 640 518\n" in out.files["MyMod/gui/layouts/oz_page.layout"]
+
+
+def test_a_chip_says_it_ignores_h():
+    out = build(page({"frame": {"name": "Row", "size": [300, 40], "children": [
+        {"chip": {"name": "Chip", "h": 10}}]}}))
+    assert out.notes == ["ui/MyMod/oz_page.json root.0.0: chip ignores h -- it is its parent's full height"]
+
+
+def test_a_click_rows_color_is_noted_as_unpainted():
+    out = build(page({"list": {"name": "S", "stack": "L", "size": [200, 100], "rows": {
+        "r": {"row": {"name": "R", "h": 30, "click": True, "color": "$panel"}}}}}))
+    assert out.notes == ["ui/MyMod/oz_page.json rows.r: row color is only painted on a plain (non-click, non-stack) row"]
+
+
+def test_a_grid_refuses_more_children_than_cells():
+    with pytest.raises(LayoutGenError, match="grid holds 1 cells, 2 children given"):
+        build(page({"grid": {"name": "G", "size": [100, 100], "cols": 1, "rows": 1, "children": [
+            {"panel": {"name": "A", "color": "$panel"}}, {"panel": {"name": "B", "color": "$panel"}}]}}))
+
+
+def test_unnamed_hrows_are_numbered_by_their_own_counter():
+    """The auto-name counted the widget names already claimed that started
+    with "HRow", so a widget called HRowFoo earlier in the page renamed every
+    anonymous row after it -- churn in a committed artifact, from an edit
+    that has nothing to do with those rows."""
+    out = build(page({"frame": {"name": "HRowFoo", "size": [300, 100], "children": [
+        {"hrow": {"h": 20, "children": [{"label": {"name": "A", "w": "auto", "font": "small"}}]}},
+        {"hrow": {"at": [0, 40], "h": 20, "children": [{"label": {"name": "B", "w": "auto", "font": "small"}}]}},
+    ]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "GridSpacerWidgetClass HRow1 {" in text and "GridSpacerWidgetClass HRow2 {" in text
+    assert "HRow3" not in text
+    assert clean(text) == []
 
 
 def test_literal_colors_and_fonts_are_allowed_but_noted():

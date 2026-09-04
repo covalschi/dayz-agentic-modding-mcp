@@ -250,6 +250,7 @@ class Ctx:
     files: dict[str, str] = field(default_factory=dict)
     names: set[str] = field(default_factory=set)
     gaps: int = 0
+    hrows: int = 0
     chain: list[int] = field(default_factory=list)
 
     def claim(self, name, path: str) -> str:
@@ -263,6 +264,13 @@ class Ctx:
     def gap_name(self, path: str) -> str:
         self.gaps += 1
         return self.claim(f"Gap{self.gaps}", path)
+
+    def hrow_name(self, path: str) -> str:
+        """The next anonymous hrow's name. A COUNTER, not a count of the
+        names already claimed: counting made an unrelated widget called
+        `HRowFoo` renumber every anonymous row after it."""
+        self.hrows += 1
+        return self.claim(f"HRow{self.hrows}", path)
 
     def fresh(self) -> "Ctx":
         """A context for another FILE of the same build: names start over,
@@ -290,7 +298,10 @@ ALLOWED: dict[str, set[str]] = {
     "hbox":    COMMON | {"gap", "children"},
     "stack":   COMMON | {"children"},
     "hrow":    COMMON | {"children"},
-    "row":     COMMON | {"children"},
+    # No "row": a row template is not a node of a page, it is the value of a
+    # list's `rows` and its attributes are ROW_ATTRS. Listed here it was a
+    # second, disagreeing schema for one key -- it admitted `at`/`anchor`,
+    # which _build_row rejects, and omitted `click`/`stack`, which it needs.
     "grid":    COMMON | {"cols", "rows", "gap", "children"},
     "list":    COMMON | {"stack", "rows"},
     "keypad":  COMMON | {"cols", "rows", "gap", "keys", "font"},
@@ -343,6 +354,8 @@ def _dim(attrs: dict, which: str, ctx: Ctx, path: str, avail: float | None, defa
     width) or `default`. `size: [w, h]` / `size: "fill"` stands for both."""
     value = attrs.get(which, default)
     if "size" in attrs:
+        if "w" in attrs or "h" in attrs:
+            raise LayoutGenError("size and w/h on one node -- use one", ctx.file, path)
         size = attrs["size"]
         if size == "fill":
             value = "fill"
@@ -372,9 +385,28 @@ def _avail(side: float | None, inset: float) -> float | None:
 
 def _size_leaf(attrs: dict, ctx: Ctx, box: Box, path: str, x: float, y: float, forced: tuple,
                anchor: str, default_h, allow_auto: bool = False, exact_only: bool = False) -> tuple:
+    """The (width, height, hexactsize, vexactsize) of one leaf.
+
+    Two shortcuts stand in for arithmetic the engine does better, and
+    `exact_only` (a container that must know its own numbers: vbox, grid,
+    button, field, list) turns both off:
+
+    * `size: "fill"` at an uninset origin is the parent's whole box, written
+      `size 1 1` proportional -- no number to go stale when the parent moves;
+    * an undeclared width inside a PROPORTIONAL parent (`box.prop_w`: a list
+      row, whose width the engine sets from the scroll minus its bar) is
+      `size 1 h`, hexactsize 0, for the same reason.
+
+    Otherwise the size is exact: what the node declares, or the remainder of
+    the box from where the node sits (`_avail`). `forced` is the axis a
+    vbox/hbox has already decided, and it wins over both the declaration and
+    the shortcuts. A label's `w: "auto"` returns width 0 -- the engine sizes
+    it from its own text.
+    """
     inset_x = x - box.ox
     inset_y = y - box.oy
-    full = (attrs.get("size") == "fill" and x == 0 and y == 0 and box.ox == 0 and box.oy == 0
+    full = (attrs.get("size") == "fill" and "w" not in attrs and "h" not in attrs
+            and x == 0 and y == 0 and box.ox == 0 and box.oy == 0
             and not anchor and forced == (None, None) and not exact_only)
     if full:
         return 1.0, 1.0, False, False
@@ -545,6 +577,8 @@ def _b_chip(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     """A 4-unit bar the full height of its parent, hidden until a script colours it."""
     w = W("PanelWidgetClass", ctx.claim(attrs.get("name", ""), path), comment=str(attrs.get("note", "")))
     w.set("visible", "0" if attrs.get("hidden", True) else "1").set("ignorepointer", "1")
+    if "h" in attrs:
+        ctx.note(path, "chip ignores h -- it is its parent's full height")
     width = ctx.tokens.number(attrs.get("w", 4), ctx.file, path, "w")
     place(w, x, y, width, 1, True, False, anchor)
     _color(w, attrs, ctx, path, "$white")
@@ -866,8 +900,9 @@ def _b_stack(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 def _b_hrow(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     """A GridSpacer of one row that sizes itself: children keep their pixel
     widths, labels may be `auto`, gaps are empty panels."""
-    name = attrs.get("name") or f"HRow{len([n for n in ctx.names if n.startswith('HRow')]) + 1}"
-    w = W("GridSpacerWidgetClass", ctx.claim(name, path), comment=str(attrs.get("note", "")))
+    name = attrs.get("name")
+    w = W("GridSpacerWidgetClass", ctx.claim(name, path) if name else ctx.hrow_name(path),
+          comment=str(attrs.get("note", "")))
     w.set("visible", "0" if attrs.get("hidden") else "1")
     height = forced[1] if forced[1] is not None else attrs.get("h")
     if height is None:
@@ -893,6 +928,11 @@ def _b_grid(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     gap = ctx.tokens.number(attrs.get("gap", 0), ctx.file, path, "gap")
     if cols < 1 or rows < 1:
         raise LayoutGenError("cols and rows must be at least 1", ctx.file, path)
+    # A GridSpacer draws every extra child stacked in the last cell rather
+    # than complaining, so nothing downstream would report it.
+    n = len(attrs.get("children", []))
+    if n > cols * rows:
+        raise LayoutGenError(f"grid holds {cols * rows} cells, {n} children given", ctx.file, path)
     place(w, x, y, width, height, anchor=anchor)
     w.set("priority", fmt(priority)).set("Padding", fmt(gap)).set("Margin", "0")
     w.set("Columns", fmt(cols)).set("Rows", fmt(rows))
@@ -937,6 +977,10 @@ def _build_row(fname: str, rdesc, ctx: Ctx, row_w: float) -> None:
         raise LayoutGenError(f"row does not take {extra}", ctx.file, node)
     rctx = ctx.fresh()
     name = rctx.claim(attrs.get("name", ""), node)
+    # Only a plain row's root is a PanelWidgetClass; a click row is a button
+    # and a stack row a spacer, and neither paints a background.
+    if "color" in attrs and (attrs.get("click") or attrs.get("stack")):
+        ctx.note(node, "row color is only painted on a plain (non-click, non-stack) row")
     if attrs.get("stack"):
         root = W("WrapSpacerWidgetClass", name)
         root.set("visible", "1")
@@ -1076,7 +1120,14 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     root = W("FrameWidgetClass" if kind == "frame" else "PanelWidgetClass",
              ctx.claim(attrs.get("name", name), "root"), comment=str(attrs.get("note", "")))
     root.set("visible", "0" if attrs.get("hidden") else "1")
-    place(root, 0, 0, width, height)
+    # The root places itself the same way any other node does: a window
+    # centred in its host is `anchor: "center"`, not a proportional position
+    # that has to be recomputed for every screen (spec 2026-09-04 §3.6).
+    anchor = attrs.get("anchor", "")
+    if anchor and anchor not in ANCHORS:
+        raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", file, "root")
+    ax, ay = tokens.pair(attrs.get("at", [0, 0]), file, "root", "at")
+    place(root, ax, ay, width, height, anchor=anchor)
     if kind == "panel":
         _color(root, attrs, ctx, "root", "$screen")
         root.set("style", PANEL_STYLE)
