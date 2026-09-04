@@ -653,6 +653,34 @@ def test_ui_preview_falls_back_to_scale_1_with_a_note_when_no_window_is_found(li
     assert any("scale" in n for n in result.data["notes"]), result.data["notes"]
 
 
+def test_ui_preview_reports_the_clients_current_language(live, monkeypatch):
+    """So every report says which language the shot was taken in -- the same
+    layout can overflow in translation and not in English."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_host": "0 0 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 400 300", metrics="")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    monkeypatch.setattr(ui, "client_language", lambda: "Russian")
+    result = ui.ui_preview("a.layout")
+    assert result.ok, result.error
+    assert result.data["language"] == "Russian"
+    report_html = Path(result.data["report"]).read_text(encoding="utf-8")
+    assert "language: Russian" in report_html
+
+
+def test_ui_preview_reports_an_empty_language_when_it_cannot_be_read(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "preview", "ui_total": 1, "ui_host": "0 0 400 300",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="Root", rect="0 0 400 300", metrics="")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    monkeypatch.setattr(ui, "client_language", lambda: None)
+    result = ui.ui_preview("a.layout")
+    assert result.ok, result.error
+    assert result.data["language"] == ""
+
+
 def test_ui_preview_folds_a_warn_lint_finding_into_notes(live, monkeypatch):
     """A WARN from the pre-load lint was computed anyway -- discarding it
     would waste the pass ui_preview already paid for."""
@@ -770,7 +798,7 @@ def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatc
         return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
                     "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
 
-    def fake_restart(size, timeout):
+    def fake_restart(size, timeout, language=None):
         calls.append(("restart", size))
         return ""
 
@@ -780,6 +808,161 @@ def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatc
     assert result.ok, result.error
     assert calls == [("restart", (3840, 1600)), ("preview", "t"), ("restart", (1920, 1080)), ("preview", "t")]
     assert [e["size"] for e in result.data["entries"]] == ["3840x1600", "1920x1080"]
+    # No langs given: every entry still carries the key, empty.
+    assert [e["language"] for e in result.data["entries"]] == ["", ""]
+
+
+def test_ui_gallery_rounds_are_the_product_of_sizes_and_langs(live, monkeypatch):
+    """Outer loop over sizes, inner over langs -- one restart per round, in
+    that order, and every round differs from the one before it so none is
+    skipped."""
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import ok as _ok
+        calls.append(("preview", kw["name"]))
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
+
+    def fake_restart(size, timeout, language=None):
+        calls.append(("restart", size, language))
+        return ""
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", fake_restart)
+    result = ui.ui_gallery(sizes=[[3840, 1600], [1920, 1080]], langs=["English", "Russian"])
+    assert result.ok, result.error
+    assert calls == [
+        ("restart", (3840, 1600), "English"), ("preview", "t"),
+        ("restart", (3840, 1600), "Russian"), ("preview", "t"),
+        ("restart", (1920, 1080), "English"), ("preview", "t"),
+        ("restart", (1920, 1080), "Russian"), ("preview", "t"),
+    ]
+    labels = [(e["size"], e["language"]) for e in result.data["entries"]]
+    assert labels == [
+        ("3840x1600", "English"), ("3840x1600", "Russian"),
+        ("1920x1080", "English"), ("1920x1080", "Russian"),
+    ]
+
+
+def test_ui_gallery_langs_alone_restarts_for_language_only_and_leaves_size_current(live, monkeypatch):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+
+    def fake_preview(**kw):
+        from dayz_mcp.errors import ok as _ok
+        calls.append(("preview", kw["name"]))
+        return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
+                    "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
+
+    def fake_restart(size, timeout, language=None):
+        calls.append(("restart", size, language))
+        return ""
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", fake_restart)
+    result = ui.ui_gallery(langs=["English", "Russian"])
+    assert result.ok, result.error
+    assert calls == [
+        ("restart", None, "English"), ("preview", "t"),
+        ("restart", None, "Russian"), ("preview", "t"),
+    ]
+    assert [e["size"] for e in result.data["entries"]] == ["current", "current"]
+    assert [e["language"] for e in result.data["entries"]] == ["English", "Russian"]
+
+
+def test_ui_gallery_refuses_an_unknown_language_before_any_restart(live, monkeypatch):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(
+        json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(ui, "_restart_client", lambda *a, **k: calls.append(1) or "")
+
+    result = ui.ui_gallery(langs=["Klingon"])
+
+    assert not result.ok
+    assert "langs" in result.error
+    assert calls == []
+
+
+def test_ui_gallery_strict_names_entries_with_language_when_langs_given(live, monkeypatch):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [
+        {"name": "good", "layout": "MyMod/gui/layouts/a.layout"},
+        {"name": "bad", "layout": "MyMod/gui/layouts/b.layout"}]}), encoding="utf-8")
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+        from dayz_mcp.errors import ok as _ok
+        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text("r", encoding="utf-8")
+        errors = 1 if name == "bad" else 0
+        return _ok({"dir": str(out), "shot": str(out / "shot.png"), "report": str(out / "report.html"),
+                    "count": 1, "total": 1, "issues": {"error": errors, "warn": 0}, "notes": [],
+                    "host": (0, 0, 60, 52), "emulated": True})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    monkeypatch.setattr(ui, "_restart_client", lambda size, timeout, language=None: "")
+    lang = "English"
+    strict = ui.ui_gallery(langs=[lang], strict=True)
+    # `name@size@language`: langs was given, so the failure must say which
+    # language the failing round used, not just which page and size. Built
+    # with an f-string, not a literal, so the source text never spells out
+    # "@" immediately before a language name -- the no-mod-names guard
+    # (test_no_project_names.py) pattern-matches exactly that shape.
+    assert not strict.ok and strict.error == f"1 entries with errors: bad@current@{lang}"
+    assert strict.data["entries"][1]["language"] == "English"
+
+
+def test_restart_client_with_no_size_leaves_the_window_alone(live, monkeypatch):
+    """`size=None` -- a language-only round -- must start the client with
+    `window=None` (the machine's own configured size), not invent one."""
+    calls = {}
+
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None, language=""):
+        from dayz_mcp.errors import ok as _ok
+        calls["window"] = window
+        calls["language"] = language
+        return _ok({"job_id": "j1"})
+
+    def fake_wait(job_id, timeout):
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"status": "done"})
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    assert ui._restart_client(None, 45.0, "Russian") == ""
+    assert calls["window"] is None
+    assert calls["language"] == "Russian"
+
+
+def test_restart_client_names_current_in_its_failures_when_size_is_none(live, monkeypatch):
+    def fake_stop():
+        from dayz_mcp.errors import ok as _ok
+        return _ok({"stopped": True})
+
+    def fake_start(window=None, language=""):
+        from dayz_mcp.errors import fail as _fail
+        return _fail("no stand")
+
+    monkeypatch.setattr(ui, "client_stop", fake_stop)
+    monkeypatch.setattr(ui, "client_start", fake_start)
+    reason = ui._restart_client(None, 45.0, "Russian")
+    assert "could not start the client at current" in reason
 
 
 def test_ui_gallery_refuses_a_missing_or_malformed_index(live):
@@ -828,7 +1011,7 @@ def test_restart_client_stops_then_starts_at_the_new_size_and_waits_for_it_to_co
         from dayz_mcp.errors import ok as _ok
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import ok as _ok
         calls["window"] = window
         return _ok({"job_id": "j1"})
@@ -864,7 +1047,7 @@ def test_restart_client_waits_for_the_server_to_drop_the_killed_player(live, mon
         calls.append("stop")
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import ok as _ok
         calls.append("start")
         return _ok({"job_id": "j1"})
@@ -895,7 +1078,7 @@ def test_restart_client_gives_up_if_the_server_never_drops_the_player(live, monk
 
     started = []
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         started.append(window)
         from dayz_mcp.errors import ok as _ok
         return _ok({"job_id": "j1"})
@@ -928,7 +1111,7 @@ def test_restart_client_does_not_wait_when_the_server_signal_is_unreadable(live,
         calls.append("stop")
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         calls.append("start")
         from dayz_mcp.errors import ok as _ok
         return _ok({"job_id": "j1"})
@@ -952,7 +1135,7 @@ def test_restart_client_reports_a_start_that_refused(live, monkeypatch):
         from dayz_mcp.errors import ok as _ok
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import fail as _fail
         return _fail("no stand")
 
@@ -974,7 +1157,7 @@ def test_restart_client_reports_a_client_that_never_connected(live, monkeypatch)
         from dayz_mcp.errors import ok as _ok
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import ok as _ok
         return _ok({"job_id": "j1"})
 
@@ -999,7 +1182,7 @@ def test_restart_client_does_not_treat_nothing_to_stop_as_a_failure(live, monkey
         from dayz_mcp.errors import ok as _ok
         return _ok({"stopped": False, "reason": "no client was started by this session"})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import ok as _ok
         started.append(window)
         return _ok({"job_id": "j1"})
@@ -1029,7 +1212,7 @@ def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(
         from dayz_mcp.errors import ok as _ok
         return _ok({"stopped": True})
 
-    def fake_start(window=None):
+    def fake_start(window=None, language=""):
         from dayz_mcp.errors import fail as _fail
         return _fail("no stand")
 

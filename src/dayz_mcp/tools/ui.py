@@ -33,6 +33,7 @@ settle.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from pathlib import Path
@@ -49,7 +50,10 @@ from ..procs import is_alive
 from ..profile import resolve_mod_dir
 from ..uigeom import parse_rect
 from . import session
-from .client import _players_in, client_profiles_dir, client_start, client_stop, window_size
+from .client import (
+    ENGINE_LANGUAGES, _players_in, client_language, client_profiles_dir, client_start,
+    client_stop, language_name, window_size,
+)
 from .jobs_api import job_wait
 from .lifecycle import server_profiles_dir
 from .project import require_project
@@ -646,6 +650,13 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     `notes`, when there is no window to measure. It is what `uicheck` uses
     to turn a tolerance measured in layout units (the scrollbar's width, a
     border panel's overhang) into the screen pixels this report compares.
+
+    `data["language"]` is the client's current UI language (`client_language`,
+    read out of its own DayZ.cfg -- "" when there is no file or no line), so
+    every report says which language the shot was taken in. A layout that
+    overflows only in translation looks identical to one that never does
+    unless the report itself says which language it shows; `ui_gallery`'s
+    `langs` is what actually switches it, one round per language.
     """
     guard = require_project()
     if guard:
@@ -712,6 +723,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     out_dir.mkdir(parents=True, exist_ok=True)
     pid, _alive = _live_client()
     scale, scale_note = _window_scale(pid)
+    lang_value = client_language() or ""
     shot = winui.shot(pid, out_dir / "shot.png", rect=rect)
     notes: list[str] = list(lint_notes)
     notes += extra_notes
@@ -730,7 +742,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
     issue_dicts = [i.to_dict() for i in issues]
     meta = {"layout": layout or first.data.get("ui", {}).get("ui_menu", "menu"), "host": rect,
             "emulated": bool(host) and not live, "fixture": bool(fixture), "nodes": len(nodes),
-            "total": total, "scale": scale}
+            "total": total, "scale": scale, "language": lang_value}
     report = uireport.write_report(out_dir, shot_name, nodes, issue_dicts, notes, meta)
     counts = {"error": sum(1 for i in issues if i.severity == uicheck.ERROR),
               "warn": sum(1 for i in issues if i.severity == uicheck.WARN)}
@@ -738,6 +750,7 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         "dir": str(out_dir), "shot": str(out_dir / "shot.png") if shot_name else None,
         "report": str(report), "count": len(nodes), "total": total, "issues": counts,
         "notes": notes, "host": rect, "emulated": meta["emulated"], "scale": scale,
+        "language": lang_value,
     })
 
 
@@ -768,9 +781,16 @@ def _server_players() -> int | None:
     return _players_in(Channel(server_profiles_dir()).read_state())
 
 
-def _restart_client(size: tuple[int, int], timeout: float) -> str:
-    """Stop the client and start it again at `size`. Empty string on success,
-    the reason otherwise.
+def _restart_client(size: tuple[int, int] | None, timeout: float, language: str | None = None) -> str:
+    """Stop the client and start it again at `size` and/or `language`. Empty
+    string on success, the reason otherwise.
+
+    `size` may be None -- a round that changes only the language leaves the
+    window exactly where it was: `client_start` is called with `window=None`,
+    which means "the machine's own configured size" (or the client's last
+    one), not "no window at all". `language` may likewise be empty, for a
+    round that changes only the size; it is passed through to `client_start`
+    unchanged, which is where it is validated.
 
     `client_stop` kills the client process outright -- there is no clean
     disconnect for the server to react to, and it holds the killed player
@@ -788,6 +808,7 @@ def _restart_client(size: tuple[int, int], timeout: float) -> str:
     about the machine, not a refusal, so there is nothing here for a status
     check to add.
     """
+    label = f"{size[0]}x{size[1]}" if size else "current"
     before = _server_players()
     client_stop()
     if before is not None and before > 0:
@@ -807,12 +828,12 @@ def _restart_client(size: tuple[int, int], timeout: float) -> str:
                     "after the stop -- a new client would be kicked with 'Player with same UID "
                     "is already in game'"
                 )
-    started = client_start(window=list(size))
+    started = client_start(window=list(size) if size else None, language=language or "")
     if not started.ok:
-        return f"could not start the client at {size[0]}x{size[1]}: {started.error}"
+        return f"could not start the client at {label}: {started.error}"
     job = job_wait(started.data["job_id"], timeout=max(timeout, 240))
     if not job.ok or job.data.get("status") != "done":
-        return f"the client did not connect at {size[0]}x{size[1]}: {job.error or job.data}"
+        return f"the client did not connect at {label}: {job.error or job.data}"
     return ""
 
 
@@ -829,6 +850,7 @@ GALLERY_RETRY_SECONDS = 3.0
 
 
 def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None = None,
+               langs: list[str] | None = None,
                timeout: float = WORLD_TIMEOUT_SECONDS, strict: bool = False) -> Result:
     """Every entry of the project's preview index through ui_preview, and one
     index.html with all the pictures and counts -- the look before a push.
@@ -836,6 +858,30 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     `sizes` restarts the client at each [width, height] in turn (the owner's
     3840x1600 and the players' 1920x1080); without it the client is used as
     it is.
+
+    `langs` restarts the client into each named engine language in turn --
+    typically English and the mod's own (a non-English stringtable column),
+    so a layout that overflows only in translation is caught here rather
+    than by a player. Validated the same way `client_start`'s own `language`
+    argument is (case-insensitively, against the engine's own columns),
+    before any round runs at all.
+
+    Rounds are the PRODUCT of `sizes` (or the single "use it as it is"
+    round) and `langs` (or the single "leave the language alone" round):
+    each round whose size OR language differs from the one before it
+    restarts the client, so a language-only change does not also re-pick the
+    window and a size-only change does not also re-pick the language.
+    `size` can be None for a language-only round -- `_restart_client` then
+    starts the client with `window=None`, the machine's own configured size,
+    rather than inventing one.
+
+    Every entry's `"size"` label is unchanged (`"3840x1600"` or `"current"`);
+    a sibling `"language"` key carries the round's language, `""` when none
+    was requested for it. `strict=True`'s failure message names entries as
+    `name@size@language` once `langs` was given at all (kept as `name@size`
+    otherwise, so a caller not using this axis sees the same message as
+    before). The gallery index shows the language beside the size on every
+    card.
 
     An entry that fails on a stalled bridge heartbeat gets one retry, after
     GALLERY_RETRY_SECONDS, rather than being recorded lost -- the same brief
@@ -869,24 +915,43 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
                 isinstance(entry.get("layout"), str) or entry.get("live") is True
             )
             assert usable, f'entry {entry!r} needs a string "layout" or "live": true'
-        rounds: list[tuple[int, int] | None] = [None]
+        size_rounds: list[tuple[int, int] | None] = [None]
         if sizes:
             parsed_sizes = [window_size(s) for s in sizes]
             assert all(parsed_sizes), f"sizes must each be two positive integers, not {sizes!r}"
-            rounds = parsed_sizes
+            size_rounds = parsed_sizes
+        lang_rounds: list[str | None] = [None]
+        if langs:
+            parsed_langs = [language_name(v) for v in langs]
+            assert all(parsed_langs), (
+                f"langs must each be one of {', '.join(ENGINE_LANGUAGES)}, not {langs!r}"
+            )
+            lang_rounds = parsed_langs
     except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
         return fail(f"no usable preview index at {path}: {exc}", hint=hint)
 
     entries: list[dict] = []
     out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"gallery-{int(time.time() * 1000)}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    for size in rounds:
+    # (None, None): nothing has configured the client yet, and it is also
+    # the ONLY round when neither sizes nor langs was given -- comparing
+    # that round against this same sentinel is what keeps the no-axes case
+    # from restarting a client nobody asked to touch, exactly as before.
+    previous: tuple = (None, None)
+    for size, lang in itertools.product(size_rounds, lang_rounds):
         label = f"{size[0]}x{size[1]}" if size else "current"
-        if size:
-            problem = _restart_client(size, timeout)
+        lang_label = lang or ""
+        if (size, lang) != previous:
+            problem = _restart_client(size, timeout, lang)
             if problem:
-                entries.append({"name": "(client)", "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": problem})
+                entries.append({"name": "(client)", "size": label, "language": lang_label,
+                                "ok": False, "report": "", "shot": "", "issues": {}, "error": problem})
+                # `previous` is left as it was: a FAILED restart says nothing
+                # about what the client is actually running, so the next
+                # round must not read a stale match against it as "no change
+                # needed" and skip its own restart.
                 continue
+            previous = (size, lang)
         for entry in entries_in:
             name = str(entry.get("name") or Path(str(entry.get("layout", ""))).stem or "entry")
             preview_args = dict(layout=str(entry.get("layout", "")), fixture=entry.get("fixture"),
@@ -901,12 +966,13 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
             if result.ok:
                 report = Path(result.data["report"])
                 shot = result.data.get("shot")
-                e = {"name": name, "size": label, "ok": True,
+                e = {"name": name, "size": label, "language": lang_label, "ok": True,
                     "report": Path("..") / report.parent.name / report.name,
                     "shot": (Path("..") / report.parent.name / "shot.png") if shot else "",
                     "issues": result.data["issues"], "error": ""}
             else:
-                e = {"name": name, "size": label, "ok": False, "report": "", "shot": "", "issues": {}, "error": result.error}
+                e = {"name": name, "size": label, "language": lang_label, "ok": False,
+                    "report": "", "shot": "", "issues": {}, "error": result.error}
             if retried:
                 e["retried"] = True
             entries.append(e)
@@ -921,8 +987,16 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
         # `name@size`: the same page is one entry per requested size, so a
         # failure naming the page alone cannot say which size failed -- nor,
         # for a "(client)" restart failure, which round it belongs to.
-        bad = [f"{e['name']}@{e['size']}" for e in entries
-               if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
+        # `@language` joins them once `langs` was given at all -- the same
+        # page run in two languages needs the failure to say which one --
+        # and is left off otherwise so a caller not using this axis sees
+        # exactly the message it always has.
+        if langs:
+            bad = [f"{e['name']}@{e['size']}@{e['language']}" for e in entries
+                   if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
+        else:
+            bad = [f"{e['name']}@{e['size']}" for e in entries
+                   if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
         if bad:
             return Result(False, data, f"{len(bad)} entries with errors: {', '.join(bad)}",
                           "open index.html -- every error is a rectangle the engine drew, not a guess")

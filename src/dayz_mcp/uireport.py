@@ -94,7 +94,15 @@ def render_gallery(entries: list[dict]) -> str:
         summary = f"{counts.get('error', 0)} errors, {counts.get('warn', 0)} warnings" if e.get("ok") else html.escape(e.get("error", "failed"))
         picture = f'<a href="{html.escape(e["report"])}"><img src="{html.escape(e["shot"])}" alt=""></a>' if e.get("shot") else ""
         retried = ' <span class="retried">retried</span>' if e.get("retried") else ""
-        cards.append(f'<div class="card"><h2>{html.escape(e["name"])} <small>{html.escape(e.get("size", ""))}</small>{retried}</h2>'
+        # The language sits beside the size in the same <small> tag rather
+        # than in one of its own -- absent entirely when the entry carries
+        # none, so a gallery run with no `langs` looks exactly as it always
+        # has instead of growing an empty label on every card.
+        label = html.escape(e.get("size", ""))
+        lang = e.get("language") or ""
+        if lang:
+            label += " &middot; " + html.escape(lang)
+        cards.append(f'<div class="card"><h2>{html.escape(e["name"])} <small>{label}</small>{retried}</h2>'
                      f'{picture}<p>{summary}</p></div>')
     style = ("body{margin:0;padding:16px;background:#141416;color:#d8d8dc;font:14px system-ui,sans-serif}"
              ".card{display:inline-block;vertical-align:top;width:460px;margin:0 12px 16px 0;background:#1c1c20;padding:10px;border-radius:6px}"

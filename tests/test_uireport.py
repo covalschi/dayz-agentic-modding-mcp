@@ -61,3 +61,22 @@ def test_a_retried_entry_carries_a_retried_tag():
          "shot": "../preview-chat-1/shot.png", "issues": {"error": 0, "warn": 0}, "error": "", "retried": True},
     ])
     assert 'class="retried"' in html and ">retried<" in html
+
+
+def test_the_gallery_shows_the_language_beside_the_size():
+    html = render_gallery([
+        {"name": "chat", "size": "current", "language": "Russian", "ok": True,
+         "report": "../preview-chat-1/report.html", "shot": "../preview-chat-1/shot.png",
+         "issues": {"error": 0, "warn": 0}, "error": ""},
+    ])
+    assert "Russian" in html
+
+
+def test_the_gallery_shows_no_language_marker_when_the_entry_carries_none():
+    """A gallery run with no `langs` must look exactly as it always has --
+    no empty language marker growing on every card."""
+    html = render_gallery([
+        {"name": "chat", "size": "current", "ok": True, "report": "../preview-chat-1/report.html",
+         "shot": "../preview-chat-1/shot.png", "issues": {"error": 0, "warn": 0}, "error": ""},
+    ])
+    assert "&middot;" not in html

@@ -49,6 +49,7 @@ person who owns the machine.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import replace
@@ -470,9 +471,119 @@ def window_size(value) -> tuple[int, int] | None:  # noqa: ANN001 - anything a c
     return None
 
 
+#: The engine's own language columns, measured off `dta/languagecore.pbo`
+#: (2026-09-04): twelve named languages plus "original", the stringtable
+#: column a mod falls back to when it has nothing in the player's own. Kept
+#: lowercase here -- `language_name` is the one place that turns a name from
+#: this list into the capitalised spelling DayZ.cfg itself stores.
+ENGINE_LANGUAGES = (
+    "original", "english", "czech", "german", "russian", "polish", "hungarian",
+    "italian", "spanish", "french", "chinese", "japanese", "portuguese", "chinesesimp",
+)
+
+
+def language_name(value: str) -> str | None:
+    """`value` matched case-insensitively against ENGINE_LANGUAGES, as the
+    capitalised spelling `DayZ.cfg` itself uses (`English`, `Russian`,
+    `Czech`, ...) -- or None when it names none of the engine's columns.
+
+    THE one definition of "is this a game language", the same reason
+    `window_size` is one definition of "is this a window size":
+    `client_start`'s `language` argument and `ui_gallery`'s `langs` entries
+    both have to answer the same question against the same list, rather than
+    two copies quietly drifting apart the way two copies always do here.
+
+    Every spelling but two was read off a live client's own DayZ.cfg after
+    switching the in-game language to it, one at a time. `chinese` and
+    `chinesesimp` were never switched to -- their capitalised spelling here
+    (`Chinese`, `Chinesesimp`) follows the same rule the other twelve
+    measured spellings do, but it is this function's own guess at the
+    pattern, not a measurement of it. Accepted anyway: refusing a language
+    the engine may well support, over a spelling nobody has confirmed, would
+    cost more than the guess risks.
+    """
+    lowered = value.strip().lower()
+    for lang in ENGINE_LANGUAGES:
+        if lowered == lang:
+            return lang.capitalize()
+    return None
+
+
+#: DayZ.cfg's own `language="...";` line -- case-sensitive, because the
+#: engine writes the key lowercase and this only ever reads what the engine
+#: (or this tool, in the same shape) wrote. MULTILINE so the same compiled
+#: pattern also `.search()`es a whole file for the line wherever it sits;
+#: `.match()` against one already-split line does not need the flag but is
+#: not hurt by it either.
+_LANGUAGE_LINE = re.compile(r'^[ \t]*language[ \t]*=[ \t]*"([^"]*)"[ \t]*;', re.MULTILINE)
+
+
+def _read_language_line(text: str) -> str | None:
+    """The value inside DayZ.cfg's `language="...";` line, or None when
+    `text` has no such line. Pure -- the read half of the pair with
+    `_write_language_line`, both driven by tests with plain strings and no
+    filesystem at all."""
+    found = _LANGUAGE_LINE.search(text)
+    return found.group(1) if found else None
+
+
+def _write_language_line(text: str, name: str) -> str:
+    """`text` -- a DayZ.cfg's exact content -- with its `language=` line set
+    to `name`: the existing line replaced wherever it sits, or a new one
+    inserted as the FIRST line when there is none. Every other line is
+    carried through untouched, including the file's own line ending (CRLF
+    stays CRLF) -- the rest of DayZ.cfg is graphics settings the owner may
+    have hand-tuned, and reflowing them would show up as a whole-file change
+    in every diff they look at again.
+
+    Pure by design (text and a name in, text out, no path and no I/O): the
+    file-finding lives in `_find_client_cfg` and the actual read/write in
+    `client_start`, so this is the one piece a test can drive directly.
+    """
+    keep = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(keep)
+    new_line = f'language="{name}";'
+    for index, line in enumerate(lines):
+        if _LANGUAGE_LINE.match(line):
+            lines[index] = new_line
+            return keep.join(lines)
+    lines.insert(0, new_line)
+    return keep.join(lines)
+
+
+def _find_client_cfg(profiles: Path) -> Result:
+    """The live client's own DayZ.cfg under `<profiles>/Users/*/`, as
+    `ok(path)` -- or a refusal naming why there is none to edit.
+
+    Glob rather than a fixed name: the directory under Users/ is a profile
+    name the ENGINE chooses the first time it runs, not this tool. More than
+    one candidate is refused rather than resolved by guessing (the newest,
+    say): DayZ.cfg is rewritten on every launch, including this tool's own,
+    so a timestamp says nothing about which file the live client actually
+    reads next.
+    """
+    candidates = sorted((profiles / "Users").glob("*/DayZ.cfg"))
+    if not candidates:
+        return fail(
+            f"no DayZ.cfg under {profiles / 'Users'}",
+            hint="DayZ.cfg is written by the engine itself the first time it runs, not by "
+                 "this tool -- start the client once with client_start (no language=) so it "
+                 "exists, then call this again",
+        )
+    if len(candidates) > 1:
+        listed = ", ".join(str(c) for c in candidates)
+        return fail(
+            f"{len(candidates)} DayZ.cfg files under {profiles / 'Users'}, so which one the "
+            f"live client would read is ambiguous: {listed}",
+            hint="this tool edits a single profile's file -- remove the stale Users "
+                 "directory so exactly one DayZ.cfg remains",
+        )
+    return ok(candidates[0])
+
+
 def client_start(
     timeout: float = CONNECT_TIMEOUT_SECONDS, extra_args: list[str] | None = None,
-    window: list[int] | None = None,
+    window: list[int] | None = None, language: str = "",
 ) -> Result:
     """Start the game client and connect it to the test stand. Returns a job id.
 
@@ -526,6 +637,20 @@ def client_start(
     was never readable (the signal was unavailable) or it was readable and
     nobody joined (the client itself did not get in).
 
+    `language`, WHEN GIVEN, IS NOT A LAUNCH ARGUMENT -- the engine has none.
+    It is validated case-insensitively against the engine's own language
+    columns (`language_name`; the full list is in this module's
+    `ENGINE_LANGUAGES` and in the refusal's own hint), then written as
+    `language="<Name>";` into the LIVE client's own DayZ.cfg -- replacing the
+    line if one is already there, inserting it as the first line otherwise,
+    every other line untouched -- before the process is spawned. The engine
+    reads this file once, at its own startup, so there is no way to change a
+    running client's language without restarting it; `ui_gallery`'s `langs`
+    does exactly that, one round per language. DayZ.cfg is written by the
+    engine itself, not by this tool, so a project whose client has never run
+    is refused with a hint to start it once first, with no `language=` --
+    the same way `client_verdict` is refused before any .RPT exists.
+
     `extra_args` appends launch arguments after the fixed ones, an explicit
     one-run opt-in. Arguments this tool computes (-connect, -port, -mod,
     -profiles, -window, -nolauncher, -exe, -filePatching, -x, -y) are refused
@@ -563,6 +688,19 @@ def client_start(
             return fail("window must be two positive integers, like [1920, 1080]",
                         hint="it overrides machine.window for this one launch")
         size = parsed
+
+    # Validated here, cheaply, ahead of every state check below -- the same
+    # place `window`'s own shape is checked. The FILE this canonical name
+    # gets written to is not resolved until `profiles` exists, further down.
+    canonical_language = ""
+    if language:
+        canonical_language = language_name(language)
+        if canonical_language is None:
+            return fail(
+                f"{language!r} is not a game language this engine has",
+                hint="the engine's own language columns (measured off "
+                     "dta/languagecore.pbo) are: " + ", ".join(ENGINE_LANGUAGES),
+            )
 
     running = session.client_pid()
     if running and is_alive(running, image=_tracked_image()):
@@ -625,6 +763,23 @@ def client_start(
 
     profiles = client_profiles_dir()
     profiles.mkdir(parents=True, exist_ok=True)
+
+    if canonical_language:
+        found_cfg = _find_client_cfg(profiles)
+        if not found_cfg.ok:
+            return found_cfg
+        cfg_path = found_cfg.data
+        try:
+            cfg_text = cfg_path.read_bytes().decode("utf-8", errors="replace")
+            cfg_path.write_bytes(
+                _write_language_line(cfg_text, canonical_language).encode("utf-8")
+            )
+        except OSError as exc:
+            return fail(
+                f"could not write the client's language into {cfg_path}: {exc}",
+                hint="check the file is not held open or read-only, then try again",
+            )
+
     background = _background_setting()
 
     # -serverMod mods are dedicated-server only; a client never loads them, so
@@ -904,6 +1059,28 @@ def client_status() -> Result:
         # outlives the call that made it.
         "gamepad": gamepad.status().data,
     })
+
+
+def client_language() -> str | None:
+    """The client's current UI language, read out of its own DayZ.cfg -- or
+    None when there is no file to read, or no `language=` line in it.
+
+    Read-only, like `_background_setting`: whatever set it last -- a
+    previous `client_start(language=...)`, or the person at the machine
+    picking one in the game's own options -- this only reports it. Used by
+    `ui_preview` so every report says which language the shot was taken in:
+    the whole point of this axis is that the SAME layout can overflow in
+    translation and not in English, so a report that does not say which one
+    it shows is not trustworthy on its own.
+    """
+    found = _find_client_cfg(client_profiles_dir())
+    if not found.ok:
+        return None
+    try:
+        text = found.data.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return _read_language_line(text)
 
 
 # ---------------------------------------------------------------------------

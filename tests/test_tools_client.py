@@ -121,6 +121,20 @@ def with_pause_mode(stand: Path, value) -> None:
     )
 
 
+def with_dayz_cfg(
+    stand: Path, user: str = "Survivor",
+    text: str = 'language="English";\r\nGPU_MaxFramesAhead=3;\r\n',
+) -> Path:
+    """Write the client's DayZ.cfg the way the game writes it: CRLF, as bytes
+    -- write_bytes rather than write_text so no newline translation can slip
+    in and make a fixture lie about what the real file looks like."""
+    users = stand / "clientprofile" / "Users" / user
+    users.mkdir(parents=True, exist_ok=True)
+    cfg = users / "DayZ.cfg"
+    cfg.write_bytes(text.encode("utf-8"))
+    return cfg
+
+
 def started_client(tmp_path, monkeypatch, *, players=1, pause_mode=2):
     """The common arrangement: a live stand, a connected client, fast polling.
 
@@ -576,6 +590,193 @@ def test_client_status_reports_the_window_the_setting_and_the_player_count(tmp_p
     assert result.data["background"]["pause_mode"] == 2
     assert result.data["players"] == 1
     assert result.data["gamepad"]["pad"] == "closed"
+
+
+# ---------------------------------------------------------------------------
+# language -- validation, the pure DayZ.cfg rewrite, and client_start/language
+# ---------------------------------------------------------------------------
+
+
+def test_language_name_matches_case_insensitively_and_returns_the_capitalised_spelling():
+    assert client.language_name("english") == "English"
+    assert client.language_name("ENGLISH") == "English"
+    assert client.language_name("EnGlIsH") == "English"
+    assert client.language_name(" russian ") == "Russian"
+    assert client.language_name("original") == "Original"
+
+
+def test_language_name_refuses_a_name_the_engine_does_not_have():
+    assert client.language_name("Klingon") is None
+    assert client.language_name("") is None
+
+
+def test_language_name_covers_every_measured_engine_column():
+    """Every column measured off dta/languagecore.pbo, the two Chinese
+    variants included -- accepted on the same capitalised-name rule as the
+    other twelve, per the module's own docstring about them being unmeasured."""
+    for lang in client.ENGINE_LANGUAGES:
+        assert client.language_name(lang) == lang.capitalize(), lang
+        assert client.language_name(lang.upper()) == lang.capitalize(), lang
+    assert "chinese" in client.ENGINE_LANGUAGES and "chinesesimp" in client.ENGINE_LANGUAGES
+
+
+def test_write_language_line_replaces_an_existing_line_and_keeps_everything_else_byte_identical():
+    text = 'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+    out = client._write_language_line(text, "Russian")
+    assert out == 'language="Russian";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+
+
+def test_write_language_line_inserts_as_the_first_line_when_there_is_none():
+    text = "GPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n"
+    out = client._write_language_line(text, "English")
+    assert out == 'language="English";\r\nGPU_MaxFramesAhead=3;\r\nsceneComplexity=200000;\r\n'
+
+
+def test_write_language_line_preserves_crlf_line_endings():
+    text = 'language="English";\r\nGPU_MaxFramesAhead=3;\r\n'
+    out = client._write_language_line(text, "German")
+    assert out == 'language="German";\r\nGPU_MaxFramesAhead=3;\r\n'
+    assert "\r\n" in out and "\r\r" not in out
+
+
+def test_write_language_line_preserves_lf_only_files_without_adding_carriage_returns():
+    text = 'language="English";\nGPU_MaxFramesAhead=3;\n'
+    out = client._write_language_line(text, "German")
+    assert out == 'language="German";\nGPU_MaxFramesAhead=3;\n'
+    assert "\r" not in out
+
+
+def test_write_language_line_replaces_the_line_wherever_it_sits_not_only_first():
+    text = 'GPU_MaxFramesAhead=3;\r\nlanguage="English";\r\nsceneComplexity=200000;\r\n'
+    out = client._write_language_line(text, "Czech")
+    assert out == 'GPU_MaxFramesAhead=3;\r\nlanguage="Czech";\r\nsceneComplexity=200000;\r\n'
+
+
+def test_read_language_line_finds_the_value_or_none():
+    assert client._read_language_line('language="Czech";\r\nX=1;\r\n') == "Czech"
+    assert client._read_language_line("X=1;\r\nY=2;\r\n") is None
+    assert client._read_language_line("") is None
+
+
+def test_find_client_cfg_refuses_when_there_is_none(tmp_path):
+    profiles = tmp_path / "clientprofile"
+    (profiles / "Users" / "Survivor").mkdir(parents=True)
+    result = client._find_client_cfg(profiles)
+    assert result.ok is False
+    assert "DayZ.cfg" in result.error
+    assert "client_start" in result.hint
+
+
+def test_find_client_cfg_finds_the_one_file(tmp_path):
+    profiles = tmp_path / "clientprofile"
+    cfg = profiles / "Users" / "Survivor" / "DayZ.cfg"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_bytes(b'language="English";\r\n')
+    result = client._find_client_cfg(profiles)
+    assert result.ok is True
+    assert result.data == cfg
+
+
+def test_find_client_cfg_refuses_when_more_than_one_user_dir_has_one(tmp_path):
+    profiles = tmp_path / "clientprofile"
+    for user in ("Survivor", "Other"):
+        cfg = profiles / "Users" / user / "DayZ.cfg"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_bytes(b'language="English";\r\n')
+    result = client._find_client_cfg(profiles)
+    assert result.ok is False
+    assert "ambiguous" in result.error
+    assert "Survivor" in result.error and "Other" in result.error
+
+
+def test_client_language_reads_the_current_value(tmp_path):
+    root, stand, game = make_project(tmp_path)
+    with_dayz_cfg(stand, text='language="Polish";\r\nGPU_MaxFramesAhead=3;\r\n')
+    assert client.client_language() == "Polish"
+
+
+def test_client_language_is_none_with_no_file(tmp_path):
+    make_project(tmp_path)
+    assert client.client_language() is None
+
+
+def test_client_language_is_none_when_the_file_has_no_language_line(tmp_path):
+    root, stand, game = make_project(tmp_path)
+    with_dayz_cfg(stand, text="GPU_MaxFramesAhead=3;\r\n")
+    assert client.client_language() is None
+
+
+def test_client_start_refuses_an_unknown_language(tmp_path, monkeypatch):
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+    result = client.client_start(timeout=5, language="Klingon")
+    assert result.ok is False
+    assert "Klingon" in result.error
+    assert "english" in result.hint
+
+
+def test_client_start_writes_the_language_case_insensitively_before_launching(tmp_path, monkeypatch):
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+    cfg = with_dayz_cfg(stand, text='language="English";\r\nGPU_MaxFramesAhead=3;\r\n')
+
+    started = client.client_start(timeout=5, language="russian")
+
+    assert started.ok is True, started.error
+    # The rewrite happens synchronously, before the job's own thread is even
+    # started -- so it does not need waiting for.
+    text = cfg.read_bytes().decode("utf-8")
+    assert text == 'language="Russian";\r\nGPU_MaxFramesAhead=3;\r\n'
+    wait_for_job(started.data["job_id"])
+
+
+def test_client_start_refuses_a_language_when_no_dayz_cfg_exists_yet(tmp_path, monkeypatch):
+    """DayZ.cfg is written by the engine the first time it runs, not by this
+    tool -- a project whose client has never started has none to edit."""
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+
+    result = client.client_start(timeout=5, language="English")
+
+    assert result.ok is False
+    assert "DayZ.cfg" in result.error
+    assert "client_start" in result.hint
+    # A synchronous refusal, not a job failure: nothing was spawned.
+    assert result.data is None
+
+
+def test_client_start_refuses_an_ambiguous_language_write(tmp_path, monkeypatch):
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+    with_dayz_cfg(stand, user="Survivor")
+    with_dayz_cfg(stand, user="Other")
+
+    result = client.client_start(timeout=5, language="English")
+
+    assert result.ok is False
+    assert "ambiguous" in result.error
+
+
+def test_client_start_leaves_the_language_alone_by_default(tmp_path, monkeypatch):
+    """No DayZ.cfg exists at all here, and the call must still succeed --
+    language="" (the default) touches nothing."""
+    root, stand, game, _spawned = started_client(tmp_path, monkeypatch)
+
+    started = client.client_start(timeout=5)
+
+    assert started.ok is True, started.error
+    wait_for_job(started.data["job_id"])
+
+
+def test_language_never_becomes_a_launch_argument(tmp_path, monkeypatch):
+    root, stand, game, spawned = started_client(tmp_path, monkeypatch)
+    with_dayz_cfg(stand)
+
+    started = client.client_start(timeout=5, language="English")
+
+    assert started.ok is True, started.error
+    wait_for_job(started.data["job_id"])
+    cmd = spawned[0]
+    # A substring check would trip on this test's own name inside tmp_path
+    # (pytest names the directory after the test) -- what actually matters
+    # is that no argument IS a -language flag, and the engine has none.
+    assert not any(part.lower().startswith("-language") for part in cmd)
 
 
 # ---------------------------------------------------------------------------
