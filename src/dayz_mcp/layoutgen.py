@@ -450,6 +450,13 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
     else:
         if "at" in attrs:
             raise LayoutGenError(f"{kind}: `at` is not allowed under a vbox/hbox -- the container places it", ctx.file, path)
+        # An anchor is refused for the same reason `at` is, and it is the
+        # worse of the two: it does not move the widget, it changes what the
+        # coordinate the container computed MEANS (`bottom_ref` reads a
+        # top-down offset as a bottom-up one), so the child lands far away
+        # and the siblings do not follow.
+        if anchor:
+            raise LayoutGenError(f"{kind}: `anchor` is not allowed under a vbox/hbox -- the container places it", ctx.file, path)
         x, y, fw, fh = placed
         forced = (fw, fh)
     builder = BUILDERS.get(kind)

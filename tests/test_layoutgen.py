@@ -250,6 +250,12 @@ def test_several_fills_share_the_remainder_equally():
     ({"vbox": {"children": [{"panel": {"name": "A", "h": 400, "color": "$panel"}},
                             {"panel": {"name": "B", "h": 400, "color": "$panel"}}]}}, "does not fit: needs 800, has 478"),
     ({"vbox": {"children": [{"panel": {"name": "A", "at": [1, 1], "h": 40, "color": "$panel"}}]}}, "`at` is not allowed under a vbox/hbox"),
+    # An anchor changes what the container's own coordinate MEANS: the vbox
+    # computed "40 down from the top" and `bottom` makes the engine read it
+    # as "40 up from the bottom", moving the child a screen away from where
+    # the column put it while its siblings stay. Same class of mistake as
+    # `at`, and refused the same way.
+    ({"vbox": {"children": [{"panel": {"name": "A", "anchor": "bottom", "h": 40, "color": "$panel"}}]}}, "`anchor` is not allowed under a vbox/hbox"),
     ({"hbox": {"h": 30, "children": [{"label": {"name": "A", "text": "x"}}]}}, "w is required here"),
     ({"vbox": {"children": [{"text": {"name": "T", "text": "x"}}]}}, "text needs h inside a vbox"),
 ])
