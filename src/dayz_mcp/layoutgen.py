@@ -1142,8 +1142,12 @@ def main(argv=None) -> int:
         print(loaded.error)
         return 1
     prof = loaded.data
+    mod = args[1] if len(args) > 1 else ""
+    if mod and mod not in prof.build.mods:
+        print(f"{mod!r} is not a mod of this project; it declares: {', '.join(prof.build.mods)}")
+        return 1
     try:
-        report = build_project(prof.root, prof.build.mods, prof.build.sources, args[1] if len(args) > 1 else "")
+        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod)
     except LayoutGenError as exc:
         print(f"refused: {exc}")
         return 1

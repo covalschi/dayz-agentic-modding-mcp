@@ -507,3 +507,15 @@ def test_build_project_needs_tokens_once_a_ui_folder_exists(tmp_path):
     (root / "ui" / "tokens.json").unlink()
     with pytest.raises(LayoutGenError, match="ui/tokens.json is missing"):
         build_project(root, ["MyMod"], {}, write=True)
+
+
+def test_main_refuses_an_unknown_mod_and_builds_a_known_one(tmp_path, capsys):
+    root = project(tmp_path)
+    (root / "dayz-mcp.toml").write_text('[project]\nname = "my-mod"\n\n[build]\nmods = ["MyMod"]\n', encoding="utf-8")
+    (root / "MyMod" / "config.cpp").write_text("class CfgPatches { };\n", encoding="utf-8")
+    assert layoutgen.main([str(root), "Other"]) == 1
+    assert "'Other' is not a mod of this project; it declares: MyMod" in capsys.readouterr().out
+    assert not (root / "MyMod" / "gui").exists()
+    assert layoutgen.main([str(root), "MyMod"]) == 0
+    assert "wrote MyMod/gui/layouts/oz_page.layout" in capsys.readouterr().out
+    assert layoutgen.main([]) == 2
