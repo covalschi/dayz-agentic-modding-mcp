@@ -808,7 +808,7 @@ GALLERY_RETRY_SECONDS = 3.0
 
 
 def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None = None,
-               timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+               timeout: float = WORLD_TIMEOUT_SECONDS, strict: bool = False) -> Result:
     """Every entry of the project's preview index through ui_preview, and one
     index.html with all the pictures and counts -- the look before a push.
 
@@ -822,6 +822,10 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     a client (re)connect. That entry's dict then carries `"retried": True`
     (absent otherwise); any other failure is recorded as today, with no
     second attempt.
+
+    `strict=True` fails the call when any entry has an error-severity issue
+    or failed to render -- the one-call readiness criterion of spec
+    2026-09-04 §9; the data is the same either way.
     """
     guard = require_project()
     if guard:
@@ -891,7 +895,13 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     index_path = out_dir / "index.html"
     index_path.write_text(uireport.render_gallery(entries), encoding="utf-8")
     failed = sum(1 for e in entries if not e["ok"])
-    return ok({"dir": str(out_dir), "index": str(index_path), "entries": entries, "failed": failed})
+    data = {"dir": str(out_dir), "index": str(index_path), "entries": entries, "failed": failed}
+    if strict:
+        bad = [e["name"] for e in entries if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
+        if bad:
+            return Result(False, data, f"{len(bad)} entries with errors: {', '.join(bad)}",
+                          "open index.html -- every error is a rectangle the engine drew, not a guess")
+    return ok(data)
 
 
 def layout_build(mod: str = "") -> Result:

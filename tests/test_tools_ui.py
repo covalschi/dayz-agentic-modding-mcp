@@ -706,6 +706,32 @@ def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_
     assert index.exists() and "tab" in index.read_text(encoding="utf-8")
 
 
+def test_ui_gallery_strict_fails_on_any_error(live, monkeypatch, tmp_path):
+    root = Path(session.profile().root)
+    (root / "preview").mkdir(exist_ok=True)
+    (root / "preview" / "index.json").write_text(json.dumps({"entries": [
+        {"name": "good", "layout": "MyMod/gui/layouts/a.layout"},
+        {"name": "bad", "layout": "MyMod/gui/layouts/b.layout"}]}), encoding="utf-8")
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+        from dayz_mcp.errors import ok as _ok
+        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text("r", encoding="utf-8")
+        errors = 1 if name == "bad" else 0
+        return _ok({"dir": str(out), "shot": str(out / "shot.png"), "report": str(out / "report.html"),
+                    "count": 1, "total": 1, "issues": {"error": errors, "warn": 0}, "notes": [],
+                    "host": (0, 0, 60, 52), "emulated": True})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    relaxed = ui.ui_gallery()
+    assert relaxed.ok
+    strict = ui.ui_gallery(strict=True)
+    assert not strict.ok and strict.error == "1 entries with errors: bad"
+    assert strict.data["entries"][1]["issues"] == {"error": 1, "warn": 0}
+    assert Path(strict.data["index"]).exists()
+
+
 def test_ui_gallery_restarts_the_client_for_each_requested_size(live, monkeypatch):
     from dayz_mcp.tools import session
     root = Path(session.profile().root)
