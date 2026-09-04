@@ -165,6 +165,53 @@ def test_root_props_inset_and_children_offsets():
     assert "   style rover_sim_colorable\n" in text
 
 
+NO_INSET_ROOT = {"frame": {"name": "MyPage", "size": [640, 518]}}
+
+
+def test_a_proportional_panel_insets_an_exact_width_child():
+    """`Bg` is `size: "fill"` at the box's own (uninset) origin -- the "full"
+    shortcut -- so IT is written proportional (`size 1 1`). Its OWN `inset`
+    must still apply to ITS children exactly as the exact-size path already
+    does: `Card` (an ordinary declared size) lands at `inset, inset` with its
+    width unchanged, not at `0, 0`."""
+    out = build(page({"panel": {"name": "Bg", "size": "fill", "inset": 20, "children": [
+        {"panel": {"name": "Card", "size": [100, 50], "color": "$panel"}},
+    ]}}, root=NO_INSET_ROOT))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  PanelWidgetClass Bg {\n   visible 1\n   ignorepointer 1\n   position 0 0\n   size 1 1\n   hexactpos 1\n   vexactpos 1\n   hexactsize 0\n   vexactsize 0\n" in text
+    assert "    PanelWidgetClass Card {\n     visible 1\n     ignorepointer 1\n     position 20 20\n     size 100 50\n     hexactpos 1\n     vexactpos 1\n     hexactsize 1\n     vexactsize 1\n" in text
+    assert clean(text) == []
+
+
+def test_a_proportional_panels_fill_child_is_reduced_by_the_inset_on_both_sides():
+    """`Bg` renders proportional, but the ROOM it hands its children is the
+    real (unit) width the enclosing frame gave it -- carried by `box.w` even
+    though `Bg`'s own `size` line never spells it out -- minus the inset on
+    both sides: 640 - 2*20 = 600, exactly what the exact-size path computes
+    for the same panel with a declared `size`."""
+    out = build(page({"panel": {"name": "Bg", "size": "fill", "inset": 20, "children": [
+        {"panel": {"name": "Inner", "w": "fill", "h": 30, "color": "$panel"}},
+    ]}}, root=NO_INSET_ROOT))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "    PanelWidgetClass Inner {\n     visible 1\n     ignorepointer 1\n     position 20 20\n     size 600 30\n     hexactpos 1\n     vexactpos 1\n     hexactsize 1\n     vexactsize 1\n" in text
+    assert clean(text) == []
+
+
+def test_a_proportional_panel_with_an_inset_needs_a_known_width():
+    """Under a `screen` root nobody knows the real resolution ahead of time
+    -- the box handed down is genuinely `Box(None, None)` -- so a
+    proportional panel cannot subtract its inset from an unknown width.
+    Silently keeping the un-reduced (unknown-turned-`None`) box would either
+    crash somewhere unrelated downstream or -- once a width IS eventually
+    known some other way -- overflow the panel's own edge by `inset`; this
+    refuses at the point of the actual problem instead."""
+    with pytest.raises(LayoutGenError, match="a proportional panel with an inset needs a known width"):
+        build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", "children": [
+            {"panel": {"name": "Bg", "size": "fill", "inset": 10, "children": [
+                {"panel": {"name": "Card", "size": [50, 50], "color": "$panel"}}]}}]}}},
+            tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+
+
 def test_a_label_can_size_itself_and_anchor_right():
     out = build(page({"label": {"name": "Where", "anchor": "right", "at": [12, 6], "w": "auto", "h": 25,
                                 "text": "nearby", "font": "small", "color": "$muted", "align": "right"}}))

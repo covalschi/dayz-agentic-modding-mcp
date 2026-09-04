@@ -61,6 +61,10 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_pair(value) -> bool:
+    return isinstance(value, list) and len(value) == 2 and all(_is_number(v) for v in value)
+
+
 @dataclass
 class Tokens:
     """`ui/tokens.json`: the numbers, colours and fonts written once."""
@@ -122,7 +126,7 @@ class Tokens:
                 got = self.device[name]
                 if _is_number(got):
                     return float(got)
-                if isinstance(got, list) and len(got) == 2 and all(_is_number(v) for v in got):
+                if _is_pair(got):
                     raise LayoutGenError(f"{value!r} is a pair, not a number", file, node)
                 raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
             table = {"space": self.space, "size": self.size}.get(group)
@@ -137,7 +141,7 @@ class Tokens:
             got = self.device.get(value[len("$device."):])
             if _is_number(got):
                 raise LayoutGenError(f"{value!r} is a number, not a pair", file, node)
-            if not (isinstance(got, list) and len(got) == 2 and all(_is_number(v) for v in got)):
+            if not _is_pair(got):
                 raise LayoutGenError(f"{value!r} is not a [w, h] device token", file, node)
             return float(got[0]), float(got[1])
         if isinstance(value, list) and len(value) == 2:
@@ -536,6 +540,33 @@ def _b_frame(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     return [w]
 
 
+def _inset_extent(size: float, exact: bool, box_size: float | None, inset: float,
+                  axis: str, ctx: Ctx, path: str) -> float | None:
+    """One axis of the room a panel's children have inside its own `inset`.
+
+    Exact (`size` is a real number -- this node's own hexactsize/vexactsize)
+    is `size - 2 * inset`, same arithmetic as a frame's inner box. Proportional
+    (the "full" shortcut: this node's own `size` is 1.0, not a usable number)
+    instead needs what the node actually renders as -- `box_size`, the box IT
+    was handed, which is a real number whenever the nearest ancestor that
+    fixed it is exact (a frame/vbox of known size) even though this node's
+    own line stays proportional. Without an inset there is nothing to
+    subtract, so an unresolved `box_size` (still `None`, e.g. under a screen
+    root) passes through unchanged, exactly as before; WITH one, subtracting
+    from an unknown `box_size` would hand a fill child the un-reduced box and
+    it would overflow past this node's true edge by `inset` -- refused
+    instead of silently drawn wrong.
+    """
+    if exact:
+        return size - 2 * inset
+    if not inset:
+        return box_size
+    if box_size is None:
+        raise LayoutGenError(f"a proportional panel with an inset needs a known {axis} -- "
+                             "give it w/h or drop the inset", ctx.file, path)
+    return box_size - 2 * inset
+
+
 def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     w = _common_leaf("PanelWidgetClass", attrs, ctx, path, ignore=not attrs.get("click"))
     width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
@@ -563,9 +594,9 @@ def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
         edge.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
         out.append(edge)
     inset = ctx.tokens.number(attrs.get("inset", 0), ctx.file, path, "inset")
-    inner_w = width - 2 * inset if hx else box.w
-    inner_h = height - 2 * inset if vx else box.h
-    inner = Box(inner_w, inner_h, prop_w=not hx, ox=inset, oy=inset)
+    inner_w = _inset_extent(width, hx, box.w, inset, "width", ctx, path)
+    inner_h = _inset_extent(height, vx, box.h, inset, "height", ctx, path)
+    inner = Box(inner_w, inner_h, prop_w=not hx and not inset, ox=inset, oy=inset)
     w.children = _children(attrs, ctx, inner, path)
     return out + [w]
 
