@@ -19,7 +19,7 @@ from pathlib import Path
 from ..errors import Result, fail
 from ..knowledge.layers import SCRIPT_SUFFIXES
 from ..knowledge.parse import parse_source
-from ..layoutgen import GENERATED_MARK, LayoutGenError, build_project
+from ..layoutgen import GENERATED_MARK, LayoutGenError, build_project, target_path
 from ..layoutlint import lint_layout
 from ..layoutvocab import load_vocab
 from ..lint import Finding, REFUSE, WARN, lint_index, lint_text
@@ -71,8 +71,7 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
                            where.split(" ")[0], 0))
     for target in report.written:
         src = report.sources[target]
-        head, _, rest = target.partition("/")
-        disk = resolve_mod_dir(prof.root, prof.build.sources, head) / rest
+        disk = target_path(prof.root, prof.build.sources, target)
         if not disk.is_file():
             out.append(Finding("layout-stale", REFUSE, f"{target} is described by {src} but has not been built",
                                "run layout_build", target, 0))
@@ -93,7 +92,12 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
                 rel = path.relative_to(prof.root).as_posix()
             except ValueError:
                 rel = path.as_posix()
-            if rel in generated:
+            # `generated` is keyed LOGICALLY (`<Mod>/gui/layouts/x.layout`),
+            # which is the disk path only when `sources[mod] == mod`. The
+            # finding still names the disk-relative path, because that is
+            # the file a reader has to go and delete.
+            logical = f"{name}/{path.relative_to(mod_root).as_posix()}"
+            if logical in generated:
                 continue
             text, why = _read_text(path)
             if text is None:

@@ -1074,6 +1074,20 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     return Emitted(files, ctx.notes)
 
 
+def target_path(root, sources: dict[str, str], target: str) -> Path:
+    """Where a generated key (`<Mod>/gui/layouts/x.layout`) lands on disk.
+
+    The keys of `BuildReport.files` are LOGICAL -- they always start with the
+    mod's declared NAME -- while the disk path follows `[build] sources`,
+    which may put the mod anywhere under the project (`"."` for a mod whose
+    config.cpp sits at the repository root). The two agree only when
+    `sources[mod] == mod`, so every caller that needs one from the other goes
+    through this one formula.
+    """
+    head, _, rest = target.partition("/")
+    return resolve_mod_dir(root, sources, head) / rest
+
+
 @dataclass
 class BuildReport:
     """`written` = files that differed from what is on disk (and were written
@@ -1123,8 +1137,7 @@ def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
                 report.files[target] = text
                 report.sources[target] = rel
     for target, text in report.files.items():
-        head, _, rest = target.partition("/")
-        out = resolve_mod_dir(root, sources, head) / rest
+        out = target_path(root, sources, target)
         current = out.read_text(encoding="utf-8") if out.is_file() else None
         if current is not None and current.replace("\r\n", "\n") == text:
             report.unchanged.append(target)

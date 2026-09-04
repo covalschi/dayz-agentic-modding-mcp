@@ -245,6 +245,31 @@ def test_a_generated_file_with_no_description_warns(tmp_path):
     assert len(found) == 1 and found[0]["severity"] == WARN and found[0]["file"] == "MyMod/gui/layouts/old.layout"
 
 
+def test_a_generated_layout_of_a_root_sourced_mod_is_not_an_orphan(tmp_path):
+    """`[build] sources` may point a mod at the repository root itself --
+    resolve_mod_dir's own documented case, for a mod whose config.cpp is not
+    in a named subfolder. The generator keys its files LOGICALLY
+    (`<Mod>/gui/layouts/x.layout`) while the orphan scan walked DISK paths,
+    and the two agree only when `sources[mod] == mod`: every generated file
+    of such a project was warned about as described by nothing, which is the
+    exact opposite of the truth, and strict=True failed outright."""
+    session.reset()
+    root = tmp_path / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "dayz-mcp.toml").write_text(
+        textwrap.dedent(PROFILE).replace('mods = ["MyMod"]', 'mods = ["MyMod"]\nsources = { MyMod = "." }'),
+        encoding="utf-8")
+    (root / "config.cpp").write_text("class CfgPatches { };\n", encoding="utf-8")
+    opened = tools.project_open(str(root))
+    assert opened.ok, opened.error
+    with_ui(root)
+    assert tools.layout_build().ok
+    assert (root / "gui" / "layouts" / "oz_page.layout").is_file()
+    res = tools.mod_lint(strict=True)
+    assert by_check(res, "layout-orphan") == [] and by_check(res, "layout-stale") == []
+    assert res.ok, res.error
+
+
 def test_a_description_that_does_not_build_refuses_and_a_note_warns(tmp_path):
     open_with(tmp_path / "proj", {})
     root = tmp_path / "proj"
