@@ -627,6 +627,21 @@ def test_layout_classes_are_a_build_setting(tmp_path):
     assert load_profile(write(tmp_path, BASE)).data.build.layout_classes == []
 
 
+def test_tokens_path_defaults_to_ui_tokens_json_and_is_overridable(tmp_path):
+    assert load_profile(write(tmp_path, BASE)).data.build.tokens == "ui/tokens.json"
+    main = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = "shared/tokens.json"')
+    assert load_profile(write(tmp_path, main)).data.build.tokens == "shared/tokens.json"
+
+
+def test_tokens_path_must_be_a_non_empty_string(tmp_path):
+    r = load_profile(write(tmp_path, BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = 3')))
+    assert not r.ok
+    assert "build.tokens must be a non-empty string" in r.error
+    r = load_profile(write(tmp_path, BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ""')))
+    assert not r.ok
+    assert "build.tokens must be a non-empty string" in r.error
+
+
 def test_machine_window_is_two_positive_integers(tmp_path):
     p = load_profile(write(tmp_path, BASE, "[machine]\nwindow = [3840, 1600]\n")).data
     assert p.machine.window == (3840, 1600)

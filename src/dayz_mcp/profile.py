@@ -49,6 +49,12 @@ class BuildCfg:
     # Widget classes the project's own scripts declare (a modded map widget,
     # say), so the layout lint does not refuse them as unknown.
     layout_classes: list[str] = field(default_factory=list)
+    # Where the layout generator's tokens.json lives, if not the default
+    # <root>/ui/tokens.json -- absolute, or relative to this file. Unlike
+    # project_root, an absolute value is allowed: unlike a model's prefix
+    # tree, a tokens file has no path baked into anything downstream that
+    # would make one machine's absolute path wrong on another.
+    tokens: str = "ui/tokens.json"
 
 
 @dataclass
@@ -277,6 +283,14 @@ def load_profile(path: str | Path) -> Result:
         return fail("build.layout_classes must be a list of strings",
                     hint='e.g. layout_classes = ["MyMapWidgetClass"]')
 
+    # Check build.tokens is a non-empty string
+    tokens_val = b.get("tokens", "ui/tokens.json")
+    if not isinstance(tokens_val, str) or not tokens_val:
+        return fail(
+            f"build.tokens must be a non-empty string, got {tokens_val!r}",
+            hint='write it as tokens = "ui/tokens.json" (the default), or drop the key',
+        )
+
     build = BuildCfg(
         mods=[str(m) for m in mods_val],
         pre_script=str(b.get("pre_script", "")),
@@ -285,6 +299,7 @@ def load_profile(path: str | Path) -> Result:
         stage=stage_val,
         project_root=project_root_val,
         layout_classes=layout_classes,
+        tokens=tokens_val,
     )
     if not build.mods:
         return fail(

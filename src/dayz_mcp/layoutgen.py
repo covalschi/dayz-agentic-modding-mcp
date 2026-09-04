@@ -113,6 +113,17 @@ class Tokens:
         t.device = dict(data.get("device") or {})
         return t
 
+    @classmethod
+    def load(cls, path: Path, label: str = "") -> "Tokens":
+        """`from_text`, read off disk. `label` (default: `path` itself) is
+        what every error this can raise names -- the caller's choice, so a
+        tokens file inside the project reads `ui/tokens.json ...` rather
+        than the machine's own absolute path to it."""
+        label = label or str(path)
+        if not path.is_file():
+            raise LayoutGenError(f"{label} is missing but {UI_DIR}/<Mod>/ exists", label)
+        return cls.from_text(path.read_text(encoding="utf-8"), label)
+
     def number(self, value, file: str, node: str, what: str = "size") -> float:
         """A number, or a `$space.<name>` / `$size.<name>` / `$device.<name>` reference.
 
@@ -340,6 +351,7 @@ ALLOWED: dict[str, set[str]] = {
     # still gets its Edge/Bg/Text idiom from `_b_button`, which never reads it.
     "button":  COMMON | {"text", "font", "bg", "edge", "glyph", "children"},
     "rule":    COMMON,
+    "bar":     COMMON | {"track", "fill"},
     "gap":     COMMON,
     "chip":    COMMON,
     "section": COMMON | {"text", "font"},
@@ -355,6 +367,11 @@ ALLOWED: dict[str, set[str]] = {
     "listbox": COMMON | {"font", "props"},
     "preview": COMMON | {"props"},
     "raw":     COMMON | {"class", "props", "children"},
+    # "children" is granted, not read: `_b_map` refuses it itself, by name
+    # (gui-layouts.md §19 -- a map paints over its children, not just under
+    # them), the same way `button` grants it to give its own note instead of
+    # the generic "map does not take ['children']".
+    "map":     COMMON | {"children"},
 }
 ROOT_KINDS = ("frame", "panel", "button")
 
@@ -467,10 +484,14 @@ def _common_leaf(cls: str, attrs: dict, ctx: Ctx, path: str, ignore: bool = True
     return w
 
 
-def _color(w: W, attrs: dict, ctx: Ctx, path: str, default: str) -> W:
-    rgba, from_token = ctx.tokens.color_of(attrs.get("color", default), ctx.file, path)
+def _color(w: W, attrs: dict, ctx: Ctx, path: str, default: str, attr: str = "color") -> W:
+    """Read `attrs[attr]` (a `$token` or a literal) and write it as `color`
+    on the widget. `attr` differs from `"color"` only for `bar`, whose one
+    node carries two colours (`track`/`fill`) -- each read and noted the
+    same way every other primitive's single `color` is."""
+    rgba, from_token = ctx.tokens.color_of(attrs.get(attr, default), ctx.file, path)
     if not from_token:
-        ctx.note(path, "color given as a literal -- use a $color token")
+        ctx.note(path, f"{attr} given as a literal -- use a $color token")
     return w.set("color", color_prop(rgba))
 
 
@@ -638,6 +659,27 @@ def _b_rule(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     return [w.set("priority", fmt(priority)).set("style", PANEL_STYLE)]
 
 
+def _b_bar(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A track holding one child, `<Name>Fill`: `position 0 0`, `size 0 h`
+    -- an EMPTY bar. Widening it is the script's job at runtime
+    (`bar.GetSize(w, h); fill.SetSize(w * value01, h)`); the generator never
+    sees the fraction, only the height both panels share. `h` defaults to
+    `$size.bar` -- here directly, and in `_default_main` for a vbox, which
+    resolves a child's height before `_b_bar` ever sees it."""
+    w = _common_leaf("PanelWidgetClass", attrs, ctx, path)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, "$size.bar")
+    place(w, x, y, width, height, hx, vx, anchor)
+    _color(w, attrs, ctx, path, "$rule", attr="track")
+    w.set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    fill = W("PanelWidgetClass", ctx.claim(w.name + "Fill", path))
+    fill.set("visible", "1").set("ignorepointer", "1")
+    place(fill, 0, 0, 0, height)
+    _color(fill, attrs, ctx, path, "$accent", attr="fill")
+    fill.set("priority", "1").set("style", PANEL_STYLE)
+    w.children = [fill]
+    return [w]
+
+
 def _b_chip(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     """A 4-unit bar the full height of its parent, hidden until a script colours it."""
     w = W("PanelWidgetClass", ctx.claim(attrs.get("name", ""), path), comment=str(attrs.get("note", "")))
@@ -664,7 +706,7 @@ def _b_gap(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 
 BUILDERS = {
     "frame": _b_frame, "panel": _b_panel, "label": _b_label,
-    "rule": _b_rule, "chip": _b_chip, "gap": _b_gap,
+    "rule": _b_rule, "bar": _b_bar, "chip": _b_chip, "gap": _b_gap,
 }
 
 
@@ -697,6 +739,8 @@ def _default_main(kind: str, attrs: dict, ctx: Ctx, path: str, vertical: bool) -
             return ctx.tokens.size["field"]
         if kind == "rule":
             return 1.0
+        if kind == "bar":
+            return ctx.tokens.number("$size.bar", ctx.file, path, "h")
         if kind == "section":
             return 30.0
         if kind == "header":
@@ -1163,6 +1207,21 @@ def _b_listbox(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]
     return _b_raw_like("TextListboxWidgetClass", attrs, ctx, box, path, x, y, forced, anchor, priority)
 
 
+def _b_map(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """The engine's own map: position/size and `clipchildren 1`, nothing
+    else -- no `priority`, because none changes its paint order (native
+    rendering after the scripted UI, always on top, measured gui-layouts.md
+    §19); no `children`, because that same measurement is what the map
+    paints over, whichever side of it they are declared on."""
+    if attrs.get("children"):
+        raise LayoutGenError("map paints over its children -- put overlays beside it", ctx.file, path)
+    w = _common_leaf("MapWidgetClass", attrs, ctx, path, ignore=False)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
+    place(w, x, y, width, height, hx, vx, anchor)
+    w.set("clipchildren", "1")
+    return [w]
+
+
 def _b_preview(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     worst = max(ctx.chain) if ctx.chain else 0
     if worst > PREVIEW_PRIORITY_MAX:
@@ -1181,7 +1240,7 @@ def _b_raw(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 
 BUILDERS.update({
     "stack": _b_stack, "hrow": _b_hrow, "grid": _b_grid, "list": _b_list, "keypad": _b_keypad,
-    "listbox": _b_listbox, "preview": _b_preview, "raw": _b_raw,
+    "listbox": _b_listbox, "map": _b_map, "preview": _b_preview, "raw": _b_raw,
 })
 
 
@@ -1401,13 +1460,16 @@ class BuildReport:
 
 
 def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
-                  write: bool = True) -> BuildReport:
+                  write: bool = True, tokens_path: str | Path | None = None) -> BuildReport:
     """Generate every description under `<root>/ui/<Mod>/` for `mods`.
 
     Generation completes for every file before anything is written, so a bad
     description leaves the disk exactly as it was. Files are written with LF
     endings, compared after normalising CRLF, so a checkout on either setting
     reads as unchanged.
+
+    `tokens_path` names `ui/tokens.json` (the default, `None`) or wherever
+    `[build] tokens` points instead -- absolute, or relative to `root`.
     """
     root = Path(root)
     report = BuildReport()
@@ -1415,11 +1477,14 @@ def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
     dirs = [(m, root / UI_DIR / m) for m in wanted if (root / UI_DIR / m).is_dir()]
     if not dirs:
         return report
-    tokens_rel = f"{UI_DIR}/{TOKENS_FILE}"
-    tokens_path = root / UI_DIR / TOKENS_FILE
-    if not tokens_path.is_file():
-        raise LayoutGenError(f"{tokens_rel} is missing but {UI_DIR}/<Mod>/ exists", tokens_rel)
-    tokens = Tokens.from_text(tokens_path.read_text(encoding="utf-8"), tokens_rel)
+    tokens_file = Path(tokens_path) if tokens_path is not None else root / UI_DIR / TOKENS_FILE
+    if not tokens_file.is_absolute():
+        tokens_file = root / tokens_file
+    try:
+        tokens_label = tokens_file.relative_to(root).as_posix()
+    except ValueError:
+        tokens_label = str(tokens_file)
+    tokens = Tokens.load(tokens_file, tokens_label)
     for m, ui_dir in dirs:
         for path in sorted(ui_dir.glob("*.json")):
             rel = path.relative_to(root).as_posix()
@@ -1466,7 +1531,7 @@ def main(argv=None) -> int:
         print(f"{mod!r} is not a mod of this project; it declares: {', '.join(prof.build.mods)}")
         return 1
     try:
-        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod)
+        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod, tokens_path=prof.build.tokens)
     except LayoutGenError as exc:
         print(f"refused: {exc}")
         return 1

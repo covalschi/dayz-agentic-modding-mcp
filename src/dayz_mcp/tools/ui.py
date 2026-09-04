@@ -1035,7 +1035,7 @@ def layout_build(mod: str = "") -> Result:
         return fail(f"{mod!r} is not a mod of this project",
                     hint="the project declares: " + ", ".join(prof.build.mods))
     try:
-        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod)
+        report = build_project(prof.root, prof.build.mods, prof.build.sources, mod, tokens_path=prof.build.tokens)
     except LayoutGenError as exc:
         return fail(f"refused: {exc}", hint="fix the description under ui/; nothing was written")
     return ok({"written": report.written, "unchanged": report.unchanged, "notes": report.notes,

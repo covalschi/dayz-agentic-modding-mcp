@@ -19,7 +19,7 @@ TOKENS = {
              "hint": {"size": 14}, "small": {"size": 13}, "tiny": {"size": 10},
              "field": {"face": "gui/fonts/MetronBook14", "size": 14, "fixed": True}},
     "space": {"page": 20, "gap": 10, "tight": 6},
-    "size": {"button": 30, "field": 28, "header": 34, "hint": 22, "contactRow": 55},
+    "size": {"button": 30, "field": 28, "header": 34, "hint": 22, "contactRow": 55, "bar": 10},
     "device": {"page": [1306, 518], "iconset": "my_icons", "rail": 60},
 }
 
@@ -792,6 +792,27 @@ def test_build_project_needs_tokens_once_a_ui_folder_exists(tmp_path):
         build_project(root, ["MyMod"], {}, write=True)
 
 
+def test_build_project_reads_tokens_from_the_given_path(tmp_path):
+    # ui/tokens.json absent; tokens live elsewhere, named by the profile
+    (tmp_path / "ui" / "MyMod").mkdir(parents=True)
+    (tmp_path / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(PAGE), encoding="utf-8")
+    (tmp_path / "MyMod").mkdir()
+    tokens_path = tmp_path / "shared" / "tokens.json"
+    tokens_path.parent.mkdir()
+    tokens_path.write_text(json.dumps(TOKENS), encoding="utf-8")
+    report = build_project(tmp_path, ["MyMod"], {}, write=True, tokens_path=tokens_path)
+    assert report.written == ["MyMod/gui/layouts/oz_page.layout"]
+    assert (tmp_path / "MyMod" / "gui" / "layouts" / "oz_page.layout").is_file()
+
+
+def test_build_project_names_a_missing_given_tokens_path_in_the_refusal(tmp_path):
+    (tmp_path / "ui" / "MyMod").mkdir(parents=True)
+    (tmp_path / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(PAGE), encoding="utf-8")
+    (tmp_path / "MyMod").mkdir()
+    with pytest.raises(LayoutGenError, match=r"shared/tokens\.json is missing"):
+        build_project(tmp_path, ["MyMod"], {}, write=True, tokens_path=tmp_path / "shared" / "tokens.json")
+
+
 def test_main_refuses_an_unknown_mod_and_builds_a_known_one(tmp_path, capsys):
     root = project(tmp_path)
     (root / "dayz-mcp.toml").write_text('[project]\nname = "my-mod"\n\n[build]\nmods = ["MyMod"]\n', encoding="utf-8")
@@ -1025,3 +1046,78 @@ def test_bottom_center_anchor():
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
     assert "   halign center_ref\n   valign bottom_ref\n   position 0 38\n   size 800 24\n" in text
     assert clean(text) == []
+
+
+def test_bar_is_a_track_with_an_empty_fill():
+    out = build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [300, 100], "children": [
+        {"bar": {"name": "Charge", "at": [10, 10], "w": 200, "h": 10, "track": "$rule", "fill": "$accent"}}]}}})
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert (
+        "  PanelWidgetClass Charge {\n"
+        "   visible 1\n"
+        "   ignorepointer 1\n"
+        "   position 10 10\n"
+        "   size 200 10\n"
+        "   hexactpos 1\n"
+        "   vexactpos 1\n"
+        "   hexactsize 1\n"
+        "   vexactsize 1\n"
+        "   color 1 1 1 0.08\n"
+        "   priority 0\n"
+        "   style rover_sim_colorable\n"
+    ) in text
+    assert (
+        "    PanelWidgetClass ChargeFill {\n"
+        "     visible 1\n"
+        "     ignorepointer 1\n"
+        "     position 0 0\n"
+        "     size 0 10\n"            # the fill starts empty; the script widens it
+        "     hexactpos 1\n"
+        "     vexactpos 1\n"
+        "     hexactsize 1\n"
+        "     vexactsize 1\n"
+        "     color 0.31 0.71 0.91 1\n"
+        "     priority 1\n"
+        "     style rover_sim_colorable\n"
+        "    }\n"
+    ) in text
+    assert clean(text) == []
+
+
+def test_bar_takes_its_default_height_in_a_vbox():
+    out = build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [300, 100], "children": [
+        {"vbox": {"name": "Col", "size": "fill", "children": [
+            {"bar": {"name": "Charge", "w": "fill"}}]}}]}}})
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "     size 300 10\n" in text            # $size.bar = 10 in the test TOKENS
+    assert "       size 0 10\n" in text            # the fill, same height as the track
+    assert "     color 1 1 1 0.08\n" in text        # track defaults to $rule
+    assert "       color 0.31 0.71 0.91 1\n" in text  # fill defaults to $accent
+    assert clean(text) == []
+
+
+def test_bar_accepts_no_children():
+    with pytest.raises(LayoutGenError, match=r"bar does not take \['children'\]"):
+        build(page({"bar": {"name": "Charge", "w": 200, "h": 10, "children": [{"label": {"name": "L"}}]}}))
+
+
+def test_map_is_a_clipped_map_widget_without_children():
+    out = build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [1306, 518], "children": [
+        {"map": {"name": "Map", "at": [0, 0], "size": [1306, 430]}}]}}})
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert (
+        "  MapWidgetClass Map {\n"
+        "   visible 1\n"
+        "   position 0 0\n"
+        "   size 1306 430\n"
+        "   hexactpos 1\n"
+        "   vexactpos 1\n"
+        "   hexactsize 1\n"
+        "   vexactsize 1\n"
+        "   clipchildren 1\n"
+        "  }\n"
+    ) in text
+    assert clean(text) == []
+    with pytest.raises(LayoutGenError, match="paints over its children"):
+        build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [10, 10], "children": [
+            {"map": {"name": "Map", "size": [10, 10], "children": [{"label": {"name": "L"}}]}}]}}})

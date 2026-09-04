@@ -35,6 +35,7 @@ A mod is declared once, by name: sources in `<root>/Name` by default, output
 | `build.project_root` | the directory every model path resolves against, relative to this file. It must **contain** the mod's prefix folder. Required by the model tools and by nothing else — see "The asset pipeline" |
 | `build.pre_script` | a PowerShell script run before packing, for projects that generate code first |
 | `build.layout_classes` | widget classes your own scripts declare (a modded map widget, say), so the layout lint does not refuse them as unknown |
+| `build.tokens` | where the layout generator's tokens file lives, if not the default `ui/tokens.json` — absolute, or relative to this file |
 | `expect.ready_line` | the line the mod prints when it has finished loading — see below |
 | `expect.counters` | `key = value` pairs carried by that line, compared numerically |
 | `expect.max_warnings` | warning budget; omit the key to disable the check |
@@ -133,6 +134,17 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
+
+### Layout primitives
+
+Most of `layout_build`'s JSON vocabulary (`frame`, `panel`, `vbox`, `label`, `button`, ...)
+reads as what it says. Two are worth a sentence each, because what they emit is not
+obvious from the description:
+
+| Primitive | Emits |
+|---|---|
+| `bar` | a `PanelWidgetClass` track (`track`, default `$rule`) holding one child, `<Name>Fill` — `position 0 0`, `size 0 h` (exact, colour `fill`, default `$accent`), `priority 1`. The fill starts at width 0; a script widens it (`bar.GetSize(w, h); fill.SetSize(w * value01, h)`) — the generator never sees the fraction. `h` defaults to `$size.bar`. No `children` |
+| `map` | a `MapWidgetClass` with `clipchildren 1` and nothing else — the engine's own map needs no more, and no `priority` line changes its paint order. No `children`: a map paints over them regardless |
 
 **Windows and the `ms-gamebar` dialog.** The first time a virtual controller is
 attached, Windows tries to open Xbox Game Bar. On a machine that has it, nothing is

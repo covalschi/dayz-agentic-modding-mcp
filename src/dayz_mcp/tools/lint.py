@@ -62,7 +62,7 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
     raised a note (layout-desc: refuse / warn)."""
     out = []
     try:
-        report = build_project(prof.root, mods, prof.build.sources, write=False)
+        report = build_project(prof.root, mods, prof.build.sources, write=False, tokens_path=prof.build.tokens)
     except LayoutGenError as exc:
         return [Finding("layout-desc", REFUSE, str(exc), "fix the description under ui/", exc.file, 0)]
     for note in report.notes:
