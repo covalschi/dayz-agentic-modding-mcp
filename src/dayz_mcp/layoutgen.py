@@ -153,3 +153,441 @@ class Tokens:
             return {"face": value.get("face", FONT_FACE_DEFAULT), "size": float(value["size"]),
                     "fixed": bool(value.get("fixed", False))}, False
         raise LayoutGenError(f'font must be a token name or {{"face", "size"}}, got {value!r}', file, node)
+
+
+@dataclass
+class W:
+    """One widget to write: class, name, ordered properties, children."""
+
+    cls: str
+    name: str
+    props: list[tuple[str, str]] = field(default_factory=list)
+    children: list["W"] = field(default_factory=list)
+    comment: str = ""
+
+    def set(self, key: str, value: str) -> "W":
+        for i, (k, _v) in enumerate(self.props):
+            if k == key:
+                self.props[i] = (key, value)
+                return self
+        self.props.append((key, value))
+        return self
+
+
+def quoted(text: str) -> str:
+    return '"' + text + '"'
+
+
+def key(name: str) -> str:
+    """A property key as the engine wants it: quoted when it has spaces."""
+    return quoted(name) if " " in name else name
+
+
+def color_prop(rgba: list[float]) -> str:
+    return " ".join(fmt(v) for v in rgba)
+
+
+def render(w: W, indent: int = 0) -> str:
+    pad = " " * indent
+    lines = [f"{pad}// {c}".rstrip() for c in w.comment.splitlines()]
+    lines.append(f"{pad}{w.cls} {w.name} {{")
+    lines += [f"{pad} {k} {v}" for k, v in w.props]
+    if w.children:
+        lines.append(f"{pad} {{")
+        lines += [render(c, indent + 2) for c in w.children]
+        lines.append(f"{pad} }}")
+    lines.append(f"{pad}}}")
+    return "\n".join(lines)
+
+
+ANCHORS = {"right": ("right_ref", None), "bottom": (None, "bottom_ref"),
+           "center": ("center_ref", "center_ref"), "bottom-right": ("right_ref", "bottom_ref")}
+
+
+def place(w: W, x: float, y: float, width: float, height: float,
+          hexact: bool = True, vexact: bool = True, anchor: str = "") -> W:
+    """Position and size, exact unless told otherwise; an anchor moves the reference edge."""
+    ha, va = ANCHORS.get(anchor, (None, None))
+    if ha:
+        w.set("halign", ha)
+    if va:
+        w.set("valign", va)
+    w.set("position", f"{fmt(x)} {fmt(y)}")
+    w.set("size", f"{fmt(width)} {fmt(height)}")
+    w.set("hexactpos", "1")
+    w.set("vexactpos", "1")
+    w.set("hexactsize", "1" if hexact else "0")
+    w.set("vexactsize", "1" if vexact else "0")
+    return w
+
+
+@dataclass
+class Box:
+    """What a child may occupy: the parent's inner size and where that inner
+    area starts (`ox`/`oy`, a frame's inset -- positions are written relative
+    to the parent WIDGET, so a child at the inner origin sits at `ox oy`).
+    `w`/`h` None = not known here (an engine container decides); `prop_w` =
+    the parent's width is the engine's to decide (a row under a scrollbar),
+    so a full-width child is `size 1`."""
+
+    w: float | None
+    h: float | None
+    prop_w: bool = False
+    ox: float = 0.0
+    oy: float = 0.0
+
+
+@dataclass
+class Ctx:
+    tokens: Tokens
+    file: str
+    layout_dir: str
+    notes: list[str] = field(default_factory=list)
+    files: dict[str, str] = field(default_factory=dict)
+    names: set[str] = field(default_factory=set)
+    gaps: int = 0
+
+    def claim(self, name, path: str) -> str:
+        if not isinstance(name, str) or not name:
+            raise LayoutGenError("a widget needs a name (a non-empty string)", self.file, path)
+        if name in self.names:
+            raise LayoutGenError(f"duplicate widget name {name!r} in this file", self.file, path)
+        self.names.add(name)
+        return name
+
+    def gap_name(self, path: str) -> str:
+        self.gaps += 1
+        return self.claim(f"Gap{self.gaps}", path)
+
+    def fresh(self) -> "Ctx":
+        """A context for another FILE of the same build: names start over,
+        notes and files are shared."""
+        return Ctx(self.tokens, self.file, self.layout_dir, self.notes, self.files)
+
+    def note(self, path: str, text: str) -> None:
+        self.notes.append(f"{self.file} {path}: {text}")
+
+
+@dataclass
+class Emitted:
+    """What one description makes: `files` maps a project-relative path
+    (`<Mod>/gui/layouts/<name>.layout`) to its text."""
+
+    files: dict[str, str]
+    notes: list[str]
+
+
+COMMON = {"name", "note", "hidden", "priority", "anchor", "at", "w", "h", "size", "color"}
+ALLOWED: dict[str, set[str]] = {
+    "frame":   COMMON | {"inset", "children"},
+    "panel":   COMMON | {"edge", "click", "children"},
+    "vbox":    COMMON | {"gap", "children"},
+    "hbox":    COMMON | {"gap", "children"},
+    "stack":   COMMON | {"children"},
+    "row":     COMMON | {"children"},
+    "grid":    COMMON | {"cols", "rows", "gap", "children"},
+    "list":    COMMON | {"stack", "rows"},
+    "keypad":  COMMON | {"cols", "rows", "gap", "keys", "font"},
+    "label":   COMMON | {"text", "font", "align", "valign"},
+    "text":    COMMON | {"text", "font", "align", "plain"},
+    "field":   COMMON | {"text", "font", "lines"},
+    "button":  COMMON | {"text", "font", "bg", "edge", "glyph"},
+    "rule":    COMMON,
+    "gap":     COMMON,
+    "chip":    COMMON,
+    "section": COMMON | {"text", "font"},
+    "image":   COMMON | {"props"},
+    "listbox": COMMON | {"font", "props"},
+    "preview": COMMON | {"props"},
+    "raw":     COMMON | {"class", "props", "children"},
+}
+ROOT_KINDS = ("frame", "panel")
+
+
+def _unpack(desc, file: str, path: str) -> tuple[str, dict]:
+    if not isinstance(desc, dict) or len(desc) != 1:
+        raise LayoutGenError("a node is an object with exactly one primitive key", file, path)
+    (kind, attrs), = desc.items()
+    if kind not in ALLOWED:
+        raise LayoutGenError(f"unknown primitive {kind!r}; known: {', '.join(sorted(ALLOWED))}", file, path)
+    if not isinstance(attrs, dict):
+        raise LayoutGenError(f"{kind} must hold an object of attributes", file, path)
+    extra = sorted(set(attrs) - ALLOWED[kind])
+    if extra:
+        raise LayoutGenError(f"{kind} does not take {extra}", file, path)
+    return kind, attrs
+
+
+def _priority(attrs: dict, ctx: Ctx, path: str, index: int) -> int:
+    if "priority" not in attrs:
+        return index
+    return int(ctx.tokens.number(attrs["priority"], ctx.file, path, "priority"))
+
+
+def _text_value(attrs: dict, ctx: Ctx, path: str) -> str:
+    text = str(attrs.get("text", ""))
+    if '"' in text:
+        raise LayoutGenError("a quote inside text hangs the engine's layout parser", ctx.file, path)
+    return text
+
+
+def _dim(attrs: dict, which: str, ctx: Ctx, path: str, avail: float | None, default,
+         allow_auto: bool = False):
+    """One of w/h: a number, a token, "fill" (= `avail`), "auto" (a label's
+    width) or `default`. `size: [w, h]` / `size: "fill"` stands for both."""
+    value = attrs.get(which, default)
+    if "size" in attrs:
+        size = attrs["size"]
+        if size == "fill":
+            value = "fill"
+        else:
+            pair = ctx.tokens.pair(size, ctx.file, path)
+            value = pair[0 if which == "w" else 1]
+    if value is None:
+        raise LayoutGenError(f"{which} is required here", ctx.file, path)
+    if value == "fill":
+        if avail is None:
+            raise LayoutGenError(f"{which}: fill needs an exact ancestor to fill", ctx.file, path)
+        return float(avail)
+    if value == "auto":
+        if not allow_auto:
+            raise LayoutGenError("auto is only a label's width", ctx.file, path)
+        return "auto"
+    return ctx.tokens.number(value, ctx.file, path, which)
+
+
+def _avail(side: float | None, inset: float) -> float | None:
+    """How much of a box a child `inset` units in can fill (from the left or
+    top for a plain child, from the edge it hangs off for an anchored one)."""
+    if side is None:
+        return None
+    return side - inset
+
+
+def _size_leaf(attrs: dict, ctx: Ctx, box: Box, path: str, x: float, y: float, forced: tuple,
+               anchor: str, default_h, allow_auto: bool = False) -> tuple:
+    """`(w, h, hexact, vexact)` for a leaf.
+
+    `size: "fill"` at the true origin of an uninset parent is written as
+    `size 1 1` proportional -- a full-size background that follows its
+    parent whatever the engine makes of it; a child with no width of its own
+    at x = 0 in a proportional parent (a row under a scrollbar) is
+    `size 1 h`; every other fill is an exact remainder of the inner box."""
+    inset_x = x - box.ox
+    inset_y = y - box.oy
+    full = attrs.get("size") == "fill" and x == 0 and y == 0 and box.ox == 0 and box.oy == 0 and not anchor
+    if full:
+        return 1.0, 1.0, False, False
+    w = forced[0] if forced[0] is not None else _dim(attrs, "w", ctx, path, _avail(box.w, inset_x), "fill", allow_auto)
+    h = forced[1] if forced[1] is not None else _dim(attrs, "h", ctx, path, _avail(box.h, inset_y), default_h)
+    hexact = True
+    declared_w = "w" in attrs or "size" in attrs or forced[0] is not None
+    if w != "auto" and box.prop_w and inset_x == 0 and not anchor and not declared_w:
+        w, hexact = 1.0, False
+    if w == "auto":
+        return 0.0, h, True, True
+    return w, h, hexact, True
+
+
+def _common_leaf(cls: str, attrs: dict, ctx: Ctx, path: str, ignore: bool = True) -> W:
+    w = W(cls, ctx.claim(attrs.get("name", ""), path), comment=str(attrs.get("note", "")))
+    w.set("visible", "0" if attrs.get("hidden") else "1")
+    if ignore:
+        w.set("ignorepointer", "1")
+    return w
+
+
+def _color(w: W, attrs: dict, ctx: Ctx, path: str, default: str) -> W:
+    rgba, from_token = ctx.tokens.color_of(attrs.get("color", default), ctx.file, path)
+    if not from_token:
+        ctx.note(path, "color given as a literal -- use a $color token")
+    return w.set("color", color_prop(rgba))
+
+
+def _text_font(w: W, attrs: dict, ctx: Ctx, path: str, default: str) -> dict:
+    font, from_token = ctx.tokens.font_of(attrs.get("font", default), ctx.file, path)
+    if not from_token:
+        ctx.note(path, "font given as a literal -- use a $font token")
+    w.set("text", quoted(_text_value(attrs, ctx, path)))
+    w.set("font", quoted(font["face"]))
+    w.set(key("exact text"), "1")
+    if not font["fixed"]:
+        w.set(key("exact text size"), fmt(font["size"]))
+    return font
+
+
+def _children(attrs: dict, ctx: Ctx, box: Box, path: str) -> list[W]:
+    out: list[W] = []
+    for i, child in enumerate(attrs.get("children", [])):
+        out += emit(child, ctx, box, f"{path}.{i}", i)
+    return out
+
+
+def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None = None,
+         on_page: bool = False) -> list[W]:
+    """One description node -> the widgets it stands for (a nameless
+    vbox/hbox returns its children flattened, everything else one widget).
+
+    `placed` = (x, y, w, h) decided by a vbox/hbox (w or h None = as the
+    node declares); without it the node places itself with `at` (default
+    0 0, offset by the box's inset) and `anchor`. `on_page` marks a direct
+    child of the page root, where a visible `at` is noted: pages are built
+    with containers, not coordinates.
+    """
+    kind, attrs = _unpack(desc, ctx.file, path)
+    anchor = attrs.get("anchor", "")
+    if anchor and anchor not in ANCHORS:
+        raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", ctx.file, path)
+    if placed is None:
+        ax, ay = ctx.tokens.pair(attrs.get("at", [0, 0]), ctx.file, path, "at")
+        if anchor == "center":
+            x, y = ax, ay
+        else:
+            x, y = ax + box.ox, ay + box.oy
+        forced = (None, None)
+        if on_page and "at" in attrs and not attrs.get("hidden"):
+            ctx.note(path, "`at` on a page child -- build the page with vbox/hbox")
+    else:
+        if "at" in attrs:
+            raise LayoutGenError(f"{kind}: `at` is not allowed under a vbox/hbox -- the container places it", ctx.file, path)
+        x, y, fw, fh = placed
+        forced = (fw, fh)
+    builder = BUILDERS.get(kind)
+    if builder is None:
+        raise LayoutGenError(f"{kind} is not implemented", ctx.file, path)
+    return builder(attrs, ctx, box, path, x, y, forced, anchor, _priority(attrs, ctx, path, index))
+
+
+def _b_frame(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("FrameWidgetClass", attrs, ctx, path, ignore=False)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
+    place(w, x, y, width, height, hx, vx, anchor)
+    w.set("priority", fmt(priority))
+    inset = ctx.tokens.number(attrs.get("inset", 0), ctx.file, path, "inset")
+    inner_w = width - 2 * inset if hx else box.w
+    inner_h = height - 2 * inset if vx else box.h
+    inner = Box(inner_w, inner_h, prop_w=not hx, ox=inset, oy=inset)
+    w.children = _children(attrs, ctx, inner, path)
+    return [w]
+
+
+def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("PanelWidgetClass", attrs, ctx, path, ignore=not attrs.get("click"))
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, None)
+    place(w, x, y, width, height, hx, vx, anchor)
+    _color(w, attrs, ctx, path, "$panel")
+    w.set("priority", fmt(priority)).set("style", PANEL_STYLE)
+    out = []
+    if attrs.get("edge"):
+        if not (hx and vx):
+            raise LayoutGenError("edge needs an exact size", ctx.file, path)
+        edge = W("PanelWidgetClass", ctx.claim(w.name + "Edge", path))
+        edge.set("visible", "0" if attrs.get("hidden") else "1").set("ignorepointer", "1")
+        place(edge, x - 1, y - 1, width + 2, height + 2, anchor=anchor)
+        rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
+        edge.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
+        out.append(edge)
+    inner = Box(width if hx else box.w, height if vx else box.h, prop_w=not hx)
+    w.children = _children(attrs, ctx, inner, path)
+    return out + [w]
+
+
+def _b_label(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("TextWidgetClass", attrs, ctx, path)
+    font, _ = ctx.tokens.font_of(attrs.get("font", "body"), ctx.file, path)
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor,
+                                       font["size"] + 9, allow_auto=True)
+    place(w, x, y, width, height, hx, vx, anchor)
+    _color(w, attrs, ctx, path, "$text")
+    w.set("priority", fmt(priority))
+    _text_font(w, attrs, ctx, path, "body")
+    w.set(key("text halign"), str(attrs.get("align", "left")))
+    w.set(key("text valign"), str(attrs.get("valign", "center")))
+    if attrs.get("w") == "auto":
+        w.set(key("size to text h"), "1")
+    return [w]
+
+
+def _b_rule(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    w = _common_leaf("PanelWidgetClass", attrs, ctx, path)
+    width, _h, hx, _vx = _size_leaf(attrs, ctx, box, path, x, y, (forced[0], 1.0), anchor, 1)
+    place(w, x, y, width, 1, hx, True, anchor)
+    _color(w, attrs, ctx, path, "$rule")
+    return [w.set("priority", fmt(priority)).set("style", PANEL_STYLE)]
+
+
+def _b_chip(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """A 4-unit bar the full height of its parent, hidden until a script colours it."""
+    w = W("PanelWidgetClass", ctx.claim(attrs.get("name", ""), path), comment=str(attrs.get("note", "")))
+    w.set("visible", "0" if attrs.get("hidden", True) else "1").set("ignorepointer", "1")
+    width = ctx.tokens.number(attrs.get("w", 4), ctx.file, path, "w")
+    place(w, x, y, width, 1, True, False, anchor)
+    _color(w, attrs, ctx, path, "$white")
+    return [w.set("priority", fmt(priority)).set("style", PANEL_STYLE)]
+
+
+def _b_gap(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
+    """An empty panel that holds space inside an ENGINE container (hrow/stack);
+    inside vbox/hbox a gap is arithmetic and never reaches here. In a stack
+    it takes the stack's width (`size 1 h` under a scrollbar), in an hrow
+    it must say its `w`."""
+    w = W("PanelWidgetClass", ctx.gap_name(path)).set("visible", "1").set("ignorepointer", "1")
+    width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, 0)
+    place(w, x, y, width, height, hx, vx)
+    rgba, _ = ctx.tokens.color_of("$none", ctx.file, path)
+    return [w.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)]
+
+
+BUILDERS = {
+    "frame": _b_frame, "panel": _b_panel, "label": _b_label,
+    "rule": _b_rule, "chip": _b_chip, "gap": _b_gap,
+}
+
+
+def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> Emitted:
+    """One page description -> its .layout text plus the row files it owns.
+
+    `file` is the description's project-relative path (named in errors and
+    in the GENERATED header); `layout_dir` is where the files go
+    (`OpenZone_PDA/gui/layouts`), so the keys of `files` are project-relative.
+    """
+    if not isinstance(desc, dict):
+        raise LayoutGenError("a description is a JSON object", file)
+    name = desc.get("layout")
+    if not isinstance(name, str) or not name:
+        raise LayoutGenError('"layout" (the file name without .layout) is required', file)
+    extra = sorted(set(desc) - {"layout", "note", "root", "body"})
+    if extra:
+        raise LayoutGenError(f"a description does not take {extra}", file)
+    if "root" not in desc:
+        raise LayoutGenError('"root" is required', file)
+    ctx = Ctx(tokens=tokens, file=file, layout_dir=layout_dir)
+    kind, attrs = _unpack(desc["root"], file, "root")
+    if kind not in ROOT_KINDS:
+        raise LayoutGenError(f"root must be a frame or a panel, not {kind}", file, "root")
+    if "size" not in attrs or attrs["size"] == "fill":
+        raise LayoutGenError("root needs an exact size [w, h]", file, "root")
+    width, height = tokens.pair(attrs["size"], file, "root")
+    root = W("FrameWidgetClass" if kind == "frame" else "PanelWidgetClass",
+             ctx.claim(attrs.get("name", name), "root"), comment=str(attrs.get("note", "")))
+    root.set("visible", "0" if attrs.get("hidden") else "1")
+    place(root, 0, 0, width, height)
+    if kind == "panel":
+        _color(root, attrs, ctx, "root", "$screen")
+        root.set("style", PANEL_STYLE)
+    if "priority" in attrs:
+        root.set("priority", fmt(_priority(attrs, ctx, "root", 0)))
+    inset = tokens.number(attrs.get("inset", 0), file, "root", "inset")
+    inner = Box(width - 2 * inset, height - 2 * inset, ox=inset, oy=inset)
+    children = list(attrs.get("children", []))
+    if "body" in desc:
+        children.append(desc["body"])
+    for i, child in enumerate(children):
+        root.children += emit(child, ctx, inner, f"root.{i}", i, on_page=True)
+    head = [GENERATED_MARK + file + " -- edit the source, not this file."]
+    head += [f"// {line}" for line in str(desc.get("note", "")).splitlines()]
+    text = "\n".join(head) + "\n" + render(root) + "\n"
+    target = f"{layout_dir}/{name}.layout" if layout_dir else f"{name}.layout"
+    files = {target: text}
+    files.update(ctx.files)
+    return Emitted(files, ctx.notes)
