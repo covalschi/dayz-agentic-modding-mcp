@@ -271,9 +271,9 @@ def _compile_dialog(pid: int) -> str:
 
     Measured 2026-09-01 on this stand: two boots in a row were killed by hand
     at the dialog, each after a compile error that named its file and line --
-    `oz_module.c(385): Can't find variable 'OZ_FactionInvites'` the first
-    time, `oz_pdamodule.c(1523): ... 'OZ_PdaRolePush'` the second. Neither
-    reached any log this tool reads.
+    `<mod>module.c(385): Can't find variable 'SomeGlobal'` the first time,
+    `<other>module.c(1523): ... 'AnotherGlobal'` the second. Neither reached
+    any log this tool reads.
 
     client_compile_check has watched for this since 2026-08-31; the server
     boot did not, which is why this exists. The dialog's own text IS the best

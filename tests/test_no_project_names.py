@@ -79,6 +79,32 @@ def offending_tokens(text: str, *, is_python: bool = False) -> set[str]:
     return found - ALLOWED
 
 
+# A mod FOLDER is only one shape a project name takes. A class prefix, a page
+# file name or a repository name is another, and three of them reached this
+# repository -- one of them a module docstring in `src/` -- while the guard
+# above watched for `@`-prefixed folders alone. Case-SENSITIVE and whole
+# tokens: these are spellings, not words, and a lowercase `oz` on its own is
+# ordinary text. Assembled at runtime for the same reason every token in the
+# tests below is: spelled out, each would be an offender sitting in a file
+# this very sweep reads.
+OWNER_TOKEN = re.compile("|".join([
+    r"\bOpen" + r"Zone\w*",
+    r"\bOZ" + r"_\w+",
+    r"\boz" + r"_pda\w*",
+]))
+#: Where the owner's prefixes are swept: the server, its tests, and the one
+#: document that describes it to a stranger. Plan folders and notes are the
+#: owner's own workspace and name his projects on purpose.
+OWNER_SCOPE = ("src", "tests", "README.md")
+
+
+def owner_tokens(text: str) -> set[str]:
+    """Every owner-project token in `text`. THE definition, for the same
+    reason offending_tokens is: the proof-it-bites tests below and the sweep
+    itself must exercise one code path."""
+    return {m.group(0) for m in OWNER_TOKEN.finditer(text)}
+
+
 def iter_paths():
     """Everything under the repository root that is not deliberately skipped --
     directories included, because a directory NAME can be a leak all by
@@ -108,6 +134,34 @@ def test_no_concrete_mod_names_anywhere():
         if found:
             offenders[str(path.relative_to(ROOT))] = sorted(found)
     assert not offenders, f"mod names leaked into the repository: {offenders}"
+
+
+def test_no_owner_project_prefixes_in_the_server_its_tests_or_the_readme():
+    """The same rule as the sweep above, for the shape it could not see. A
+    project prefix in a test fixture is a leak the way a mod folder is: the
+    next reader copies it, and the server starts fitting one project."""
+    offenders = {}
+    for path in iter_text_files():
+        rel = path.relative_to(ROOT)
+        if rel.parts[0] not in OWNER_SCOPE:
+            continue
+        found = owner_tokens(path.read_text(encoding="utf-8", errors="ignore"))
+        if found:
+            offenders[str(rel)] = sorted(found)
+    assert not offenders, f"owner project names leaked into the server: {offenders}"
+
+
+def test_the_owner_prefix_guard_still_bites():
+    """Each of the three shapes that actually leaked, and one generic name
+    that must stay legal -- otherwise the guard could pass by matching
+    nothing at all."""
+    for token in ("Open" + "Zone_PDA", "OZ" + "_PdaMenu", "oz" + "_pda_tab"):
+        assert owner_tokens(f"the layout {token} sits here") == {token}, token
+        assert owner_tokens(f'"{token}/gui/layouts/x.layout"') == {token}, token
+    assert owner_tokens("MyMod/gui/layouts/tab.layout MyPage ContactRow") == set()
+    # Case-sensitive and whole-token: an ordinary word starting with "oz" or
+    # a capitalised sentence is not a project name.
+    assert owner_tokens("the ozone layer, and Ozzy") == set()
 
 
 def test_the_path_sweep_actually_visits_directories():

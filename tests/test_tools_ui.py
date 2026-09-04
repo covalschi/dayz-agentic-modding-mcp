@@ -374,24 +374,24 @@ def test_the_mods_refusal_reaches_the_caller_verbatim(live):
 
 
 def test_ui_load_sends_the_layout_and_the_host(live):
-    result = ui.ui_load("OpenZone_PDA/gui/layouts/oz_pda_tab.layout", host="60 52")
+    result = ui.ui_load("MyMod/gui/layouts/tab.layout", host="60 52")
     assert result.ok, result.error
     sent = live.sent[-1]
     assert sent.verb == "ui_load"
-    assert sent.args["layout"] == "OpenZone_PDA/gui/layouts/oz_pda_tab.layout"
+    assert sent.args["layout"] == "MyMod/gui/layouts/tab.layout"
     assert sent.args["host"] == "60 52"
     assert "fixture" not in sent.args
 
 
 def test_ui_load_normalises_backslashes_and_refuses_an_empty_path(live):
-    ui.ui_load("OpenZone_PDA\\gui\\layouts\\x.layout")
-    assert live.sent[-1].args["layout"] == "OpenZone_PDA/gui/layouts/x.layout"
+    ui.ui_load("MyMod\\gui\\layouts\\x.layout")
+    assert live.sent[-1].args["layout"] == "MyMod/gui/layouts/x.layout"
     result = ui.ui_load("")
     assert not result.ok and "layout" in result.error
 
 
 def test_a_fixture_dict_travels_as_json_text(live):
-    fixture = {"ops": [{"op": "add", "layout": "OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "into": "TabRail", "count": 6}]}
+    fixture = {"ops": [{"op": "add", "layout": "MyMod/gui/layouts/tab.layout", "into": "TabRail", "count": 6}]}
     ui.ui_load("a.layout", fixture=fixture)
     assert json.loads(live.sent[-1].args["fixture"]) == fixture
 
@@ -514,7 +514,7 @@ def test_ui_preview_loads_shoots_checks_and_reports(live, monkeypatch):
     })
     shots = []
     monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
-    result = ui.ui_preview("OpenZone_PDA/gui/layouts/a.layout", name="a")
+    result = ui.ui_preview("MyMod/gui/layouts/a.layout", name="a")
     assert result.ok, result.error
     assert [c.verb for c in live.sent] == ["ui_load"]
     assert shots == [(100, 50, 400, 300)]
@@ -575,7 +575,7 @@ def test_ui_preview_pages_through_a_big_tree(live, monkeypatch):
 def test_ui_preview_live_reads_the_open_menu_instead_of_loading(live, monkeypatch):
     live.state = BridgeState(tick=9, session_id="client-1", world={
         "ui_root": "menu", "ui_total": 1, "ui_host": "",
-        "ui_nodes": [node_line(path="", cls="FrameWidget", name="OZ_PdaRoot", rect="0 0 3840 1600")],
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="MyRoot", rect="0 0 3840 1600")],
     })
     shots = []
     monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
@@ -703,7 +703,7 @@ def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_
     root = Path(session.profile().root)
     (root / "preview").mkdir(exist_ok=True)
     (root / "preview" / "index.json").write_text(json.dumps({"entries": [
-        {"name": "tab", "layout": "OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "host": "60 52"},
+        {"name": "tab", "layout": "MyMod/gui/layouts/tab.layout", "host": "60 52"},
         {"name": "bad", "layout": ""},
     ]}), encoding="utf-8")
     seen = []
@@ -722,7 +722,7 @@ def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     result = ui.ui_gallery()
     assert result.ok, result.error
-    assert seen == [("OpenZone_PDA/gui/layouts/oz_pda_tab.layout", "60 52", "tab"), ("", "", "bad")]
+    assert seen == [("MyMod/gui/layouts/tab.layout", "60 52", "tab"), ("", "", "bad")]
     assert result.data["failed"] == 1
     index = Path(result.data["index"])
     assert index.exists() and "tab" in index.read_text(encoding="utf-8")

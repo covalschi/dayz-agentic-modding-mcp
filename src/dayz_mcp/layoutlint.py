@@ -16,7 +16,7 @@ from .layoutvocab import load_vocab
 from .lint import REFUSE, WARN, Finding
 
 #: Above this, ItemPreviewWidget silently draws nothing. Measured live 2026-08
-#: (OZ_PdaMenu): 256 draws, 300 does not; vanilla never goes above 151.
+#: in a scripted menu: 256 draws, 300 does not; vanilla never goes above 151.
 PREVIEW_PRIORITY_MAX = 256
 
 #: What may draw a frame behind an edit box.

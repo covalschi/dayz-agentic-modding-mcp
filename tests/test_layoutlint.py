@@ -157,7 +157,7 @@ def test_a_duplicate_name_warns_with_the_first_line():
 
 def test_a_scriptclass_without_a_prefix_warns_and_an_empty_one_does_not():
     assert one(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass "Tabber"\n  }\n'), "layout-scriptclass-prefix").severity == WARN
-    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass "OZ_Tabber"\n  }\n')) == []
+    assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass "MM_Tabber"\n  }\n')) == []
     assert checks(wrap('  TextWidgetClass T {\n   size 1 1\n   scriptclass ""\n  }\n')) == []
 
 
