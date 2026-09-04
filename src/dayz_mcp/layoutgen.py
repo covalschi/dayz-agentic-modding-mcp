@@ -67,7 +67,13 @@ def _is_pair(value) -> bool:
 
 @dataclass
 class Tokens:
-    """`ui/tokens.json`: the numbers, colours and fonts written once."""
+    """`ui/tokens.json`: the numbers, colours and fonts written once.
+
+    `device` is the one group with no fixed shape of its own: an entry may
+    be a pair (`[w, h]`, e.g. a screen size), a scalar (a plain number, e.g.
+    a rail width) or a string (e.g. `iconset`, an imageset name) -- the
+    caller's own reader (`number()`, `pair()`, `_iconset`) is what decides
+    which shape it expects."""
 
     color: dict[str, list[float]] = field(default_factory=dict)
     font: dict[str, dict] = field(default_factory=dict)
@@ -128,7 +134,7 @@ class Tokens:
                     return float(got)
                 if _is_pair(got):
                     raise LayoutGenError(f"{value!r} is a pair, not a number", file, node)
-                raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
+                raise LayoutGenError(f"{value!r} is not a number", file, node)
             table = {"space": self.space, "size": self.size}.get(group)
             if table is None or name not in table:
                 raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
@@ -340,7 +346,12 @@ ALLOWED: dict[str, set[str]] = {
     "icon":    COMMON | {"set", "image"},
     "image":   COMMON | {"file", "stretch", "props"},
     "badge":   COMMON | {"font"},
-    "header":  COMMON | {"icon", "title", "actions", "gap", "font"},
+    # No "color": nothing under any project's `ui/` puts one directly on a
+    # header (grepped 2026-09-04) -- only ever inside `title`, where
+    # `_b_header` already reaches the title label with it. COMMON grants it
+    # like every primitive, but `_stackbox`'s own `row` never reads it, so a
+    # header carrying one had it silently dropped, no note.
+    "header":  (COMMON - {"color"}) | {"icon", "title", "actions", "gap", "font"},
     "listbox": COMMON | {"font", "props"},
     "preview": COMMON | {"props"},
     "raw":     COMMON | {"class", "props", "children"},
@@ -490,8 +501,9 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
     `placed` = (x, y, w, h) decided by a vbox/hbox (w or h None = as the
     node declares); without it the node places itself with `at` (default
     0 0, offset by the box's inset) and `anchor`. `on_page` marks a direct
-    child of the page root, where a visible `at` is noted: pages are built
-    with containers, not coordinates.
+    child of a frame/panel page root, where a visible `at` is noted: pages
+    are built with containers, not coordinates. False for a button root's
+    children -- a button root is a fixed-size compound control, not a page.
     """
     kind, attrs = _unpack(desc, ctx.file, path)
     anchor = attrs.get("anchor", "")
@@ -533,16 +545,17 @@ def _b_frame(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     place(w, x, y, width, height, hx, vx, anchor)
     w.set("priority", fmt(priority))
     inset = ctx.tokens.number(attrs.get("inset", 0), ctx.file, path, "inset")
-    inner_w = width - 2 * inset if hx else box.w
-    inner_h = height - 2 * inset if vx else box.h
-    inner = Box(inner_w, inner_h, prop_w=not hx, ox=inset, oy=inset)
+    inner_w = _inset_extent(width, hx, box.w, inset, "width", ctx, path)
+    inner_h = _inset_extent(height, vx, box.h, inset, "height", ctx, path)
+    inner = Box(inner_w, inner_h, prop_w=not hx and not inset, ox=inset, oy=inset)
     w.children = _children(attrs, ctx, inner, path)
     return [w]
 
 
 def _inset_extent(size: float, exact: bool, box_size: float | None, inset: float,
                   axis: str, ctx: Ctx, path: str) -> float | None:
-    """One axis of the room a panel's children have inside its own `inset`.
+    """One axis of the room a panel's or frame's children have inside its
+    own `inset`.
 
     Exact (`size` is a real number -- this node's own hexactsize/vexactsize)
     is `size - 2 * inset`, same arithmetic as a frame's inner box. Proportional
@@ -562,7 +575,7 @@ def _inset_extent(size: float, exact: bool, box_size: float | None, inset: float
     if not inset:
         return box_size
     if box_size is None:
-        raise LayoutGenError(f"a proportional panel with an inset needs a known {axis} -- "
+        raise LayoutGenError(f"a proportional panel or frame with an inset needs a known {axis} -- "
                              "give it w/h or drop the inset", ctx.file, path)
     return box_size - 2 * inset
 
@@ -735,6 +748,15 @@ def _stackbox(attrs, ctx, box, path, x, y, forced, anchor, priority, vertical: b
             sizes[i] = each
 
     wrap = bool(attrs.get("name")) or box.engine
+    if attrs.get("hidden") and not wrap:
+        # Without a name (and outside an engine container, which always
+        # wraps) a vbox/hbox never becomes its own widget: its children are
+        # flattened straight into the parent, so there is no `visible` line
+        # anywhere for `hidden` to set. COMMON grants it to every primitive
+        # including this one, so silently rendering a fully visible
+        # container would break that promise; `header` reaches this same
+        # code (an unnamed row) whenever it has no name of its own.
+        raise LayoutGenError("hidden needs a name -- a nameless container is not a widget", ctx.file, path)
     if wrap:
         frame = _common_leaf("FrameWidgetClass", attrs, ctx, path, ignore=False)
         place(frame, x, y, width, height, anchor=anchor)
@@ -1171,7 +1193,14 @@ def _iconset(attrs: dict, ctx: Ctx, path: str) -> str:
 
 
 def _b_icon(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
-    """A sprite of an imageset, alpha-blended and tinted by `color`."""
+    """A sprite of an imageset, alpha-blended and tinted by `color`.
+
+    No `"stretch mode"`, unlike `_b_image`'s three ImageWidget traps: an
+    imageset sprite already scales itself from the rect its own entry
+    declares, and most vanilla imageset-ref ImageWidgets set no stretch mode
+    at all (measured 2026-09-04, skill gui-layouts.md: 989 of 1392) -- this
+    is the measured default, not an oversight shared with `_b_image`.
+    """
     image = attrs.get("image")
     if not isinstance(image, str) or not image:
         raise LayoutGenError("icon needs image: the sprite's name in the set", ctx.file, path)
@@ -1296,8 +1325,8 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     if attrs.get("size") == "screen":
         if kind != "frame":
             raise LayoutGenError("only a frame root can be the whole screen", file, "root")
-        if "inset" in attrs:
-            ctx.note("root", "inset is ignored on a screen root")
+        if "inset" in attrs or "at" in attrs or anchor:
+            ctx.note("root", "inset/at/anchor are ignored on a screen root")
         place(root, 0, 0, 1, 1, hexact=False, vexact=False)
         inner = Box(None, None)
     else:
@@ -1308,6 +1337,14 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
         inner = Box(width - 2 * inset, height - 2 * inset, ox=inset, oy=inset)
     if kind == "button":
         root.set("text", quoted(""))
+        # Root-only: a button root holds page content the way a frame/panel
+        # root does, so build_layout (not _b_button) owns it, and none of
+        # the nested button's own idiom (text/font/bg/edge/glyph -> Edge/Bg/
+        # Text children) applies here. The mirror image of the note
+        # `_b_button` already gives a NESTED button for an ignored `children`.
+        ignored = [k for k in ("text", "font", "bg", "edge", "glyph") if k in attrs]
+        if ignored:
+            ctx.note("root", "button root ignores text/font/bg/edge/glyph -- give it children")
     if kind == "panel":
         _color(root, attrs, ctx, "root", "$screen")
         root.set("style", PANEL_STYLE)
@@ -1317,8 +1354,16 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     if "body" in desc:
         children.append(desc["body"])
     ctx.chain.append(_priority(attrs, ctx, "root", 0))
+    # `on_page` is False for a button root's own children: a button root is
+    # a fixed-size compound control (an icon, a label, a badge at specific
+    # offsets), never a page an author would otherwise build with vbox/hbox
+    # -- unlike a frame/panel root, which the note's advice always fits,
+    # whatever size it declares. Narrower than "any root with an exact
+    # size" would be: a frame/panel root sized like a small fixed dialog is
+    # still exactly the case the note exists to steer, and nothing in this
+    # project's own descriptions asks for that to go quiet too.
     for i, child in enumerate(children):
-        root.children += emit(child, ctx, inner, f"root.{i}", i, on_page=True)
+        root.children += emit(child, ctx, inner, f"root.{i}", i, on_page=(kind != "button"))
     head = [GENERATED_MARK + file + " -- edit the source, not this file."]
     head += [f"// {line}" for line in str(desc.get("note", "")).splitlines()]
     text = "\n".join(head) + "\n" + render(root) + "\n"

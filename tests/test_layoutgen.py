@@ -63,6 +63,18 @@ def test_device_group_scalars_resolve_and_shapes_refuse_each_other():
         t.pair("$device.rail", "f", "n")
 
 
+def test_a_present_but_wrong_shaped_device_token_says_so_not_unknown():
+    """`$device.iconset` (a string, `_iconset`'s own reader) used where a
+    number is expected used to fall through to "unknown token" -- the
+    generic message for a name absent from the group entirely -- even though
+    the token IS present. Since `8ae65d9` made `device` heterogeneous
+    (pairs, scalars AND strings), the fall-through case needed its own
+    message naming the actual problem: the right shape, not a missing name."""
+    t = tokens()
+    with pytest.raises(LayoutGenError, match=r"'\$device\.iconset' is not a number"):
+        t.number("$device.iconset", "f", "n")
+
+
 @pytest.mark.parametrize("value, what", [
     ("$space.nope", "unknown token"), ("$nope.page", "unknown token"),
     ("fill", "must be a number"), (True, "not a bool"),
@@ -197,6 +209,38 @@ def test_a_proportional_panels_fill_child_is_reduced_by_the_inset_on_both_sides(
     assert clean(text) == []
 
 
+def test_a_proportional_frames_fill_child_is_reduced_by_the_inset_on_both_sides():
+    """The frame twin of the panel test above. `_b_frame` carried the exact
+    defect `ad310af` fixed in `_b_panel` one commit earlier: `inner_w = width
+    - 2 * inset if hx else box.w` never subtracted the inset on the
+    proportional path at all, so a `w: "fill"` child of an inset
+    proportional frame overflowed the frame's own right edge by the inset on
+    each side (a byte-identical description with `panel` was already
+    correct)."""
+    out = build(page({"frame": {"name": "Bg", "size": "fill", "inset": 20, "children": [
+        {"panel": {"name": "Inner", "w": "fill", "h": 30, "color": "$panel"}},
+    ]}}, root=NO_INSET_ROOT))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "    PanelWidgetClass Inner {\n     visible 1\n     ignorepointer 1\n     position 20 20\n     size 600 30\n     hexactpos 1\n     vexactpos 1\n     hexactsize 1\n     vexactsize 1\n" in text
+    assert clean(text) == []
+
+
+@pytest.mark.parametrize("kind", ["panel", "frame"])
+def test_an_inset_proportional_containers_fill_child_is_reduced_on_the_vertical_axis_too(kind):
+    """Every case above only ever gives `Inner` a `w: "fill"` -- its `h` is
+    always a fixed 30 -- so `_inset_extent`'s HEIGHT argument is computed but
+    never actually consumed by a child that fills it. A root of unequal
+    width and height (640x518) makes a height derived from the wrong axis
+    (or not reduced by the inset at all) read as a different, wrong number
+    instead of coincidentally matching the width case."""
+    out = build(page({kind: {"name": "Bg", "size": "fill", "inset": 20, "children": [
+        {"panel": {"name": "Inner", "w": 50, "h": "fill", "color": "$panel"}},
+    ]}}, root=NO_INSET_ROOT))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "    PanelWidgetClass Inner {\n     visible 1\n     ignorepointer 1\n     position 20 20\n     size 50 478\n     hexactpos 1\n     vexactpos 1\n     hexactsize 1\n     vexactsize 1\n" in text
+    assert clean(text) == []
+
+
 def test_a_proportional_panel_with_an_inset_needs_a_known_width():
     """Under a `screen` root nobody knows the real resolution ahead of time
     -- the box handed down is genuinely `Box(None, None)` -- so a
@@ -205,9 +249,22 @@ def test_a_proportional_panel_with_an_inset_needs_a_known_width():
     crash somewhere unrelated downstream or -- once a width IS eventually
     known some other way -- overflow the panel's own edge by `inset`; this
     refuses at the point of the actual problem instead."""
-    with pytest.raises(LayoutGenError, match="a proportional panel with an inset needs a known width"):
+    with pytest.raises(LayoutGenError, match="a proportional panel or frame with an inset needs a known width"):
         build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", "children": [
             {"panel": {"name": "Bg", "size": "fill", "inset": 10, "children": [
+                {"panel": {"name": "Card", "size": [50, 50], "color": "$panel"}}]}}]}}},
+            tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+
+
+def test_a_proportional_frame_with_an_inset_also_needs_a_known_width():
+    """`_b_frame` used to skip `_inset_extent` entirely (it did its own
+    inline, unguarded arithmetic), so this exact shape raised a different,
+    less specific error -- `w: fill needs an exact ancestor to fill` --
+    instead of naming the inset as the actual reason. Same mistake as the
+    panel case above, silently handled two different ways."""
+    with pytest.raises(LayoutGenError, match="a proportional panel or frame with an inset needs a known width"):
+        build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", "children": [
+            {"frame": {"name": "Bg", "size": "fill", "inset": 10, "children": [
                 {"panel": {"name": "Card", "size": [50, 50], "color": "$panel"}}]}}]}}},
             tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
 
@@ -231,6 +288,32 @@ def test_rule_chip_and_hidden_widgets():
     assert "PanelWidgetClass Chip {\n     visible 0\n     ignorepointer 1\n     position 0 0\n     size 4 1\n     hexactpos 1\n     vexactpos 1\n     hexactsize 1\n     vexactsize 0\n     color 1 1 1 1\n     priority 0\n" in text
     assert "PanelWidgetClass Line {\n     visible 1\n     ignorepointer 1\n     valign bottom_ref\n     position 22 0\n     size 278 1\n" in text
     assert "PanelWidgetClass Pick {\n     visible 0\n" in text and "     priority 2\n" in text
+    assert clean(text) == []
+
+
+@pytest.mark.parametrize("body", [
+    {"vbox": {"hidden": True, "children": [{"label": {"name": "A", "h": 20}}]}},
+    {"hbox": {"h": 20, "hidden": True, "children": [{"label": {"name": "A", "w": 20}}]}},
+    {"header": {"title": {"name": "H"}, "hidden": True}},
+])
+def test_hidden_on_a_nameless_container_is_refused(body):
+    """`_stackbox` only builds a wrapper widget (something with a `visible`
+    line) when the node has a `name`; a nameless one is flattened straight
+    into its parent and `hidden` is read nowhere else. `COMMON` grants
+    `hidden` to every primitive including these, so the schema promised
+    something the builder could not actually deliver -- it used to render a
+    fully visible container with no note at all. `header` reaches the same
+    code through `_stackbox` too (an unnamed row), so the same case applies
+    to it without a name of its own."""
+    with pytest.raises(LayoutGenError, match="hidden needs a name -- a nameless container is not a widget"):
+        build(page(body))
+
+
+def test_hidden_on_a_named_vbox_still_works():
+    out = build(page({"vbox": {"name": "Column", "hidden": True, "children": [
+        {"label": {"name": "A", "h": 20}}]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "FrameWidgetClass Column {\n   visible 0\n" in text
     assert clean(text) == []
 
 
@@ -421,6 +504,7 @@ def test_a_non_root_button_says_it_ignores_children():
     out = build(page({"button": {"name": "BtnHide", "size": [195, 30], "text": "x", "children": [
         {"panel": {"name": "Ghost", "size": [1, 1], "color": "$panel"}}]}}))
     assert out.notes == ["ui/MyMod/oz_page.json root.0: button ignores children outside the root"]
+    assert clean(out.files["MyMod/gui/layouts/oz_page.layout"]) == []
 
 
 def test_field_puts_the_edit_box_inside_a_frame_and_a_fill():
@@ -749,7 +833,9 @@ def test_image_writes_the_three_texture_traps_once():
     assert '   image0 "MyMod/gui/textures/bezel_ca.paa"\n   mode blend\n   "src alpha" 1\n   "stretch mode" stretch_w_h\n' in text
     assert clean(text) == []
     out = build(page({"image": {"name": "Bezel", "size": [10, 10], "file": "MyMod/gui/textures/b_ca.paa", "stretch": False}}))
-    assert '"stretch mode"' not in out.files["MyMod/gui/layouts/oz_page.layout"]
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert '"stretch mode"' not in text
+    assert clean(text) == []
     with pytest.raises(LayoutGenError, match="image needs file"):
         build(page({"image": {"name": "Bezel", "size": [10, 10], "file": "bezel.png"}}))
 
@@ -848,6 +934,37 @@ def test_a_screen_root_is_proportional_and_holds_anchored_exact_children():
         build_layout({"layout": "x", "root": {"panel": {"name": "R", "size": "screen"}}}, tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
 
 
+@pytest.mark.parametrize("extra", [{"inset": 5}, {"at": [10, 0]}, {"anchor": "center"},
+                                   {"inset": 5, "at": [10, 0], "anchor": "center"}])
+def test_a_screen_roots_ignored_inset_at_and_anchor_are_all_noted(extra):
+    """A screen root is always `position 0 0 / size 1 1`: `inset` already got
+    a `ctx.note` saying so, but `anchor: "center"` (validated, then thrown
+    away without a word) and `at` (never even read) did not -- two of three
+    ways to move a root silently doing nothing while the third at least
+    said so."""
+    out = build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", **extra}}},
+                        tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+    assert out.notes == ["ui/MyMod/x.json root: inset/at/anchor are ignored on a screen root"]
+
+
+def test_a_screen_root_with_none_of_inset_at_or_anchor_is_not_noted():
+    out = build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen"}}},
+                        tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+    assert out.notes == []
+
+
+def test_header_does_not_accept_color():
+    """No description under any live project's `ui/` uses `color` directly
+    on a `header` node (grepped 2026-09-04, across a real project's page
+    descriptions) -- only ever inside `title`, where `_b_header`'s own
+    `label.setdefault(...)` already reaches the title label with it. `header`
+    granted it anyway (COMMON) and `_stackbox`'s `row` never read it:
+    accepted, then silently dropped, no note. Kept out of ALLOWED instead,
+    the same as any other key the schema does not actually back."""
+    with pytest.raises(LayoutGenError, match=r"header does not take \['color'\]"):
+        build(page({"header": {"color": "$accent", "title": {"name": "H"}}}))
+
+
 def test_a_button_root_is_bare():
     out = build_layout({"layout": "oz_tab", "root": {"button": {"name": "MyTab", "size": [60, 60], "children": [
         {"panel": {"name": "TabActive", "size": "fill", "color": "$pick", "hidden": True}}]}}},
@@ -856,6 +973,42 @@ def test_a_button_root_is_bare():
     assert text.splitlines()[1] == "ButtonWidgetClass MyTab {"
     assert ' text ""\n' in text and "MyTabEdge" not in text and "MyTabText" not in text
     assert clean(text) == []
+    assert out.notes == []
+
+
+def test_a_button_root_notes_the_attributes_it_ignores():
+    """The mirror image of the gap `a409c5e` closed one commit earlier for a
+    NESTED button (it notes an ignored `children`): a button ROOT holds page
+    content the way a frame/panel root does, so `build_layout` overwrites
+    whatever `text`/`font`/`bg`/`edge`/`glyph` the description gave it with a
+    bare `text ""` and used to emit no Edge/Bg/Text children AND no note --
+    the attributes simply vanished."""
+    out = build_layout({"layout": "oz_tab", "root": {"button": {
+        "name": "MyTab", "size": [60, 60], "text": "#STR_HI", "font": "small",
+        "bg": "$panel", "edge": "$accent", "glyph": True}}},
+        tokens(), "ui/MyMod/oz_tab.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/oz_tab.layout"]
+    assert ' text ""\n' in text and "MyTabEdge" not in text and "MyTabText" not in text
+    assert out.notes == ["ui/MyMod/oz_tab.json root: button root ignores text/font/bg/edge/glyph -- give it children"]
+    assert clean(text) == []
+
+
+def test_at_on_a_button_roots_child_is_not_noted():
+    """A button root's children are placed absolutely BY DESIGN -- a fixed
+    60x60 tab holding an icon, a label and a badge at specific offsets is
+    not a page built out of vbox/hbox -- so the page-child `at` note (meant
+    to steer PAGE authors towards containers) does not apply here. `on_page`
+    used to be unconditionally True for every root's direct children, which
+    reproduced live against a real project's own tab description (a button
+    root whose icon, label and badge children each declare `at`, exactly
+    like this one): three false "root.N: `at` on a page child" notes, none
+    of them actionable advice (a button cannot hold a vbox/hbox in the
+    first place)."""
+    out = build_layout({"layout": "oz_tab", "root": {"button": {"name": "MyTab", "size": [60, 60], "children": [
+        {"icon": {"name": "TabIcon", "at": [17, 8], "size": [26, 26], "image": "tab_page"}},
+        {"label": {"name": "TabLabel", "at": [0, 38], "w": "fill", "h": 16}},
+    ]}}}, tokens(), "ui/MyMod/oz_tab.json", "MyMod/gui/layouts")
+    assert out.notes == []
 
 
 def test_a_list_may_hold_static_children_in_its_spacer():
