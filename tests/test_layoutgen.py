@@ -181,7 +181,7 @@ def test_at_on_a_page_child_is_noted_but_hidden_overlays_are_not():
           {"panel": {"name": "Dup", "size": [1, 1], "color": "$panel"}}]}}}, "duplicate widget name 'Dup'"),
     ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
       "body": {"label": {"name": "A", "h": 20, "text": 'say "hi"'}}}, "quote inside text"),
-    ({"layout": "x", "root": {"label": {"name": "R"}}}, "root must be a frame or a panel"),
+    ({"layout": "x", "root": {"label": {"name": "R"}}}, "root must be a frame, a panel or a button"),
     ({"layout": "x", "root": {"frame": {"name": "R"}}}, "root needs an exact size"),
     ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
       "body": {"label": {"name": "A", "h": "auto"}}}, "auto is only a label's width"),
@@ -332,6 +332,15 @@ def test_button_writes_the_edge_bg_text_idiom():
     assert "    TextWidgetClass BtnHideText {\n     visible 1\n     ignorepointer 1\n     position 0 0\n     size 195 30\n" in text
     assert '     text "#STR_HIDE"\n' in text and '     "text halign" center\n' in text
     assert clean(text) == []
+
+
+def test_a_non_root_button_says_it_ignores_children():
+    """`children` is a root-only capability (a button root holds page content);
+    `_b_button` never reads it, so a nested button that carries one silently
+    dropped it until this note was added."""
+    out = build(page({"button": {"name": "BtnHide", "size": [195, 30], "text": "x", "children": [
+        {"panel": {"name": "Ghost", "size": [1, 1], "color": "$panel"}}]}}))
+    assert out.notes == ["ui/MyMod/oz_page.json root.0: button ignores children outside the root"]
 
 
 def test_field_puts_the_edit_box_inside_a_frame_and_a_fill():
@@ -600,7 +609,7 @@ def test_build_project_without_a_ui_folder_is_a_quiet_no_op(tmp_path):
 def test_build_project_refuses_a_bad_description_before_writing_anything(tmp_path):
     root = project(tmp_path)
     (root / "ui" / "MyMod" / "bad.json").write_text('{"layout": "bad", "root": {"label": {}}}', encoding="utf-8")
-    with pytest.raises(LayoutGenError, match="ui/MyMod/bad.json root: root must be a frame or a panel"):
+    with pytest.raises(LayoutGenError, match="ui/MyMod/bad.json root: root must be a frame, a panel or a button"):
         build_project(root, ["MyMod"], {}, write=True)
     assert not (root / "MyMod" / "gui").exists()
 
@@ -649,7 +658,9 @@ def test_icon_needs_a_set_when_the_tokens_name_none():
     with pytest.raises(LayoutGenError, match="icon needs set, or device.iconset"):
         build_layout(page({"icon": {"name": "X", "size": [10, 10], "image": "a"}}), t, "ui/MyMod/x.json", "MyMod/gui/layouts")
     out = build_layout(page({"icon": {"name": "X", "size": [10, 10], "image": "a", "set": "other_set"}}), t, "ui/MyMod/x.json", "MyMod/gui/layouts")
-    assert 'image0 "set:other_set image:a"' in out.files["MyMod/gui/layouts/oz_page.layout"]
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert 'image0 "set:other_set image:a"' in text
+    assert clean(text) == []
 
 
 def test_image_writes_the_three_texture_traps_once():
@@ -676,6 +687,19 @@ def test_badge_is_a_hidden_disc_with_a_count():
     assert clean(text) == []
 
 
+def test_badge_accepts_explicit_w_h_or_size():
+    """`sized.setdefault("size", [18, 18])` used to inject `size` even when the
+    caller gave `w`/`h` directly, colliding with them inside `_dim`."""
+    out = build(page({"badge": {"name": "TabBadge", "w": 24, "h": 24}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "   size 24 24\n" in text
+    assert clean(text) == []
+    out = build(page({"badge": {"name": "TabBadge", "size": [30, 30]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "   size 30 30\n" in text
+    assert clean(text) == []
+
+
 def test_header_is_a_row_of_icon_title_and_actions():
     out = build(page({"header": {"icon": "tab_contacts", "title": {"name": "ContactsHeader"}, "actions": [
         {"button": {"name": "BtnHide", "w": 195, "font": "small"}},
@@ -694,6 +718,15 @@ def test_header_is_a_row_of_icon_title_and_actions():
         build(page({"header": {"icon": "x"}}))
 
 
+def test_header_accepts_size_instead_of_h():
+    """`row.setdefault("h", "$size.header")` used to fire even when the caller
+    gave `size`, colliding with it inside `_dim`."""
+    out = build(page({"header": {"title": {"name": "ContactsHeader"}, "size": [600, 40]}}))
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "  TextWidgetClass ContactsHeader {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 600 40\n" in text
+    assert clean(text) == []
+
+
 def test_hbox_centres_a_child_that_declares_its_own_height():
     out = build(page({"hbox": {"h": 40, "children": [
         {"panel": {"name": "Tall", "w": 100, "color": "$panel"}},
@@ -701,6 +734,7 @@ def test_hbox_centres_a_child_that_declares_its_own_height():
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
     assert "PanelWidgetClass Tall {\n   visible 1\n   ignorepointer 1\n   position 20 20\n   size 100 40\n" in text
     assert "PanelWidgetClass Short {\n   visible 1\n   ignorepointer 1\n   position 120 30\n   size 100 20\n" in text
+    assert clean(text) == []
 
 
 def test_a_screen_root_is_proportional_and_holds_anchored_exact_children():
@@ -741,4 +775,6 @@ def test_a_list_may_hold_static_children_in_its_spacer():
 
 def test_bottom_center_anchor():
     out = build(page({"label": {"name": "LockHint", "anchor": "bottom-center", "at": [0, 18], "size": [800, 24], "text": "hint"}}))
-    assert "   halign center_ref\n   valign bottom_ref\n   position 0 38\n   size 800 24\n" in out.files["MyMod/gui/layouts/oz_page.layout"]
+    text = out.files["MyMod/gui/layouts/oz_page.layout"]
+    assert "   halign center_ref\n   valign bottom_ref\n   position 0 38\n   size 800 24\n" in text
+    assert clean(text) == []

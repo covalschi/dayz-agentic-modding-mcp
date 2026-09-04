@@ -741,6 +741,8 @@ def _b_button(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     name = ctx.claim(attrs.get("name", ""), path)
     btn = W("ButtonWidgetClass", name, comment=str(attrs.get("note", "")))
     btn.set("visible", "0" if attrs.get("hidden") else "1")
+    if attrs.get("children"):
+        ctx.note(path, "button ignores children outside the root")
     default_h = ctx.tokens.size.get("button", 30)
     width, height, hx, vx = _size_leaf(attrs, ctx, box, path, x, y, forced, anchor, default_h, exact_only=True)
     if not (hx and vx):
@@ -1151,7 +1153,8 @@ def _b_badge(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     disc = W("ImageWidgetClass", name, comment=str(attrs.get("note", "")))
     disc.set("visible", "0" if attrs.get("hidden", True) else "1").set("ignorepointer", "1")
     sized = dict(attrs)
-    sized.setdefault("size", [18, 18])
+    if "size" not in sized and "w" not in sized and "h" not in sized:
+        sized["size"] = [18, 18]
     width, height, _hx, _vx = _size_leaf(sized, ctx, box, path, x, y, forced, anchor, None, exact_only=True)
     place(disc, x, y, width, height, anchor=anchor)
     _color(disc, attrs, ctx, path, "$alert")
@@ -1188,7 +1191,8 @@ def _b_header(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
         raise LayoutGenError("header actions must be a list of nodes", ctx.file, path)
     children += actions
     row = {k: v for k, v in attrs.items() if k in ("name", "note", "hidden", "priority", "w", "h", "size", "anchor", "at")}
-    row.setdefault("h", "$size.header")
+    if "h" not in row and "size" not in row:
+        row["h"] = "$size.header"
     row["gap"] = attrs.get("gap", "$space.gap")
     row["children"] = children
     return _stackbox(row, ctx, box, path, x, y, forced, anchor, priority, vertical=False)
@@ -1217,7 +1221,7 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     ctx = Ctx(tokens=tokens, file=file, layout_dir=layout_dir)
     kind, attrs = _unpack(desc["root"], file, "root")
     if kind not in ROOT_KINDS:
-        raise LayoutGenError(f"root must be a frame or a panel, not {kind}", file, "root")
+        raise LayoutGenError(f"root must be a frame, a panel or a button, not {kind}", file, "root")
     if "size" not in attrs or attrs["size"] == "fill":
         raise LayoutGenError("root needs an exact size [w, h]", file, "root")
     root_cls = {"frame": "FrameWidgetClass", "panel": "PanelWidgetClass", "button": "ButtonWidgetClass"}[kind]
