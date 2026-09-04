@@ -209,17 +209,31 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         if parent is not None:
             children.setdefault(parent, []).append(n)
     source_by_path = {p: s for p, s in source.walk()} if source else {}
-    # Rows a fixture (or a script) adds have no path in the page's source;
-    # their own source is looked up by NAME (unique within a file -- the
-    # layout-dup-name lint sees to that), page first, then the extra sources.
-    source_by_name: dict[str, LayoutNode] = {}
-    for tree in ([source] if source else []) + list(sources):
-        for _p, s in tree.walk():
-            source_by_name.setdefault(s.name, s)
+    # Rows a fixture (or a script) adds have no path in the page's source.
+    # Each extra source is a row TEMPLATE whose root name is the name the
+    # engine reports for that row; a node under such a row is looked up by
+    # name inside that template only, so two templates may reuse an inner
+    # name (`Label`, `Title`) without lending each other their flags. A node
+    # under no known root falls back to a name lookup across every source
+    # (names are unique within a file -- the layout-dup-name lint sees to that).
+    trees = ([source] if source else []) + list(sources)
+    by_root = {t.name: {s.name: s for _p, s in t.walk()} for t in trees}
+    by_name: dict[str, LayoutNode] = {}
+    for t in trees:
+        for _p, s in t.walk():
+            by_name.setdefault(s.name, s)
 
     def src_of(path: str, name: str):
         found = source_by_path.get(path)
-        return found if found is not None else source_by_name.get(name)
+        if found is not None:
+            return found
+        up = _parent_path(path)
+        while up is not None:
+            ancestor = shown.get(up)
+            if ancestor is not None and ancestor["name"] in by_root:
+                return by_root[ancestor["name"]].get(name)
+            up = _parent_path(up)
+        return by_name.get(name)
 
     for path, n in shown.items():
         rect = rect_of(n)

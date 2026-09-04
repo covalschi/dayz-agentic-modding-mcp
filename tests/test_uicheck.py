@@ -268,10 +268,25 @@ def test_text_overflow_still_fires_without_flags():
 
 def test_a_fixture_row_is_judged_by_its_own_source_found_by_name():
     page = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
-    row = parse_layout('WrapSpacerWidgetClass OZ_ChatLine {\n size 1 0\n {\n  RichTextWidgetClass LineText {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
+    row = parse_layout('WrapSpacerWidgetClass ChatLine {\n size 1 0\n {\n  RichTextWidgetClass LineText {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
     nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
              node("0", "WrapSpacerWidget", "List", "0 0 600 100"),
-             node("0.0", "WrapSpacerWidget", "OZ_ChatLine", "0 0 600 80"),
+             node("0.0", "WrapSpacerWidget", "ChatLine", "0 0 600 80"),
              node("0.0.0", "RichTextWidget", "LineText", "0 20 590 52", text_size=(815, 52))]
     assert rules(check(nodes, HOST, source=page)[0]) == [("text_overflow", "LineText")]
     assert rules(check(nodes, HOST, source=page, sources=[row])[0]) == []
+
+
+def test_two_fixture_rows_may_reuse_an_inner_name_without_sharing_flags():
+    page = parse_layout('FrameWidgetClass Root {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    wrapped = parse_layout('WrapSpacerWidgetClass RowA {\n size 1 0\n {\n  RichTextWidgetClass Label {\n   size 1 20\n   wrap 1\n   "size to text v" 1\n  }\n }\n}\n')
+    fixed = parse_layout('FrameWidgetClass RowB {\n size 1 30\n {\n  TextWidgetClass Label {\n   size 100 25\n  }\n }\n}\n')
+    nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
+             node("0", "WrapSpacerWidget", "List", "0 0 600 200"),
+             node("0.0", "WrapSpacerWidget", "RowA", "0 0 600 80"),
+             node("0.0.0", "RichTextWidget", "Label", "0 0 590 52", text_size=(815, 52)),
+             node("0.1", "Widget", "RowB", "0 80 600 30"),
+             node("0.1.0", "TextWidget", "Label", "0 80 100 25", text_size=(150, 25))]
+    issues, _ = check(nodes, HOST, source=page, sources=[wrapped, fixed])
+    assert rules(issues) == [("text_overflow", "Label")]
+    assert issues[0].path == "0.1.0"
