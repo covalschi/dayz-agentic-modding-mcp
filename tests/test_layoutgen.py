@@ -1121,3 +1121,10 @@ def test_map_is_a_clipped_map_widget_without_children():
     with pytest.raises(LayoutGenError, match="paints over its children"):
         build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [10, 10], "children": [
             {"map": {"name": "Map", "size": [10, 10], "children": [{"label": {"name": "L"}}]}}]}}})
+
+
+def test_bar_refuses_a_plain_color():
+    # a bar is coloured by track and fill; a plain color would be dropped silently
+    with pytest.raises(LayoutGenError):
+        build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [300, 100], "children": [
+            {"bar": {"name": "Charge", "at": [10, 10], "w": 200, "h": 10, "color": "$rule"}}]}}})

@@ -351,7 +351,7 @@ ALLOWED: dict[str, set[str]] = {
     # still gets its Edge/Bg/Text idiom from `_b_button`, which never reads it.
     "button":  COMMON | {"text", "font", "bg", "edge", "glyph", "children"},
     "rule":    COMMON,
-    "bar":     COMMON | {"track", "fill"},
+    "bar":     (COMMON - {"color"}) | {"track", "fill"},   # a bar is coloured by track/fill
     "gap":     COMMON,
     "chip":    COMMON,
     "section": COMMON | {"text", "font"},
