@@ -250,8 +250,13 @@ ANCHORS = {"right": ("right_ref", None), "bottom": (None, "bottom_ref"),
 
 
 def place(w: W, x: float, y: float, width: float, height: float,
-          hexact: bool = True, vexact: bool = True, anchor: str = "") -> W:
-    """Position and size, exact unless told otherwise; an anchor moves the reference edge."""
+          hexact: bool = True, vexact: bool = True, anchor: str = "",
+          hexactpos: bool = True, vexactpos: bool = True) -> W:
+    """Position and size, exact unless told otherwise; an anchor moves the
+    reference edge. `hexactpos`/`vexactpos` default to an exact (pixel)
+    position -- False makes `x`/`y` a FRACTION of the parent instead, the
+    root-only `at_frac` (`build_layout`'s third root branch, the mirror of
+    `size: "screen"`'s exact position + proportional size)."""
     ha, va = ANCHORS.get(anchor, (None, None))
     if ha:
         w.set("halign", ha)
@@ -259,8 +264,8 @@ def place(w: W, x: float, y: float, width: float, height: float,
         w.set("valign", va)
     w.set("position", f"{fmt(x)} {fmt(y)}")
     w.set("size", f"{fmt(width)} {fmt(height)}")
-    w.set("hexactpos", "1")
-    w.set("vexactpos", "1")
+    w.set("hexactpos", "1" if hexactpos else "0")
+    w.set("vexactpos", "1" if vexactpos else "0")
     w.set("hexactsize", "1" if hexact else "0")
     w.set("vexactsize", "1" if vexact else "0")
     return w
@@ -335,8 +340,16 @@ class Emitted:
 
 COMMON = {"name", "note", "hidden", "priority", "anchor", "at", "w", "h", "size", "color"}
 ALLOWED: dict[str, set[str]] = {
-    "frame":   COMMON | {"inset", "children"},
-    "panel":   COMMON | {"edge", "click", "inset", "children"},
+    # "at_frac" is a root-only capability (a fraction-of-screen position for
+    # the outermost node, the mirror of a `screen` root's exact position +
+    # proportional size) -- granted here so `_unpack` accepts it on a
+    # frame/panel at all. Unlike "children" on a button below, a non-root
+    # frame/panel does not get an ignore-and-note for it: `emit` (which only
+    # ever sees non-root nodes) refuses it outright, since a nested child
+    # already has its own position relative to its parent and "a fraction of
+    # the SCREEN" is not a coordinate space it has any way to honour.
+    "frame":   COMMON | {"inset", "children", "at_frac"},
+    "panel":   COMMON | {"edge", "click", "inset", "children", "at_frac"},
     "vbox":    COMMON | {"gap", "children"},
     "hbox":    COMMON | {"gap", "children"},
     "stack":   COMMON | {"children"},
@@ -532,6 +545,13 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
     children -- a button root is a fixed-size compound control, not a page.
     """
     kind, attrs = _unpack(desc, ctx.file, path)
+    # Root-only: build_layout's own third root branch resolves it against the
+    # screen. emit() only ever sees non-root nodes (the root itself never
+    # reaches here), so any node that still carries at_frac this far is
+    # refused outright, not silently ignored the way a nested button's
+    # "children" is.
+    if "at_frac" in attrs:
+        raise LayoutGenError(f"{kind}: at_frac is only a root's position", ctx.file, path)
     anchor = attrs.get("anchor", "")
     if anchor and anchor not in ANCHORS:
         raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", ctx.file, path)
@@ -1382,11 +1402,30 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     root.set("visible", "0" if attrs.get("hidden") else "1")
     # The root places itself the same way any other node does: a window
     # centred in its host is `anchor: "center"`, not a proportional position
-    # that has to be recomputed for every screen (spec 2026-09-04 §3.6).
+    # that has to be recomputed for every screen (spec 2026-09-04 §3.6). A
+    # frame/panel root that needs the opposite split -- a PROPORTIONAL
+    # position at an EXACT size, e.g. a window whose corner sits at a fixed
+    # fraction of whatever screen it lands on -- uses `at_frac` instead of
+    # `at`/`anchor`; `size: "screen"` is the other extreme (exact position,
+    # proportional whole-screen size) and the two do not mix.
     anchor = attrs.get("anchor", "")
     if anchor and anchor not in ANCHORS:
         raise LayoutGenError(f"unknown anchor {anchor!r}; one of {sorted(ANCHORS)}", file, "root")
-    if attrs.get("size") == "screen":
+    if "at_frac" in attrs:
+        if "at" in attrs:
+            raise LayoutGenError("at_frac and at on one root -- use one", file, "root")
+        if anchor:
+            raise LayoutGenError("at_frac and anchor on one root -- use one", file, "root")
+        if attrs.get("size") == "screen":
+            raise LayoutGenError('at_frac and size: "screen" on one root -- use one', file, "root")
+        width, height = tokens.pair(attrs["size"], file, "root")
+        fx, fy = tokens.pair(attrs["at_frac"], file, "root", "at_frac")
+        if not (0 <= fx <= 1 and 0 <= fy <= 1):
+            raise LayoutGenError("at_frac must be two numbers 0..1", file, "root")
+        place(root, fx, fy, width, height, hexactpos=False, vexactpos=False)
+        inset = tokens.number(attrs.get("inset", 0), file, "root", "inset")
+        inner = Box(width - 2 * inset, height - 2 * inset, ox=inset, oy=inset)
+    elif attrs.get("size") == "screen":
         if kind != "frame":
             raise LayoutGenError("only a frame root can be the whole screen", file, "root")
         if "inset" in attrs or "at" in attrs or anchor:

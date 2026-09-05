@@ -352,6 +352,14 @@ def test_at_on_a_page_child_is_noted_but_hidden_overlays_are_not():
     # `ALLOWED["row"]` admitted it here and then it died on "not implemented".
     ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100]}},
       "body": {"row": {"name": "A", "h": 20}}}, "unknown primitive 'row'"),
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100], "at": [1, 1], "at_frac": [0.1, 0.1]}}},
+     "at_frac and at on one root -- use one"),
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100], "anchor": "center", "at_frac": [0.1, 0.1]}}},
+     "at_frac and anchor on one root -- use one"),
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": "screen", "at_frac": [0.1, 0.1]}}},
+     'at_frac and size: "screen" on one root -- use one'),
+    ({"layout": "x", "root": {"frame": {"name": "R", "size": [100, 100], "at_frac": [1.5, 0.1]}}},
+     "at_frac must be two numbers 0..1"),
 ])
 def test_refusals_name_the_node(desc, message):
     with pytest.raises(LayoutGenError) as caught:
@@ -970,6 +978,59 @@ def test_a_screen_root_with_none_of_inset_at_or_anchor_is_not_noted():
     out = build_layout({"layout": "x", "root": {"frame": {"name": "R", "size": "screen"}}},
                         tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
     assert out.notes == []
+
+
+def test_at_frac_root_sits_at_a_fraction_of_the_screen_with_an_exact_size():
+    """The mirror of a `screen` root: POSITION is the proportional part
+    (`hexactpos 0`/`vexactpos 0`, `position` a fraction of the host), SIZE
+    stays exact. Children are handed the same exact inner box an ordinary
+    exact root hands them -- `w`/`h: "fill"` (the per-axis form, not the
+    `size: "fill"` shortcut, which is proportional even under an exact root
+    when it sits at an uninset origin) resolves to the root's own pixels."""
+    out = build_layout({"layout": "x", "root": {"frame": {
+        "name": "Win", "size": [1000, 620], "at_frac": [0.24, 0.14], "children": [
+            {"panel": {"name": "Body", "w": "fill", "h": "fill", "color": "$panel"}}]}}},
+        tokens(), "ui/MyMod/x.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/x.layout"]
+    assert ("FrameWidgetClass Win {\n"
+            " visible 1\n"
+            " position 0.24 0.14\n"
+            " size 1000 620\n"
+            " hexactpos 0\n"
+            " vexactpos 0\n"
+            " hexactsize 1\n"
+            " vexactsize 1\n") in text
+    assert ("  PanelWidgetClass Body {\n"
+            "   visible 1\n"
+            "   ignorepointer 1\n"
+            "   position 0 0\n"
+            "   size 1000 620\n"
+            "   hexactpos 1\n"
+            "   vexactpos 1\n"
+            "   hexactsize 1\n"
+            "   vexactsize 1\n") in text
+    assert clean(text) == []
+    assert out.notes == []
+
+
+def test_at_frac_on_a_non_root_is_refused():
+    """`at_frac` reads the whole SCREEN's fraction -- a nested child already
+    has its own position relative to its parent widget, a different
+    coordinate space it has no way to honour, so this is a hard refusal, not
+    the ignore-and-note a nested button gets for a root-only `children`."""
+    with pytest.raises(LayoutGenError, match="at_frac is only a root's position"):
+        build(page({"frame": {"name": "F", "size": [10, 10], "at_frac": [0.1, 0.1]}}))
+
+
+def test_at_frac_values_resolve_through_tokens():
+    t = Tokens.from_text(json.dumps({**TOKENS, "device": {**TOKENS["device"], "winX": 0.24, "winY": 0.14}}),
+                         "ui/tokens.json")
+    out = build_layout({"layout": "x", "root": {"frame": {
+        "name": "Win", "size": [1000, 620], "at_frac": ["$device.winX", "$device.winY"]}}},
+        t, "ui/MyMod/x.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/x.layout"]
+    assert " position 0.24 0.14\n" in text
+    assert clean(text) == []
 
 
 def test_header_does_not_accept_color():
