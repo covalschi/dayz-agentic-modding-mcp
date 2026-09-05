@@ -140,9 +140,32 @@ def test_a_tokens_group_entry_of_the_wrong_shape_is_refused_at_load():
         Tokens.from_text(json.dumps({**TOKENS, "vpp": {**VPP, "bad": True}}), "ui/tokens.json")
 
 
-def test_a_tokens_group_that_is_not_an_object_is_refused():
+@pytest.mark.parametrize("bad", [[1, 2, 3], 3, True, None], ids=["list", "number", "bool", "null"])
+def test_a_tokens_group_that_is_not_an_object_is_refused(bad):
     with pytest.raises(LayoutGenError, match="vpp must be an object"):
-        Tokens.from_text(json.dumps({**TOKENS, "vpp": [1, 2, 3]}), "ui/tokens.json")
+        Tokens.from_text(json.dumps({**TOKENS, "vpp": bad}), "ui/tokens.json")
+
+
+def test_a_top_level_string_value_is_a_note_not_a_group():
+    """A string-valued top-level key -- `"version": "1.0"`, `"$schema":
+    "..."`, the realistic shape some other tool puts at the top of a tokens
+    file in the wild -- is read the same way as `note` itself and ignored,
+    not refused the way its list/number/bool/null siblings above are."""
+    t = Tokens.from_text(json.dumps({**TOKENS, "version": "1.0", "$schema": "https://example.com/schema.json"}),
+                          "ui/tokens.json")
+    assert "version" not in t.groups and "$schema" not in t.groups
+
+
+def test_a_directly_constructed_tokens_still_resolves_device():
+    """`Tokens` is a public dataclass with `device` still in its
+    constructor signature; only `from_text` used to also register it into
+    `groups`, which is what `number()`/`pair()` actually read through for
+    `$device.*` -- so a `Tokens(device=...)` built by hand had `device`
+    filled but `groups` empty, and every `$device.*` token refused with
+    `unknown token` even though the value was right there."""
+    t = Tokens(device={"rail": 84, "page": [1282, 518]})
+    assert t.number("$device.rail", "f", "n") == 84.0
+    assert t.pair("$device.page", "f", "n") == (1282.0, 518.0)
 
 
 from dayz_mcp.layoutgen import build_layout
@@ -1022,7 +1045,7 @@ def test_a_screen_root_with_none_of_inset_at_or_anchor_is_not_noted():
     assert out.notes == []
 
 
-def test_at_frac_root_sits_at_a_fraction_of_the_screen_with_an_exact_size():
+def test_at_frac_root_sits_at_a_fraction_of_the_host_with_an_exact_size():
     """The mirror of a `screen` root: POSITION is the proportional part
     (`hexactpos 0`/`vexactpos 0`, `position` a fraction of the host), SIZE
     stays exact. Children are handed the same exact inner box an ordinary
@@ -1056,10 +1079,11 @@ def test_at_frac_root_sits_at_a_fraction_of_the_screen_with_an_exact_size():
 
 
 def test_at_frac_on_a_non_root_is_refused():
-    """`at_frac` reads the whole SCREEN's fraction -- a nested child already
-    has its own position relative to its parent widget, a different
-    coordinate space it has no way to honour, so this is a hard refusal, not
-    the ignore-and-note a nested button gets for a root-only `children`."""
+    """`at_frac` is a fraction of the root's HOST (the screen, for a page
+    root) -- a nested child already has its own position relative to its
+    own parent instead, a different coordinate space, so `at_frac` there
+    would mean something else entirely: a hard refusal, not the
+    ignore-and-note a nested button gets for a root-only `children`."""
     with pytest.raises(LayoutGenError, match="at_frac is only a root's position"):
         build(page({"frame": {"name": "F", "size": [10, 10], "at_frac": [0.1, 0.1]}}))
 

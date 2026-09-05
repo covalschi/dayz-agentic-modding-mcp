@@ -90,6 +90,20 @@ class Tokens:
     groups: dict[str, dict] = field(default_factory=dict)
     file: str = "ui/tokens.json"
 
+    def __post_init__(self) -> None:
+        """`from_text` fills `groups` (including `groups["device"]`) and
+        only then points `device` at it; a `Tokens(device=...)` built
+        directly sets only `device`, by the dataclass's own field order, and
+        would otherwise leave `groups` without it -- `$device.*` resolves
+        through `groups`, so `number()`/`pair()` would find nothing. Register
+        `device` into `groups` when a caller left `groups` without one; when
+        a caller passed both, `groups["device"]` wins and `device` becomes a
+        view of it, so the two can never disagree."""
+        if "device" in self.groups:
+            self.device = self.groups["device"]
+        else:
+            self.groups["device"] = self.device
+
     @classmethod
     def from_text(cls, text: str, file: str = "ui/tokens.json") -> "Tokens":
         try:
@@ -122,9 +136,14 @@ class Tokens:
         # a project's tokens file names as many of these as it needs (a
         # window's own geometry, say) and each is read the same way, so
         # nothing here hard-codes which ones exist beyond the four fixed
-        # groups above and `note` (a free-text comment, never a group).
+        # groups above and `note` (a free-text comment, never a group). A
+        # STRING value there is read the same way as `note` -- a stray
+        # "version" or "$schema" some tool put at the top of the file, not a
+        # group a description could ever reference -- while anything else
+        # that is not an object (a list, a number, a bool, null) is almost
+        # certainly a typo for a group and is refused.
         for gname, gval in data.items():
-            if gname in ("note", "color", "font", "space", "size"):
+            if gname in ("note", "color", "font", "space", "size") or isinstance(gval, str):
                 continue
             if not isinstance(gval, dict):
                 raise LayoutGenError(f"{gname} must be an object", file)
@@ -370,14 +389,14 @@ class Emitted:
 
 COMMON = {"name", "note", "hidden", "priority", "anchor", "at", "w", "h", "size", "color"}
 ALLOWED: dict[str, set[str]] = {
-    # "at_frac" is a root-only capability (a fraction-of-screen position for
+    # "at_frac" is a root-only capability (a fraction-of-host position for
     # the outermost node, the mirror of a `screen` root's exact position +
     # proportional size) -- granted here so `_unpack` accepts it on a
     # frame/panel at all. Unlike "children" on a button below, a non-root
     # frame/panel does not get an ignore-and-note for it: `emit` (which only
-    # ever sees non-root nodes) refuses it outright, since a nested child
-    # already has its own position relative to its parent and "a fraction of
-    # the SCREEN" is not a coordinate space it has any way to honour.
+    # ever sees non-root nodes) refuses it outright, since a nested node's
+    # position is relative to its own parent, not to that outer HOST, so
+    # "at_frac" there would mean something else entirely if honoured.
     "frame":   COMMON | {"inset", "children", "at_frac"},
     "panel":   COMMON | {"edge", "click", "inset", "children", "at_frac"},
     "vbox":    COMMON | {"gap", "children"},
