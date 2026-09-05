@@ -71,17 +71,23 @@ class Tokens:
     """The tokens file (`ui/tokens.json` by default, `build.tokens` to move
     it): the numbers, colours and fonts written once.
 
-    `device` is the one group with no fixed shape of its own: an entry may
-    be a pair (`[w, h]`, e.g. a screen size), a scalar (a plain number, e.g.
-    a rail width) or a string (e.g. `iconset`, an imageset name) -- the
-    caller's own reader (`number()`, `pair()`, `_iconset`) is what decides
-    which shape it expects."""
+    `color`/`font`/`space`/`size` are the four fixed groups. `device` is no
+    longer the one group with no fixed shape of its own -- every further
+    top-level key (`vpp`, or whatever else a project names) is read the same
+    way: an entry may be a pair (`[w, h]`, e.g. a screen size), a scalar (a
+    plain number, e.g. a rail width) or a string (e.g. `iconset`, an
+    imageset name) -- the caller's own reader (`number()`, `pair()`,
+    `_iconset`) is what decides which shape it expects. `groups` holds every
+    such group, `device` included; `device` stays its own attribute because
+    other code (`_iconset`) and the dataclass's own long-time callers read
+    it directly."""
 
     color: dict[str, list[float]] = field(default_factory=dict)
     font: dict[str, dict] = field(default_factory=dict)
     space: dict[str, float] = field(default_factory=dict)
     size: dict[str, float] = field(default_factory=dict)
     device: dict = field(default_factory=dict)
+    groups: dict[str, dict] = field(default_factory=dict)
     file: str = "ui/tokens.json"
 
     @classmethod
@@ -112,7 +118,24 @@ class Tokens:
                 if not _is_number(value):
                     raise LayoutGenError(f"{group}.{name} must be a number", file)
                 getattr(t, group)[name] = float(value)
-        t.device = dict(data.get("device") or {})
+        # Every other top-level key is a geometry group shaped like `device`:
+        # a project's tokens file names as many of these as it needs (a
+        # window's own geometry, say) and each is read the same way, so
+        # nothing here hard-codes which ones exist beyond the four fixed
+        # groups above and `note` (a free-text comment, never a group).
+        for gname, gval in data.items():
+            if gname in ("note", "color", "font", "space", "size"):
+                continue
+            if not isinstance(gval, dict):
+                raise LayoutGenError(f"{gname} must be an object", file)
+            group_tokens: dict = {}
+            for name, value in gval.items():
+                if not (_is_number(value) or _is_pair(value) or isinstance(value, str)):
+                    raise LayoutGenError(
+                        f"{gname}.{name} must be a number, a [w, h] pair or a string", file)
+                group_tokens[name] = value
+            t.groups[gname] = group_tokens
+        t.device = t.groups.get("device", {})
         return t
 
     @classmethod
@@ -130,46 +153,53 @@ class Tokens:
         return cls.from_text(path.read_text(encoding="utf-8"), label)
 
     def number(self, value, file: str, node: str, what: str = "size") -> float:
-        """A number, or a `$space.<name>` / `$size.<name>` / `$device.<name>` reference.
+        """A number, or a `$space.<name>` / `$size.<name>` / `$<group>.<name>`
+        reference, `<group>` being `device` or any further group a tokens
+        file defines.
 
-        `device` is not a table of plain floats like `space`/`size` -- a
-        `device` name can name either shape (`pair()` reads the other one) --
-        so a name found there that turns out to be a `[w, h]` pair is refused
-        by its OWN name, the same way `pair()` refuses a scalar below."""
+        `space`/`size` are flat tables of plain floats; no other group is --
+        a name in `device` (or `vpp`, or whatever else a project names) can
+        name either shape (`pair()` reads the other one), so a name found
+        there that turns out to be a `[w, h]` pair is refused by its OWN
+        name, the same way `pair()` refuses a scalar below."""
         if isinstance(value, bool):
             raise LayoutGenError(f"{what} must be a number, not a bool", file, node)
         if _is_number(value):
             return float(value)
         if isinstance(value, str) and value.startswith("$"):
             group, _, name = value[1:].partition(".")
-            if group == "device":
-                if name not in self.device:
-                    raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
-                got = self.device[name]
-                if _is_number(got):
-                    return float(got)
-                if _is_pair(got):
-                    raise LayoutGenError(f"{value!r} is a pair, not a number", file, node)
-                raise LayoutGenError(f"{value!r} is not a number", file, node)
             table = {"space": self.space, "size": self.size}.get(group)
-            if table is None or name not in table:
+            if table is not None:
+                if name not in table:
+                    raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
+                return table[name]
+            if group not in self.groups or name not in self.groups[group]:
                 raise LayoutGenError(f"unknown token {value!r} for {what}", file, node)
-            return table[name]
-        raise LayoutGenError(f"{what} must be a number or a $space/$size/$device token, got {value!r}", file, node)
+            got = self.groups[group][name]
+            if _is_number(got):
+                return float(got)
+            if _is_pair(got):
+                raise LayoutGenError(f"{value!r} is a pair, not a number", file, node)
+            raise LayoutGenError(f"{value!r} is not a number", file, node)
+        raise LayoutGenError(f"{what} must be a number or a $group.name token, got {value!r}", file, node)
 
     def pair(self, value, file: str, node: str, what: str = "size") -> tuple[float, float]:
-        """`[w, h]` of numbers or tokens, or `$device.<name>` naming a two-number token."""
-        if isinstance(value, str) and value.startswith("$device."):
-            got = self.device.get(value[len("$device."):])
-            if _is_number(got):
-                raise LayoutGenError(f"{value!r} is a number, not a pair", file, node)
-            if not _is_pair(got):
-                raise LayoutGenError(f"{value!r} is not a [w, h] device token", file, node)
-            return float(got[0]), float(got[1])
+        """`[w, h]` of numbers or tokens, or `$<group>.<name>` naming a
+        two-number token in `device` or any further group a tokens file
+        defines."""
+        if isinstance(value, str) and value.startswith("$"):
+            group, _, name = value[1:].partition(".")
+            if group in self.groups:
+                got = self.groups[group].get(name)
+                if _is_number(got):
+                    raise LayoutGenError(f"{value!r} is a number, not a pair", file, node)
+                if not _is_pair(got):
+                    raise LayoutGenError(f"{value!r} is not a [w, h] {group} token", file, node)
+                return float(got[0]), float(got[1])
         if isinstance(value, list) and len(value) == 2:
             return (self.number(value[0], file, node, what + "[0]"),
                     self.number(value[1], file, node, what + "[1]"))
-        raise LayoutGenError(f"{what} must be [w, h] or a $device token, got {value!r}", file, node)
+        raise LayoutGenError(f"{what} must be [w, h] or a $group.name token, got {value!r}", file, node)
 
     def color_of(self, value, file: str, node: str) -> tuple[list[float], bool]:
         """`(rgba, from_token)`: `$name` looks the colour up; a literal list passes and is reported."""
@@ -546,10 +576,11 @@ def emit(desc, ctx: Ctx, box: Box, path: str, index: int, placed: tuple | None =
     """
     kind, attrs = _unpack(desc, ctx.file, path)
     # Root-only: build_layout's own third root branch resolves it against the
-    # screen. emit() only ever sees non-root nodes (the root itself never
-    # reaches here), so any node that still carries at_frac this far is
-    # refused outright, not silently ignored the way a nested button's
-    # "children" is.
+    # root's own host (the screen, for a page root). emit() only ever sees
+    # non-root nodes (the root itself never reaches here); a nested node's
+    # position is relative to its own parent, not to that host, so at_frac
+    # would mean something else entirely if honoured here -- refused
+    # outright, not silently ignored the way a nested button's "children" is.
     if "at_frac" in attrs:
         raise LayoutGenError(f"{kind}: at_frac is only a root's position", ctx.file, path)
     anchor = attrs.get("anchor", "")
@@ -1402,10 +1433,10 @@ def build_layout(desc, tokens: Tokens, file: str = "", layout_dir: str = "") -> 
     root.set("visible", "0" if attrs.get("hidden") else "1")
     # The root places itself the same way any other node does: a window
     # centred in its host is `anchor: "center"`, not a proportional position
-    # that has to be recomputed for every screen (spec 2026-09-04 §3.6). A
+    # that has to be recomputed for every host (spec 2026-09-04 §3.6). A
     # frame/panel root that needs the opposite split -- a PROPORTIONAL
     # position at an EXACT size, e.g. a window whose corner sits at a fixed
-    # fraction of whatever screen it lands on -- uses `at_frac` instead of
+    # fraction of whatever host it lands in -- uses `at_frac` instead of
     # `at`/`anchor`; `size: "screen"` is the other extreme (exact position,
     # proportional whole-screen size) and the two do not mix.
     anchor = attrs.get("anchor", "")

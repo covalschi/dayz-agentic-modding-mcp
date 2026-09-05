@@ -103,6 +103,48 @@ def test_tokens_file_is_validated_shape_by_shape():
         Tokens.from_text("{", "ui/tokens.json")
 
 
+#: A project's sixth tokens group (spec Task 42): a workspace window's own
+#: geometry -- pairs, scalars and fractions, same heterogeneous shape as
+#: `device`.
+VPP = {"window": [1000, 620], "header": 96, "pane": [1000, 524], "paneY": 96,
+       "tab": [150, 28], "windowX": 0.24, "windowY": 0.14}
+
+
+def test_a_further_tokens_group_resolves_like_device():
+    """`Tokens` used to know exactly five top-level keys and silently drop
+    anything else, so a project's sixth group (`vpp`) was right there in the
+    file and still refused with `unknown token`. Every group beyond
+    `color`/`font`/`space`/`size` now reads like `device` -- a plain scalar,
+    a `[w, h]` pair, or (via a list of two tokens) a mix of both."""
+    t = Tokens.from_text(json.dumps({**TOKENS, "vpp": VPP}), "ui/tokens.json")
+    assert t.number("$vpp.header", "f", "n") == 96.0
+    assert t.number("$vpp.windowX", "f", "n") == 0.24
+    assert t.pair("$vpp.window", "f", "n") == (1000.0, 620.0)
+    assert t.pair(["$vpp.windowX", "$vpp.windowY"], "f", "n") == (0.24, 0.14)
+
+
+def test_a_further_groups_scalar_and_pair_refusals_match_devices():
+    """Same two refusals `device` already gives when a token is present but
+    the wrong shape for the slot it is used in, generalised to any group."""
+    t = Tokens.from_text(json.dumps({**TOKENS, "vpp": VPP}), "ui/tokens.json")
+    with pytest.raises(LayoutGenError, match="is a pair, not a number"):
+        t.number("$vpp.window", "f", "n")
+    with pytest.raises(LayoutGenError, match="is a number, not a pair"):
+        t.pair("$vpp.header", "f", "n")
+    with pytest.raises(LayoutGenError, match="unknown token"):
+        t.number("$nope.x", "f", "n")
+
+
+def test_a_tokens_group_entry_of_the_wrong_shape_is_refused_at_load():
+    with pytest.raises(LayoutGenError, match=r"vpp\.bad must be a number, a \[w, h\] pair or a string"):
+        Tokens.from_text(json.dumps({**TOKENS, "vpp": {**VPP, "bad": True}}), "ui/tokens.json")
+
+
+def test_a_tokens_group_that_is_not_an_object_is_refused():
+    with pytest.raises(LayoutGenError, match="vpp must be an object"):
+        Tokens.from_text(json.dumps({**TOKENS, "vpp": [1, 2, 3]}), "ui/tokens.json")
+
+
 from dayz_mcp.layoutgen import build_layout
 from dayz_mcp.layoutlint import lint_layout
 
@@ -1030,6 +1072,33 @@ def test_at_frac_values_resolve_through_tokens():
         t, "ui/MyMod/x.json", "MyMod/gui/layouts")
     text = out.files["MyMod/gui/layouts/x.layout"]
     assert " position 0.24 0.14\n" in text
+    assert clean(text) == []
+
+
+def test_at_frac_and_child_at_resolve_through_a_further_tokens_group():
+    """End-to-end: `vpp` (a project's sixth tokens group, spec Task 42/43 --
+    a VPP admin window's own geometry) resolves through a root's `at_frac`
+    and `size`, and a child's `at` and `size`, exactly the way `device`
+    already did."""
+    t = Tokens.from_text(json.dumps({**TOKENS, "vpp": VPP}), "ui/tokens.json")
+    out = build_layout({"layout": "x", "root": {"frame": {
+        "name": "Win", "size": "$vpp.window", "at_frac": ["$vpp.windowX", "$vpp.windowY"],
+        "children": [
+            {"frame": {"name": "Pane", "at": [0, "$vpp.paneY"], "size": "$vpp.pane"}}]}}},
+        t, "ui/MyMod/x.json", "MyMod/gui/layouts")
+    text = out.files["MyMod/gui/layouts/x.layout"]
+    assert ("FrameWidgetClass Win {\n"
+            " visible 1\n"
+            " position 0.24 0.14\n"
+            " size 1000 620\n"
+            " hexactpos 0\n"
+            " vexactpos 0\n"
+            " hexactsize 1\n"
+            " vexactsize 1\n") in text
+    assert ("  FrameWidgetClass Pane {\n"
+            "   visible 1\n"
+            "   position 0 96\n"
+            "   size 1000 524\n") in text
     assert clean(text) == []
 
 
