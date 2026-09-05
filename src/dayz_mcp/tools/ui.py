@@ -636,14 +636,16 @@ def _live_sources(prof) -> tuple[list, list[str]]:
     Walks each of `[build] mods`' own `gui/layouts` -- not the whole mod
     tree, just where a layout actually lives (LAYOUT_DIR, the same constant
     layout_build targets). A mod with no such folder yet is skipped, not an
-    error. A file that fails to READ or PARSE is skipped and counted rather
+    error. A file that fails to READ or PARSE is skipped and named rather
     than raised: one stray syntax error two mods over must never blind the
     checks to every OTHER layout -- unlike `live=False`, nothing here is
     about to hang the engine's own parser, so there is no REFUSE to stop
-    for. The counts travel in the returned note, never silently dropped.
+    for. Every skipped file travels in the returned note, by name and by
+    which of the two it was, never silently dropped.
     """
     found: list = []
-    loaded = unreadable = 0
+    bad: list[str] = []
+    loaded = 0
     for mod in prof.build.mods:
         layout_dir = resolve_mod_dir(prof.root, prof.build.sources, mod) / LAYOUT_DIR
         if not layout_dir.is_dir():
@@ -651,14 +653,18 @@ def _live_sources(prof) -> tuple[list, list[str]]:
         for path in sorted(layout_dir.glob("*.layout")):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                bad.append(f"{path.name}: unreadable")
+                continue
+            try:
                 found.append(parse_layout(text))
-            except (OSError, LayoutSyntaxError):
-                unreadable += 1
+            except LayoutSyntaxError as exc:
+                bad.append(f"{path.name}: does not parse ({exc})")
                 continue
             loaded += 1
     note = f"live sources: {loaded} layout{'' if loaded == 1 else 's'}"
-    if unreadable:
-        note += f", {unreadable} unreadable"
+    if bad:
+        note += f", {len(bad)} unreadable: " + ", ".join(bad)
     return found, [note]
 
 

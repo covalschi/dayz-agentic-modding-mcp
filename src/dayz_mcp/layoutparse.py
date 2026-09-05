@@ -58,6 +58,10 @@ class LayoutNode:
         return None
 
     def walk(self, path: str = "") -> Iterator[tuple[str, "LayoutNode"]]:
+        """Depth-first, dotted path, root at "". Children are numbered in
+        DECLARATION order -- NOT the engine's own order (ascending
+        `priority`, stable for ties); see `uicheck._priority_walk` for a
+        walk that matches what the engine actually draws."""
         yield path, self
         for index, child in enumerate(self.children):
             child_path = f"{path}.{index}" if path else str(index)

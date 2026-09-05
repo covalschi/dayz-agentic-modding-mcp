@@ -411,3 +411,87 @@ def test_two_flattened_rows_restarting_priority_resolve_the_second_rows_own_chil
     nodes = [node("", "FrameWidget", "Root", "0 0 1000 600"),
              node("1", "TextWidget", "R2A", "10 10 100 20", text_size=(140, 20))]
     assert rules(check(nodes, HOST, source=src)[0]) == []
+
+
+def _live_walk_with_a_renamed_row(flag: bool):
+    """The shape a real live walk actually draws (task 32): the walked
+    ROOT's own name is itself a known source root (`sources` is the whole
+    project, menu file included -- exactly what made `_scoped` always True
+    in production), a page root sits under it also named after a known
+    root, and a list under the page holds a row whose template root was
+    RENAMED at runtime to a bare number (what the engine does to a
+    fixture-added row) -- so the row root itself is NOT a known root. The
+    flagged label lives inside a THIRD file, the row's own template, which
+    neither the menu's nor the page's own root scope declares. `flag`
+    switches whether that template marks the label self-sized."""
+    menu = parse_layout('FrameWidgetClass Menu {\n size 1 1\n {\n  FrameWidgetClass Page {\n   size 1 1\n  }\n }\n}\n')
+    page = parse_layout('FrameWidgetClass Page {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    flag_line = '   "size to text h" 1\n' if flag else ''
+    row = parse_layout(f'FrameWidgetClass ContactRow {{\n size 1 30\n {{\n  TextWidgetClass RowWhere {{\n   size 100 20\n{flag_line}  }}\n }}\n}}\n')
+    nodes = [node("", "FrameWidget", "Menu", "0 0 1000 600"),
+             node("0", "FrameWidget", "Page", "0 0 1000 600"),
+             node("0.0", "WrapSpacerWidget", "List", "0 0 1000 100"),
+             node("0.0.0", "Widget", "1051648368", "0 0 1000 30"),
+             # 109 px of text in a 100 px box -- the measured ~9% GetTextSize
+             # over-report on a label the row template marks self-sized.
+             node("0.0.0.0", "TextWidget", "RowWhere", "0 0 100 20", text_size=(109, 20))]
+    return check(nodes, HOST, sources=[menu, page, row])
+
+
+def test_a_live_walks_scoped_miss_falls_through_to_the_any_flag_lookup():
+    """Finding 1: the walked root ("Menu") and the page root under it
+    ("Page") are BOTH known source roots, so the renamed row's `RowWhere`
+    label is `_scoped` (its nearest known-root ancestor is "Page") but a
+    MISS there (`"Page"`'s own file never declares `RowWhere` -- it lives in
+    the row's own template). Before the fix a scoped miss was trusted as
+    "no flags"; after it falls through to the any-flag lookup the same way
+    an unscoped name already did, and finds the row template's own flag."""
+    assert rules(_live_walk_with_a_renamed_row(flag=True)[0]) == []
+
+
+def test_a_live_walks_scoped_miss_still_reports_overflow_with_no_flag_anywhere():
+    """The fall-through above is not a blank cheque: the identical shape
+    with no source anywhere marking RowWhere self-sized still overflows."""
+    assert rules(_live_walk_with_a_renamed_row(flag=False)[0]) == [("text_overflow", "RowWhere")]
+
+
+def _live_walk_with_a_renamed_rows_edit_box(styled: bool):
+    """Same live-walk shape as `_live_walk_with_a_renamed_row`, but the
+    renamed row holds an EditBoxWidget instead of a label -- finding 15's
+    own shape for `editbox_bare`'s unguarded `src_of`. `styled` switches
+    whether the row's own template gives the box a `style` (drawing its own
+    frame, so it is never bare)."""
+    menu = parse_layout('FrameWidgetClass Menu {\n size 1 1\n {\n  FrameWidgetClass Page {\n   size 1 1\n  }\n }\n}\n')
+    page = parse_layout('FrameWidgetClass Page {\n size 1 1\n {\n  WrapSpacerWidgetClass List {\n   size 1 0\n  }\n }\n}\n')
+    style_line = '   style Default\n' if styled else ''
+    row = parse_layout(f'FrameWidgetClass ContactRow {{\n size 1 30\n {{\n  EditBoxWidgetClass Field {{\n   size 100 20\n{style_line}  }}\n }}\n}}\n')
+    nodes = [node("", "FrameWidget", "Menu", "0 0 1000 600"),
+             node("0", "FrameWidget", "Page", "0 0 1000 600"),
+             node("0.0", "WrapSpacerWidget", "List", "0 0 1000 100"),
+             node("0.0.0", "Widget", "1051648368", "0 0 1000 30"),
+             node("0.0.0.0", "EditBoxWidget", "Field", "10 5 100 20")]
+    return check(nodes, HOST, sources=[menu, page, row])
+
+
+def test_editbox_bare_falls_through_a_scoped_miss_to_a_name_lookup():
+    """Finding 15: the edit box's nearest known-root ancestor is "Page",
+    which does not declare "Field" -- a scoped miss. Before the fix this
+    read as `src is None`, which (with no single `source` given, exactly
+    live=True's own shape) produced the false "no source layout was given"
+    note instead of judging the box at all. After the fix it resolves by
+    name across every source given, exactly like the text_size fallback,
+    and is judged: the row template gives Field no style and nothing frames
+    it, so it is correctly flagged bare and the false note does not appear."""
+    issues, notes = _live_walk_with_a_renamed_rows_edit_box(styled=False)
+    assert rules(issues) == [("editbox_bare", "Field")]
+    assert not any("no source layout was given" in n for n in notes), notes
+
+
+def test_editbox_bare_scoped_miss_fallback_recognises_a_style_too():
+    """The fallback is not `editbox_bare`-only: it reads the SAME resolved
+    source's `style`, so a field the row template already styles is not
+    flagged bare just because its ancestor's own scope missed it."""
+    issues, notes = _live_walk_with_a_renamed_rows_edit_box(styled=True)
+    assert rules(issues) == []
+    assert not any("no source layout was given" in n for n in notes), notes
+

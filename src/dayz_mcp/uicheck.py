@@ -272,19 +272,23 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
     # (names are unique within a file -- the layout-dup-name lint sees to that).
     trees = ([source] if source else []) + list(sources)
     by_root: dict[str, dict[str, LayoutNode]] = {}
-    by_name: dict[str, LayoutNode] = {}
-    # Every node sharing a NAME, across every tree given -- unlike by_name
-    # (one winner per name), a full list so an UNSCOPED lookup (see
-    # `_scoped` below) can ask "did ANY of these mark it self-sized" rather
-    # than trust whichever tree happened to sort first.
+    # Every node sharing a NAME, across every tree given -- a full list (not
+    # just one winner) so an UNSCOPED lookup (see `_scoped` below) can ask
+    # "did ANY of these mark it self-sized" rather than trust whichever tree
+    # happened to sort first. Each tree is walked once, here; by_root's own
+    # table and by_name below both read off this same walk.
     by_name_all: dict[str, list[LayoutNode]] = {}
     for t in trees:
-        # first tree wins a shared root name, the same way by_name settles
-        # a shared widget name -- an order the caller controls
-        by_root.setdefault(t.name, {s.name: s for _p, s in t.walk()})
-        for _p, s in t.walk():
-            by_name.setdefault(s.name, s)
+        walked = list(t.walk())
+        # first tree wins a shared root name, the same way by_name (below)
+        # settles a shared widget name -- an order the caller controls
+        by_root.setdefault(t.name, {s.name: s for _p, s in walked})
+        for _p, s in walked:
             by_name_all.setdefault(s.name, []).append(s)
+    # One winner per name -- the first tree to declare it, same order as
+    # by_root's own tie-break above. Exactly by_name_all[name][0]; kept as
+    # its own dict since src_of's fallback wants a single node, not a list.
+    by_name: dict[str, LayoutNode] = {name: nodes[0] for name, nodes in by_name_all.items()}
 
     def _root_scope(path: str) -> dict[str, LayoutNode] | None:
         """The by_root name table of `path`'s nearest ancestor that names a
@@ -387,20 +391,26 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
         # box grows to fit it instead of clipping it.
         text_size = n.get("text_size")
         if text_size:
-            if _scoped(path):
-                src = src_of(path, name)
+            src = src_of(path, name) if _scoped(path) else None
+            if src is not None:
                 free_w = _flag(src, "size to text h") or _flag(src, "wrap")
                 free_h = _flag(src, "size to text v")
             else:
-                # No scope to trust (see _scoped): by_name would pick
-                # whichever tree happened to sort first, and a live walk's
-                # `sources` is the WHOLE project's layouts with no page/row
-                # structure to prefer one by. ANY of them marking this name
-                # self-sized is enough -- preferring a missed overflow on
-                # two unrelated widgets that happen to share a name over
-                # the alternative this exists to fix: every self-sized
-                # label in a live walk reported as overflowing regardless
-                # (task 32; measured 2026-09-04, 11 false findings).
+                # No source to trust: either no scope at all (see _scoped),
+                # or a scoped ancestor whose OWN file simply does not
+                # declare this name -- a fixture/script row template is a
+                # separate file from whatever known root sits above it, and
+                # a scoped MISS is not evidence of "no flags" any more than
+                # being unscoped is. by_name would pick whichever tree
+                # happened to sort first, and a live walk's `sources` is the
+                # WHOLE project's layouts with no page/row structure to
+                # prefer one by. ANY of them marking this name self-sized is
+                # enough -- preferring a missed overflow on two unrelated
+                # widgets that happen to share a name over the alternative
+                # this exists to fix: every self-sized label in a live walk
+                # reported as overflowing regardless (task 32; measured
+                # 2026-09-04, 11 false findings; the scoped-miss shape measured
+                # 2026-09-05 on real captures, 13 more of the same).
                 matches = by_name_all.get(name, ())
                 free_w = any(_flag(s, "size to text h") or _flag(s, "wrap") for s in matches)
                 free_h = any(_flag(s, "size to text v") for s in matches)
@@ -411,7 +421,16 @@ def check(nodes: list[dict], host: tuple[int, int, int, int] | None,
                                     f"the text measures {text_size[0]}x{text_size[1]} px in a {w}x{h} px box"))
 
         if cls == EDITBOX_CLASS:
-            src = src_of(path, name)
+            # Same guarded lookup as text_size above: a scoped MISS (the
+            # nearest known-root ancestor's own file does not declare this
+            # name -- a row template renamed at runtime, sitting under a
+            # page root that knows nothing of it) falls through to a
+            # plain name lookup instead of being trusted as "no source" --
+            # sources WERE given, this ancestor's own scope just does not
+            # cover this widget.
+            src = src_of(path, name) if _scoped(path) else None
+            if src is None:
+                src = by_name.get(name)
             if src is None:
                 unjudged = "editbox_bare: no source layout was given, so edit boxes were not judged"
                 if not source and unjudged not in notes:
