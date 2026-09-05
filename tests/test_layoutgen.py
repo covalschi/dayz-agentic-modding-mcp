@@ -794,23 +794,21 @@ def test_build_project_needs_tokens_once_a_ui_folder_exists(tmp_path):
 
 def test_build_project_reads_tokens_from_the_given_path(tmp_path):
     # ui/tokens.json absent; tokens live elsewhere, named by the profile
-    (tmp_path / "ui" / "MyMod").mkdir(parents=True)
-    (tmp_path / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(PAGE), encoding="utf-8")
-    (tmp_path / "MyMod").mkdir()
-    tokens_path = tmp_path / "shared" / "tokens.json"
+    root = project(tmp_path)
+    (root / "ui" / "tokens.json").unlink()
+    tokens_path = root / "shared" / "tokens.json"
     tokens_path.parent.mkdir()
     tokens_path.write_text(json.dumps(TOKENS), encoding="utf-8")
-    report = build_project(tmp_path, ["MyMod"], {}, write=True, tokens_path=tokens_path)
+    report = build_project(root, ["MyMod"], {}, write=True, tokens_path=tokens_path)
     assert report.written == ["MyMod/gui/layouts/oz_page.layout"]
-    assert (tmp_path / "MyMod" / "gui" / "layouts" / "oz_page.layout").is_file()
+    assert (root / "MyMod" / "gui" / "layouts" / "oz_page.layout").is_file()
 
 
 def test_build_project_names_a_missing_given_tokens_path_in_the_refusal(tmp_path):
-    (tmp_path / "ui" / "MyMod").mkdir(parents=True)
-    (tmp_path / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(PAGE), encoding="utf-8")
-    (tmp_path / "MyMod").mkdir()
+    root = project(tmp_path)
+    (root / "ui" / "tokens.json").unlink()
     with pytest.raises(LayoutGenError, match=r"shared/tokens\.json is missing"):
-        build_project(tmp_path, ["MyMod"], {}, write=True, tokens_path=tmp_path / "shared" / "tokens.json")
+        build_project(root, ["MyMod"], {}, write=True, tokens_path=root / "shared" / "tokens.json")
 
 
 def test_main_refuses_an_unknown_mod_and_builds_a_known_one(tmp_path, capsys):
@@ -1089,10 +1087,35 @@ def test_bar_takes_its_default_height_in_a_vbox():
         {"vbox": {"name": "Col", "size": "fill", "children": [
             {"bar": {"name": "Charge", "w": "fill"}}]}}]}}})
     text = out.files["MyMod/gui/layouts/oz_page.layout"]
-    assert "     size 300 10\n" in text            # $size.bar = 10 in the test TOKENS
-    assert "       size 0 10\n" in text            # the fill, same height as the track
-    assert "     color 1 1 1 0.08\n" in text        # track defaults to $rule
-    assert "       color 0.31 0.71 0.91 1\n" in text  # fill defaults to $accent
+    assert (
+        "    PanelWidgetClass Charge {\n"
+        "     visible 1\n"
+        "     ignorepointer 1\n"
+        "     position 0 0\n"
+        "     size 300 10\n"            # $size.bar = 10 in the test TOKENS
+        "     hexactpos 1\n"
+        "     vexactpos 1\n"
+        "     hexactsize 1\n"
+        "     vexactsize 1\n"
+        "     color 1 1 1 0.08\n"        # track defaults to $rule
+        "     priority 0\n"
+        "     style rover_sim_colorable\n"
+    ) in text
+    assert (
+        "      PanelWidgetClass ChargeFill {\n"
+        "       visible 1\n"
+        "       ignorepointer 1\n"
+        "       position 0 0\n"
+        "       size 0 10\n"            # the fill, same height as the track
+        "       hexactpos 1\n"
+        "       vexactpos 1\n"
+        "       hexactsize 1\n"
+        "       vexactsize 1\n"
+        "       color 0.31 0.71 0.91 1\n"  # fill defaults to $accent
+        "       priority 1\n"
+        "       style rover_sim_colorable\n"
+        "      }\n"
+    ) in text
     assert clean(text) == []
 
 
@@ -1125,6 +1148,6 @@ def test_map_is_a_clipped_map_widget_without_children():
 
 def test_bar_refuses_a_plain_color():
     # a bar is coloured by track and fill; a plain color would be dropped silently
-    with pytest.raises(LayoutGenError):
+    with pytest.raises(LayoutGenError, match=r"bar does not take \['color'\]"):
         build({"layout": "oz_page", "root": {"frame": {"name": "P", "size": [300, 100], "children": [
             {"bar": {"name": "Charge", "at": [10, 10], "w": 200, "h": 10, "color": "$rule"}}]}}})

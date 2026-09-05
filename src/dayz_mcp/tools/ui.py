@@ -1062,7 +1062,8 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
 
 
 def layout_build(mod: str = "") -> Result:
-    """Generate every .layout described under `ui/<Mod>/` from `ui/tokens.json`.
+    """Generate every .layout described under `ui/<Mod>/` from the project's
+    tokens file (`ui/tokens.json` unless `build.tokens` says otherwise).
 
     A description is one JSON file per layout (spec 2026-09-04 §3.3): a page
     is containers and tokens, and every number the engine cannot derive --

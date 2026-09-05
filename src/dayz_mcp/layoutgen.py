@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .profile import resolve_mod_dir
+from .profile import UI_DIR, TOKENS_FILE, resolve_mod_dir
 
 #: A proportional-width child of a ScrollWidget with "Scrollbar V" 1 gets
 #: the scroll's width minus this many layout units (measured 2026-09-04).
@@ -28,9 +28,10 @@ FONT_FACE_DEFAULT = "gui/fonts/sdf_MetronBook24"
 PANEL_STYLE = "rover_sim_colorable"
 #: Where a mod keeps its layouts, under the mod's source folder.
 LAYOUT_DIR = "gui/layouts"
-#: Where a project keeps descriptions: <root>/ui/tokens.json, <root>/ui/<Mod>/*.json.
-UI_DIR = "ui"
-TOKENS_FILE = "tokens.json"
+# UI_DIR/TOKENS_FILE (a project's descriptions: <root>/ui/tokens.json,
+# <root>/ui/<Mod>/*.json) live in profile.py, not here -- BuildCfg.tokens'
+# own default is built from the exact same two constants, so the default
+# tokens path can never split between the two files by editing only one.
 
 
 class LayoutGenError(ValueError):
@@ -67,7 +68,8 @@ def _is_pair(value) -> bool:
 
 @dataclass
 class Tokens:
-    """`ui/tokens.json`: the numbers, colours and fonts written once.
+    """The tokens file (`ui/tokens.json` by default, `build.tokens` to move
+    it): the numbers, colours and fonts written once.
 
     `device` is the one group with no fixed shape of its own: an entry may
     be a pair (`[w, h]`, e.g. a screen size), a scalar (a plain number, e.g.
@@ -118,10 +120,13 @@ class Tokens:
         """`from_text`, read off disk. `label` (default: `path` itself) is
         what every error this can raise names -- the caller's choice, so a
         tokens file inside the project reads `ui/tokens.json ...` rather
-        than the machine's own absolute path to it."""
+        than the machine's own absolute path to it. A general classmethod:
+        the message only names the path, not WHY a project should have one
+        -- `build_project`, its one caller today, already knows a `ui/<Mod>/`
+        exists by the time it calls this, and says so itself."""
         label = label or str(path)
         if not path.is_file():
-            raise LayoutGenError(f"{label} is missing but {UI_DIR}/<Mod>/ exists", label)
+            raise LayoutGenError(f"{label} is missing", label)
         return cls.from_text(path.read_text(encoding="utf-8"), label)
 
     def number(self, value, file: str, node: str, what: str = "size") -> float:
@@ -1484,6 +1489,11 @@ def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
         tokens_label = tokens_file.relative_to(root).as_posix()
     except ValueError:
         tokens_label = str(tokens_file)
+    # `Tokens.load`'s own message only names the path -- this caller is the
+    # one that knows a ui/<Mod>/ already exists (checked above, via `dirs`),
+    # so it is the one that says a tokens file is missing DESPITE that.
+    if not tokens_file.is_file():
+        raise LayoutGenError(f"{tokens_label} is missing but {UI_DIR}/<Mod>/ exists", tokens_label)
     tokens = Tokens.load(tokens_file, tokens_label)
     for m, ui_dir in dirs:
         for path in sorted(ui_dir.glob("*.json")):

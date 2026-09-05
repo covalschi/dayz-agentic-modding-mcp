@@ -25,6 +25,13 @@ from .packer import DEFAULT_EXCLUDE
 MAIN_NAME = "dayz-mcp.toml"
 LOCAL_NAME = "dayz-mcp.local.toml"
 
+# Where the layout generator's tokens.json lives by default -- the one place
+# both this file's own BuildCfg.tokens default and layoutgen.py's own
+# fallback (root / UI_DIR / TOKENS_FILE) derive from, so the two can never
+# silently split by changing only one of them.
+UI_DIR = "ui"
+TOKENS_FILE = "tokens.json"
+
 
 @dataclass
 class BuildCfg:
@@ -54,7 +61,7 @@ class BuildCfg:
     # project_root, an absolute value is allowed: unlike a model's prefix
     # tree, a tokens file has no path baked into anything downstream that
     # would make one machine's absolute path wrong on another.
-    tokens: str = "ui/tokens.json"
+    tokens: str = f"{UI_DIR}/{TOKENS_FILE}"
 
 
 @dataclass
@@ -283,8 +290,7 @@ def load_profile(path: str | Path) -> Result:
         return fail("build.layout_classes must be a list of strings",
                     hint='e.g. layout_classes = ["MyMapWidgetClass"]')
 
-    # Check build.tokens is a non-empty string
-    tokens_val = b.get("tokens", "ui/tokens.json")
+    tokens_val = b.get("tokens", BuildCfg.tokens)
     if not isinstance(tokens_val, str) or not tokens_val:
         return fail(
             f"build.tokens must be a non-empty string, got {tokens_val!r}",

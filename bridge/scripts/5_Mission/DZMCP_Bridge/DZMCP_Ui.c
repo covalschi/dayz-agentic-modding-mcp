@@ -124,7 +124,7 @@ class DZMCP_Ui
     //
     // Depth-first, in the order GetChildren/GetSibling hand the siblings back:
     // ascending `priority`, stable for equal values (measured 2026-09-04, skill
-    // gui-layouts.md before section 25) -- NOT the declaration order of the
+    // gui-layouts.md, section 24's last bullet) -- NOT the declaration order of the
     // .layout file. The order is fixed for an unchanged tree, so a path recorded
     // now means the same node in the next walk; pairing a path with its source
     // node is the eyes' job (uicheck walks the source the same way).
