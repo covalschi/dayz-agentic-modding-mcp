@@ -194,7 +194,6 @@ def test_a_restarted_bridge_counts_as_moving(live):
 
 
 def test_nothing_is_sent_when_no_server_is_running(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -208,7 +207,6 @@ def test_nothing_is_sent_when_no_server_is_running(tmp_path, monkeypatch):
 
 
 def test_every_world_tool_refuses_without_an_open_project(tmp_path):
-    session.reset()
     for call in (lambda: world.world_spawn("Apple"),
                  lambda: world.world_teleport("1 2 3"),
                  lambda: world.world_set("health", 1),
@@ -586,7 +584,6 @@ def test_a_command_during_a_boot_names_the_boot_instead_of_denying_it(tmp_path, 
     "there is nothing to act on" is the same silent lie as "frozen" instead of
     "could not measure". The boot has an id; the refusal must carry it.
     """
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -602,7 +599,6 @@ def test_a_command_during_a_boot_names_the_boot_instead_of_denying_it(tmp_path, 
 def test_with_no_boot_anywhere_the_refusal_stays_what_it_was(tmp_path):
     """client_chat keys off this exact sentence to replace the hint, and the
     ordinary case -- nobody ever started anything -- must keep saying it."""
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -613,7 +609,6 @@ def test_with_no_boot_anywhere_the_refusal_stays_what_it_was(tmp_path):
 
 
 def test_a_boot_that_already_finished_is_not_offered_as_a_reason(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))

@@ -34,18 +34,9 @@ from dayz_mcp.assets.p3d import (
 )
 
 
-def odol(lods: int = 2, tail: bytes = b"") -> bytes:
-    """The smallest byte string this reader must accept as an ODOL."""
-    return b"ODOL" + struct.pack("<II", 55, lods) + b"\x00" * (4 * lods) + tail
-
-
-def mlod(lods: int = 3, tail: bytes = b"") -> bytes:
-    return b"MLOD" + struct.pack("<II", 0x101, lods) + tail
-
-
-def named(*names: str) -> bytes:
-    """Names as a p3d stores them: NUL-terminated, back to back."""
-    return b"".join(n.encode("ascii") + b"\x00" for n in names)
+# The synthetic p3d byte strings live in tests/_p3d.py: five files built
+# them, and the copies had drifted on the default LOD count.
+from _p3d import mlod, named, odol
 
 
 # ------------------------------------------------------------------ file kind

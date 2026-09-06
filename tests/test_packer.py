@@ -2,14 +2,10 @@ import os
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from dayz_mcp.packer import (
-    DEFAULT_EXCLUDE, PackResult, config_syntax_cmd, ensure_patch_link, filebank_cmd,
-    find_excluded, find_keys, is_junction, newest_source_mtime, pack_all, pack_one, sign_cmd,
-)
+from dayz_mcp.packer import DEFAULT_EXCLUDE, config_syntax_cmd, ensure_patch_link, filebank_cmd, find_excluded, find_keys, is_junction, newest_source_mtime, pack_all, pack_one, sign_cmd
 
 
 def test_filebank_command_shape():

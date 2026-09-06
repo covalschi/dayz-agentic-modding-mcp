@@ -169,7 +169,6 @@ def test_the_centre_of_a_rectangle():
 
 
 def test_no_client_is_refused_before_anything_is_sent(tmp_path):
-    session.reset()
     root = make_project(tmp_path / "p")
     with_stand(root, tmp_path / "stand")
     from dayz_mcp import tools

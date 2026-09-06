@@ -106,14 +106,12 @@ def write_state(profiles: Path, tick: int, session_id: str = "boot-1") -> None:
 
 
 def test_bridge_build_refuses_without_an_open_project():
-    session.reset()
     r = tools.bridge_build()
     assert not r.ok
     assert "project_open" in r.hint
 
 
 def test_bridge_build_refuses_without_dayz_tools(tmp_path, monkeypatch):
-    session.reset()
     tools.project_open(str(make_project(tmp_path)))
     monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: None)
     r = tools.bridge_build()
@@ -124,7 +122,6 @@ def test_bridge_build_refuses_without_dayz_tools(tmp_path, monkeypatch):
 def test_bridge_build_refuses_when_the_bridge_sources_are_missing(tmp_path, monkeypatch):
     """Installed without the repository (a wheel, say) there is nothing to
     pack. Say where it looked instead of failing somewhere inside FileBank."""
-    session.reset()
     tools.project_open(str(make_project(tmp_path)))
     monkeypatch.setattr("dayz_mcp.tools.bridge.session_tools_root", lambda: "C:/tools")
     monkeypatch.setattr(bridge, "SERVER_REPO_ROOT", tmp_path / "not_a_checkout")
@@ -138,7 +135,6 @@ def test_bridge_build_packs_the_servers_own_sources_not_the_projects(tmp_path, m
     """The whole point of the tool: OUR mod, from OUR repository. A build that
     quietly packed the open project's tree would still produce a signed pbo
     named DZMCP_Bridge -- and the stand would load the wrong code."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -179,7 +175,6 @@ def test_bridge_build_packs_the_servers_own_sources_not_the_projects(tmp_path, m
 
 
 def test_bridge_build_reports_the_built_pbo_in_the_job_summary(tmp_path, monkeypatch):
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -207,7 +202,6 @@ def test_bridge_build_summary_tells_the_agent_how_to_attach_the_bridge(tmp_path,
     bridge_status then reports "never wrote state". The instructions have to
     arrive with the build, not only after a boot has already been spent
     without them."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -227,7 +221,6 @@ def test_bridge_build_summary_tells_the_agent_how_to_attach_the_bridge(tmp_path,
 
 
 def test_bridge_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch):
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -244,7 +237,6 @@ def test_bridge_build_fails_the_job_when_packing_reports_an_error(tmp_path, monk
 
 
 def test_bridge_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, monkeypatch):
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -265,7 +257,6 @@ def test_bridge_build_refuses_a_second_build_while_one_is_running(tmp_path, monk
     """Same reason mod_build refuses: two builds write the same pbo and unlink
     the same .bisign. Tools run on worker threads, so this is one impatient
     retry away."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -302,7 +293,6 @@ def test_bridge_build_refuses_a_second_build_after_switching_projects(tmp_path, 
     a build still running for project A, and the two then write the same pbo.
     The spec requires acceptance on two projects, so this is a normal sequence,
     not a contrived one."""
-    session.reset()
     a = make_project(tmp_path / "a")
     b = make_project(tmp_path / "b")
     repo = fake_bridge_sources(tmp_path)
@@ -344,7 +334,6 @@ def test_bridge_build_refuses_a_second_build_after_switching_projects(tmp_path, 
 def test_bridge_build_does_not_block_a_normal_mod_build(tmp_path, monkeypatch):
     """The in-flight check is per KIND: a bridge build and a project build
     touch different output directories and must not lock each other out."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -415,7 +404,6 @@ def test_bridge_build_never_consumes_the_projects_signing_key(tmp_path, monkeypa
     output directory fed by per-project keys means every build re-signs the
     same pbo with whoever is open, and a -serverMod pbo is never handed to a
     client to verify in the first place."""
-    session.reset()
     project = _project_with_keys(tmp_path)
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -441,7 +429,6 @@ def test_bridge_build_clears_a_signature_left_by_an_earlier_build(tmp_path, monk
     summary says "(unsigned)". A stand that verifies signatures rejects that,
     and bridge_status then blames the wiring, sending the agent to fix
     something already correct."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
@@ -467,7 +454,6 @@ def test_bridge_build_clears_a_signature_left_by_an_earlier_build(tmp_path, monk
 def test_bridge_build_clears_a_stale_signature_even_when_the_build_fails(tmp_path, monkeypatch):
     """A failed build leaves the OLD pbo in place. A signature next to it is
     worse than none: it makes an out-of-date artifact look verified."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
@@ -497,7 +483,6 @@ def test_bridge_build_is_covered_by_the_stale_pbo_guard(tmp_path, monkeypatch):
     it: the REAL pack_one runs here, with only FileBank itself stubbed out to
     reproduce the silent skip (pbo left untouched and older than the sources).
     """
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -525,7 +510,6 @@ def test_bridge_build_is_covered_by_the_stale_pbo_guard(tmp_path, monkeypatch):
 def test_bridge_build_succeeds_when_filebank_really_writes_the_pbo(tmp_path, monkeypatch):
     """The other half of the guard: a build that genuinely happened must not be
     reported stale. Same setup, only FileBank's stand-in actually writes."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -550,14 +534,12 @@ def test_bridge_build_succeeds_when_filebank_really_writes_the_pbo(tmp_path, mon
 
 
 def test_bridge_status_refuses_without_an_open_project():
-    session.reset()
     r = tools.bridge_status()
     assert not r.ok
     assert "project_open" in r.hint
 
 
 def test_bridge_status_says_no_server_rather_than_calling_the_bridge_dead(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -576,7 +558,6 @@ def test_bridge_status_reports_a_command_wedged_in_a_stopped_stand(tmp_path):
     its profile directory. So a command sent while the server was down sits
     there forever AND executes at the first tick of the next boot -- a specific,
     diagnosable situation that nothing reported before this."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -600,7 +581,6 @@ def test_bridge_status_surfaces_an_unclaimed_command_while_the_bridge_is_unwired
     is still the fix to make -- but the waiting command has to be visible, or
     the agent wires the bridge and is then surprised by a command it sent
     minutes ago running at the first tick."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -619,7 +599,6 @@ def test_bridge_status_reports_the_mailbox_on_every_path(tmp_path, monkeypatch):
     """Including the healthy one: an empty mailbox is a fact worth stating
     once, so a caller never has to guess whether the field is missing or the
     mailbox is clear."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -653,7 +632,6 @@ def test_bridge_status_does_not_read_a_leftover_state_file_as_a_live_bridge(tmp_
     """The file survives the server that wrote it. With nothing running, an
     advancing-looking snapshot on disk is residue, and reporting it as a live
     bridge would be a straight lie."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -666,7 +644,6 @@ def test_bridge_status_does_not_read_a_leftover_state_file_as_a_live_bridge(tmp_
 
 
 def test_bridge_status_reports_a_server_that_never_wrote_state(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -686,7 +663,6 @@ def test_bridge_status_reports_a_server_that_never_wrote_state(tmp_path, monkeyp
 def test_bridge_status_tells_an_unreadable_state_file_from_a_missing_one(tmp_path, monkeypatch):
     """Different causes, different fixes: no file at all means the mod is not
     running; a file that never parses means it is running and writing rubbish."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -711,7 +687,6 @@ def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_pat
     instead of a reason about readability. That IS the truth here -- a
     published tick that does not move is frozen -- so the assertions are about
     which diagnosis is NOT reached."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -733,7 +708,6 @@ def test_bridge_status_does_not_call_a_published_tick_of_zero_unreadable(tmp_pat
 def test_bridge_status_reports_a_frozen_tick_as_not_alive(tmp_path, monkeypatch):
     """A tick that does not move is a dead bridge with a file left behind. The
     number still has to come back -- it is the evidence."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -756,7 +730,6 @@ def test_bridge_status_reports_a_frozen_tick_as_not_alive(tmp_path, monkeypatch)
 
 
 def test_bridge_status_reports_an_advancing_tick_as_alive(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -792,7 +765,6 @@ def test_bridge_status_admits_it_cannot_tell_without_a_second_sample(tmp_path, m
     """window=0 buys a fast answer at the price of the only thing that proves
     liveness. Reporting "not advancing" there would be a guess dressed as a
     measurement, so it reports "unknown" -- with the tick it did read."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -811,7 +783,6 @@ def test_bridge_status_admits_it_cannot_tell_without_a_second_sample(tmp_path, m
 def test_bridge_status_clamps_a_silly_window(tmp_path, monkeypatch):
     """A health check must stay a health check: nothing here may turn into a
     disguised long wait, which is what job_wait exists for."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -878,7 +849,6 @@ def test_bridge_status_tells_a_restart_from_a_freeze(tmp_path, monkeypatch):
     profile directory, so a naive comparison reads a freshly booted, healthy
     bridge as dead. A changed session id between the two samples means a NEW
     world came up -- alive, and emphatically not frozen."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -911,7 +881,6 @@ def test_bridge_status_says_it_could_not_measure_rather_than_frozen(tmp_path, mo
     """A failed second sample is a measurement failure, not a diagnosis.
     Reporting it as "frozen" is what sent an agent hunting script errors that
     were never there."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -947,7 +916,6 @@ def test_bridge_status_names_a_bridge_mod_older_than_this_server(tmp_path, monke
     session_id was written by a bridge mod predating this server -- saying "the
     mod is writing something it cannot finish" is false, and sends the reader to
     log_verdict and a rebuild of the wrong thing."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -969,14 +937,12 @@ def test_bridge_status_names_a_bridge_mod_older_than_this_server(tmp_path, monke
 
 
 def test_bridge_clear_refuses_without_an_open_project():
-    session.reset()
     r = tools.bridge_clear()
     assert not r.ok
     assert "project_open" in r.hint
 
 
 def test_bridge_clear_on_an_empty_mailbox_says_so(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -991,7 +957,6 @@ def test_bridge_clear_discards_a_wedged_command_and_names_it(tmp_path):
     """The remedy for the wedge bridge_status reports. WHICH command was thrown
     away is the whole point: an agent has to be able to tell whether it was the
     one it cared about."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1014,7 +979,6 @@ def test_bridge_clear_discards_a_wedged_command_and_names_it(tmp_path):
 def test_bridge_clear_refuses_a_live_bridge_unless_forced(tmp_path):
     """Discarding a command a running mod could claim any moment is worse than
     the wedge. The destructive path exists, but it has to be asked for."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1055,7 +1019,6 @@ def test_bridge_clear_refuses_a_live_bridge_unless_forced(tmp_path):
 def test_bridge_clear_clamps_its_probe_window(tmp_path, monkeypatch):
     """It blocks for probe_window like every other sampling call here, so it
     obeys the same ceiling."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1076,7 +1039,6 @@ def test_bridge_clear_clamps_its_probe_window(tmp_path, monkeypatch):
 
 def test_stale_command_points_at_the_tool_that_fixes_it(tmp_path):
     """The state and its remedy shipped a round apart; they have to meet."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1099,7 +1061,6 @@ def test_a_failure_before_the_build_starts_does_not_wedge_every_later_build(tmp_
     job stayed queued forever and every later bridge_build in the process was
     refused, naming a job that would never run. The traceback reached stderr
     and nowhere else."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -1139,7 +1100,6 @@ def test_a_thread_that_never_starts_does_not_wedge_every_later_build(tmp_path, m
     """The other end of the same hole: the slot is claimed before the worker
     thread exists, so a Thread.start() that raises leaves nothing to release
     it."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     tools.project_open(str(project))
@@ -1179,7 +1139,6 @@ def test_the_refusal_names_the_project_that_can_actually_show_the_job(tmp_path, 
     """Job stores are per project. After a switch, the refusal named a job that
     job_status and job_wait both answer "unknown job" for -- and that hint sends
     the agent hunting an imaginary typo."""
-    session.reset()
     a = make_project(tmp_path / "a")
     b = make_project(tmp_path / "b")
     repo = fake_bridge_sources(tmp_path)
@@ -1221,7 +1180,6 @@ def test_a_keys_folder_that_cannot_be_removed_fails_the_build(tmp_path, monkeypa
     reported success and the summary said "(unsigned)" -- the exact
     accumulate-every-project's-key state this strip exists to prevent, now with
     no signal at all."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
@@ -1254,7 +1212,6 @@ def test_the_strip_runs_even_when_packing_raises(tmp_path, monkeypatch):
     """The strip lives in a finally so a crash mid-pack cannot leave a
     signature over an artifact nobody rebuilt. Moving it to a sequential call
     leaves every other bridge test green, so this is the one that notices."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
@@ -1281,7 +1238,6 @@ def test_the_stale_command_answer_is_true_before_the_mod_reads_commands(tmp_path
     """The file's survival across a boot is measured; the mod claiming it is
     not -- the shipped bridge reads no mailbox yet. The wording has to be true
     now and once that lands."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1433,7 +1389,6 @@ def test_one_readable_sample_at_tick_zero_is_not_an_unreadable_file(tmp_path, mo
     reader to log_verdict and a rebuild. The same scenario at tick 7 answered
     `unknown` correctly, which is what makes it a regression rather than a
     gap."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1468,7 +1423,6 @@ def test_a_mangled_session_id_is_not_reported_as_an_outdated_bridge(tmp_path, mo
     tool then tells the user to rebuild a perfectly current bridge. Which write
     model the mod really uses is still an open question, so the verdict must not
     depend on the answer."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1511,7 +1465,6 @@ def test_an_outdated_state_document_needs_two_agreeing_reads(tmp_path, monkeypat
     landed before the first read, so the verdict was already "not outdated"
     and the test passed with the second read deleted entirely. Counting the
     reads is what actually pins the mechanism."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1540,7 +1493,6 @@ def test_an_outdated_state_document_needs_two_agreeing_reads(tmp_path, monkeypat
 
 def test_a_genuinely_old_state_document_is_still_named(tmp_path, monkeypatch):
     """Strictness must not blunt the verdict this exists for."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1559,7 +1511,6 @@ def test_a_genuinely_old_state_document_is_still_named(tmp_path, monkeypatch):
 def test_a_signature_that_cannot_be_removed_fails_the_build(tmp_path, monkeypatch):
     """The keys half of the strip had a test; the .bisign half did not, though
     it is the half that makes a stand reject the mod."""
-    session.reset()
     project = make_project(tmp_path / "project")
     repo = fake_bridge_sources(tmp_path)
     mod_dir = repo / f"@{bridge.BRIDGE_MOD_NAME}"
@@ -1591,7 +1542,6 @@ def test_the_owner_refusal_spells_a_path_the_way_the_other_hints_do(tmp_path, mo
     """A raw Windows path inside quotes reads as an escape soup and cannot be
     pasted into project_open. wiring_instructions() already uses as_posix() for
     exactly this reason."""
-    session.reset()
     a = make_project(tmp_path / "a")
     b = make_project(tmp_path / "b")
     repo = fake_bridge_sources(tmp_path)
@@ -1693,7 +1643,6 @@ async def test_the_tool_descriptions_do_not_contradict_the_code():
 def test_the_alive_answer_carries_the_session_id(tmp_path, monkeypatch):
     """Three of Task 5's acceptance probes need to know which world they are
     talking to, and until heartbeat_detail existed no tool could tell them."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1728,7 +1677,6 @@ def test_the_restarted_answer_carries_both_session_ids(tmp_path, monkeypatch):
     """What it was and what it is now. "A restart happened" without the old id
     leaves a caller unable to say whether the session IT was talking to is the
     one that went away."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1754,7 +1702,6 @@ def test_the_restarted_answer_carries_both_session_ids(tmp_path, monkeypatch):
 
 
 def test_an_answer_that_read_nothing_reports_no_session(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1868,7 +1815,6 @@ def test_bridge_clear_refuses_while_this_sessions_server_is_running(tmp_path, mo
     bridge is or is not publishing. A mod that has not written a state document
     yet -- every mod before the state writer lands -- otherwise looks exactly
     like a downed stand to the probe."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1897,7 +1843,6 @@ def test_bridge_clear_does_not_probe_at_all_when_it_can_refuse_outright(tmp_path
     """The channel now retries its first sample to the window's deadline, so a
     probe over a missing state file costs the whole window. Refusing on the
     liveness this layer already knows costs nothing -- and must not pay it."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1920,7 +1865,6 @@ def test_bridge_clear_floors_its_probe_window(tmp_path, monkeypatch):
     """Below the mod's publish interval a "stalled" verdict proves nothing, and
     the channel rightly demands force for it. A caller who passes 0.1 should get
     a probe that can actually answer, not a refusal about their own window."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1952,7 +1896,6 @@ def test_two_different_fields_failing_in_turn_is_not_a_schema_bug(tmp_path, monk
     consistent shape anybody is publishing. Blaming either would send an author
     to correct a field that is fine, which is the whole failure mode this
     mechanism exists to prevent."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1985,7 +1928,6 @@ def test_two_different_fields_failing_in_turn_is_not_a_schema_bug(tmp_path, monk
 
 def test_the_same_field_twice_is_still_named(tmp_path, monkeypatch):
     """The other side of that rule, so the fix cannot be "never accuse"."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -2012,7 +1954,6 @@ def test_the_unwired_answer_names_what_actually_works(tmp_path, monkeypatch):
     to a refusal is worse than none: it costs a call to find out.
 
     Asserted by FOLLOWING it, not by matching a string."""
-    session.reset()
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -2088,7 +2029,6 @@ def test_no_measurement_at_all_is_still_the_no_snapshot_family(tmp_path, monkeyp
     """gap is None only when nothing could be measured at all -- that is not an
     `unknown` about a window, it is "there is nothing readable there", and it
     keeps the answers that say so."""
-    session.reset()
     root = make_project(tmp_path)
     with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))

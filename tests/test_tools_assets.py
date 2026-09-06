@@ -75,28 +75,13 @@ mods = ["{mod}"]
 # breaks the moment either of them moves.
 
 
-def odol(lods: int = 4, tail: bytes = b"") -> bytes:
-    return b"ODOL" + struct.pack("<II", 55, lods) + b"\x00" * (4 * lods) + tail
+# The synthetic p3d byte strings live in tests/_p3d.py: five files built
+# them, and the copies had drifted on the default LOD count.
+from _p3d import material, mlod, named, odol, resolved
 
-
-def mlod(lods: int = 5, tail: bytes = b"") -> bytes:
-    return b"MLOD" + struct.pack("<II", 0x101, lods) + tail
-
-
-def named(*names: str) -> bytes:
-    return b"".join(n.encode("ascii") + b"\x00" for n in names)
-
-
-#: What `binarize` leaves in an artifact when it actually resolved the rvmat.
-RESOLVED = named(
-    "#(ai,64,64,1)fresnel(1,0.7)",
-    "#(argb,8,8,3)color(1,1,1,1,dt)",
-    r"dz\data\data\env_land_co.paa",
-    rf"{PREFIX}\data\textures\thing_nohq.paa",
-    rf"{PREFIX}\data\textures\thing_smdi.paa",
-)
-MATERIAL = named(rf"{PREFIX}\data\textures\thing.rvmat")
-
+# This file's mod is named differently, so its paths carry a different prefix.
+MATERIAL = material(PREFIX)
+RESOLVED = resolved(PREFIX)
 #: A build from the declared root: every marker of a resolved material.
 GOOD_ODOL = odol(tail=MATERIAL + RESOLVED)
 #: A valid ODOL with plausible paths and NO inlined material -- what a run from
@@ -311,7 +296,6 @@ def run_build(**kw):
 
 
 def test_asset_build_without_a_project_says_which_call_opens_one():
-    session.reset()
     result = assets.asset_build()
     assert not result.ok
     assert "project_open" in result.hint
@@ -341,7 +325,6 @@ def test_asset_build_refuses_a_mod_it_was_not_told_about(tmp_path, monkeypatch):
 
 
 def test_asset_build_asks_which_mod_when_the_project_declares_several(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     (root / "Second").mkdir()
     (root / "Second" / "config.cpp").write_text("class CfgPatches{};", encoding="utf-8")
@@ -849,7 +832,6 @@ def test_a_root_outside_the_repository_is_announced_where_it_is_read(tmp_path, m
     the build then depends on a directory this repository does not own, and
     nothing in it is covered by the repository's history. A note nobody surfaces
     is a note nobody reads."""
-    session.reset()
     outside = tmp_path / "staging"
     (outside / MOD / "data" / "models").mkdir(parents=True)
     (outside / MOD / "data" / "models" / "thing.p3d").write_bytes(SOURCE_MLOD)
@@ -946,7 +928,6 @@ def test_a_real_model_is_built_from_its_mlod_and_lands_in_the_mod(tmp_path, monk
 def test_asset_check_reads_a_real_mod_without_building_anything(tmp_path, monkeypatch):
     """The staging tree IS a mod-shaped tree: models beside their textures. Read
     as one, every check must answer, and nothing may be written."""
-    session.reset()
     root = tmp_path / "repo"
     mod = SAMPLE_PREFIX
     shutil.copytree(Path(SAMPLE_ROOT) / SAMPLE_PREFIX, root / mod)

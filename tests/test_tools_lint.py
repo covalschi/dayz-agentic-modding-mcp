@@ -57,7 +57,6 @@ def checks(result):
 
 
 def test_it_refuses_without_a_project(tmp_path):
-    session.reset()
     result = tools.mod_lint()
     assert not result.ok
     assert result.hint
@@ -253,7 +252,6 @@ def test_a_generated_layout_of_a_root_sourced_mod_is_not_an_orphan(tmp_path):
     and the two agree only when `sources[mod] == mod`: every generated file
     of such a project was warned about as described by nothing, which is the
     exact opposite of the truth, and strict=True failed outright."""
-    session.reset()
     root = tmp_path / "proj"
     root.mkdir(parents=True, exist_ok=True)
     (root / "dayz-mcp.toml").write_text(

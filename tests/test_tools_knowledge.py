@@ -109,7 +109,6 @@ def test_every_knowledge_tool_refuses_without_a_project(tmp_path):
     """The index lives in the project's own .dayz-mcp/, so there is no index to
     speak of until a project is open -- and the refusal has to say that rather
     than answer emptily."""
-    session.reset()
     for call in (
         lambda: tools.knowledge_build(),
         lambda: tools.knowledge_status(),

@@ -65,7 +65,6 @@ def make_project(tmp_path: Path, config_text: str = CONFIG, name: str = "serverD
 
 
 def test_it_refuses_without_a_project(tmp_path):
-    session.reset()
     result = tools.server_signatures()
     assert not result.ok
     assert result.hint

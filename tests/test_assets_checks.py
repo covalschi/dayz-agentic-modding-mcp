@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import pytest
@@ -85,25 +84,9 @@ from dayz_mcp.assets.p3d import fingerprint, read_p3d
 # another test file breaks the moment either is moved.
 
 
-def odol(lods: int = 4, tail: bytes = b"") -> bytes:
-    return b"ODOL" + struct.pack("<II", 55, lods) + b"\x00" * (4 * lods) + tail
-
-
-def mlod(lods: int = 5, tail: bytes = b"") -> bytes:
-    return b"MLOD" + struct.pack("<II", 0x101, lods) + tail
-
-
-def named(*names: str) -> bytes:
-    return b"".join(n.encode("ascii") + b"\x00" for n in names)
-
-
-RESOLVED = named(
-    "#(ai,64,64,1)fresnel(1,0.7)",
-    "#(argb,8,8,3)color(1,1,1,1,dt)",
-    r"dz\data\data\env_land_co.paa",
-    r"somemod\data\textures\thing_nohq.paa",
-    r"somemod\data\textures\thing_smdi.paa",
-)
+# The synthetic p3d byte strings live in tests/_p3d.py: five files built
+# them, and the copies had drifted on the default LOD count.
+from _p3d import RESOLVED, mlod, named, odol
 
 
 def write(path: Path, data: bytes | str) -> Path:

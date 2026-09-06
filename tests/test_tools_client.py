@@ -41,24 +41,6 @@ forbid = ["Bad type"]
 
 
 @pytest.fixture(autouse=True)
-def _clean_session():
-    """No test may inherit -- or leak -- a tracked pid.
-
-    These tests record client pids in the process-wide session, and a leaked
-    one would make an unrelated test file's `client_*` call act on a pid this
-    file invented. Reset both ends.
-    """
-    session.reset()
-    client._start_in_flight.update(job_id="", store=None)
-    yield
-    session.reset()
-    # The start slot is process-global by design (one client profile
-    # directory, one machine). A test that deliberately leaves a start
-    # in flight would otherwise refuse every later one in this process.
-    client._start_in_flight.update(job_id="", store=None)
-
-
-@pytest.fixture(autouse=True)
 def _no_real_ports(monkeypatch):
     """The stand check reads netstat, and this machine really does have a
     neighbouring stand come and go on udp/2302. A unit test that consults

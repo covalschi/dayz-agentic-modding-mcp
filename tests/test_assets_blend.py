@@ -28,7 +28,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
-import struct
 from pathlib import Path
 
 import pytest
@@ -59,16 +58,9 @@ PREFIX = "somemod"
 # breaks the moment either of them moves.
 
 
-def mlod(lods: int = 5, tail: bytes = b"") -> bytes:
-    return b"MLOD" + struct.pack("<II", 0x101, lods) + tail
-
-
-def odol(lods: int = 4, tail: bytes = b"") -> bytes:
-    return b"ODOL" + struct.pack("<II", 55, lods) + b"\x00" * (4 * lods) + tail
-
-
-def named(*names: str) -> bytes:
-    return b"".join(n.encode("ascii") + b"\x00" for n in names)
+# The synthetic p3d byte strings live in tests/_p3d.py: five files built
+# them, and the copies had drifted on the default LOD count.
+from _p3d import mlod, named, odol
 
 
 #: What a correct export names: prefixed, relative, resolvable.

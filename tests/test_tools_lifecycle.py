@@ -1,260 +1,23 @@
+"""server_start / server_status / server_stop, and the readiness signals.
+
+Split out of test_tools.py, which had grown into six suites in one file.
+"""
 import os
-import sys
 import textwrap
-import threading
 import time
-from importlib.metadata import version as metadata_version
 from pathlib import Path
 
 import pytest
 
-from dayz_mcp import DIST_NAME
-from dayz_mcp import __version__ as dayz_mcp_version
-from dayz_mcp import server as mcp_server
 from dayz_mcp import tools
-from dayz_mcp.errors import ok as errors_ok
-from dayz_mcp.packer import PackResult
-from dayz_mcp.procs import is_alive as procs_is_alive
-from dayz_mcp.procs import spawn as procs_spawn
-from dayz_mcp.procs import stop as procs_stop
 from dayz_mcp.procs import process_mods_tail as procs_process_mods_tail
 from dayz_mcp.procs import udp_port_holders as procs_udp_port_holders
-from dayz_mcp.profile import load_profile
-from dayz_mcp.tools import jobs_api, lifecycle, session
+from dayz_mcp.tools import lifecycle, session
 
-PROFILE = """
-[project]
-name = "my-mod"
-
-[build]
-mods = ["MyMod"]
-
-[expect]
-ready_line = "[MyMod] loaded"
-forbid = ["Bad type"]
-
-[expect.counters]
-items = 12
-"""
-
-
-@pytest.fixture(autouse=True)
-def _no_real_ports(monkeypatch):
-    """Nothing in this file may consult the machine's actual network state.
-
-    server_start now checks the game port before spawning, and that check reads
-    netstat. Without this, twelve tests started failing the moment ANOTHER
-    AGENT's live stand bound udp/2302 on this machine -- tests that had passed
-    minutes earlier, for a reason nothing in them could express. A unit test
-    that reads global machine state is flaky by construction, and this is a
-    repository where a second stand really does come and go.
-
-    The default is "nothing holds any port"; the tests that are about the port
-    override it explicitly, which also makes them the only place the reader has
-    to look for that behaviour.
-    """
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: [])
-
-
-PROFILE_WITHOUT_READY_LINE = """
-[project]
-name = "my-mod"
-
-[build]
-mods = ["MyMod"]
-
-[expect]
-forbid = ["Bad type"]
-"""
-
-
-def make_project(tmp_path: Path, profile_text: str = PROFILE) -> Path:
-    (tmp_path / "dayz-mcp.toml").write_text(textwrap.dedent(profile_text), encoding="utf-8")
-    (tmp_path / "MyMod").mkdir()
-    (tmp_path / "MyMod" / "config.cpp").write_text("", encoding="utf-8")
-    return tmp_path
-
-
-def with_stand(root: Path, stand: Path, log_text: str) -> None:
-    (stand / "profiles").mkdir(parents=True, exist_ok=True)
-    (stand / "profiles" / "script_1.log").write_text(log_text, encoding="utf-8")
-    (root / "dayz-mcp.local.toml").write_text(
-        f'[machine]\nstand_root = "{stand.as_posix()}"\n', encoding="utf-8"
-    )
-
-
-def with_stand_and_game(
-    root: Path,
-    stand: Path,
-    game_dir: Path,
-    *,
-    port: int | None = None,
-    extra_mods: list[str] | None = None,
-    server_only: list[str] | None = None,
-    config: str | None = None,
-    server_dir: Path | None = None,
-    dedicated_image: bool = True,
-) -> None:
-    """Like with_stand, but also fabricates a fake game install so server_start's
-    `find_game` succeeds deterministically, regardless of what is actually
-    installed on the machine running the tests.
-
-    `server_dir` additionally writes machine.server and fabricates a dedicated
-    install there. `dedicated_image=False` creates the directory WITHOUT the
-    server executable, which is the shape server_start must refuse."""
-    (stand / "profiles").mkdir(parents=True, exist_ok=True)
-    game_dir.mkdir(parents=True, exist_ok=True)
-    (game_dir / "DayZDiag_x64.exe").write_bytes(b"")
-
-    lines = ["[machine]", f'stand_root = "{stand.as_posix()}"', f'game = "{game_dir.as_posix()}"']
-    if server_dir is not None:
-        server_dir.mkdir(parents=True, exist_ok=True)
-        if dedicated_image:
-            (server_dir / "DayZServer_x64.exe").write_bytes(b"")
-        lines.append(f'server = "{server_dir.as_posix()}"')
-    if port is not None:
-        lines.append(f"port = {port}")
-    if config is not None:
-        lines.append(f'config = "{config}"')
-    if extra_mods or server_only:
-        lines.append("")
-        lines.append("[mods]")
-        if extra_mods:
-            items = ", ".join(f'"{x}"' for x in extra_mods)
-            lines.append(f"extra = [{items}]")
-        if server_only:
-            items = ", ".join(f'"{x}"' for x in server_only)
-            lines.append(f"server_only = [{items}]")
-    (root / "dayz-mcp.local.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def test_project_open_reports_what_it_found(tmp_path):
-    session.reset()
-    r = tools.project_open(str(make_project(tmp_path)))
-    assert r.ok, r.error
-    assert r.data["name"] == "my-mod"
-    assert r.data["own_mod_dirs"] == ["@MyMod"]
-
-
-def test_tools_refuse_to_work_without_a_project():
-    session.reset()
-    r = tools.mod_build()
-    assert not r.ok
-    assert "project_open" in r.hint
-
-
-def test_build_runs_as_a_job_and_reports_packing_results(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-    monkeypatch.setattr(
-        "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
-            PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
-        ],
-    )
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-    job_id = tools.mod_build().data["job_id"]
-    waited = tools.job_wait(job_id, timeout=30)
-    assert waited.data["status"] == "done"
-    assert "MyMod" in waited.data["summary"]
-
-
-def test_build_fails_the_job_when_packing_reports_an_error(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-    monkeypatch.setattr(
-        "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [PackResult(name="MyMod", error="stale pbo")],
-    )
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-    job_id = tools.mod_build().data["job_id"]
-    waited = tools.job_wait(job_id, timeout=30)
-    assert waited.data["status"] == "failed"
-    assert "stale" in waited.data["error"]
-
-
-def test_log_verdict_reads_the_newest_log_and_decides(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=12\n")
-    tools.project_open(str(root))
-    r = tools.log_verdict()
-    assert r.ok, r.error
-    assert r.data["verdict"] == "pass"
-
-
-def test_log_verdict_fails_when_a_counter_is_short(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=1\n")
-    tools.project_open(str(root))
-    r = tools.log_verdict()
-    assert r.data["verdict"] == "fail"
-    assert any("items" in reason for reason in r.data["reasons"])
-
-
-def test_server_log_lookup_goes_through_the_one_profiles_dir_owner(tmp_path, monkeypatch):
-    """The server's -profiles directory has exactly one definition
-    (lifecycle.server_profiles_dir). logs.py held a character-for-character copy
-    of its formula, which is the same "two owners for one path" arrangement that
-    already broke both client-side log tools once -- so this asserts the copy is
-    gone by moving the owner and watching the log tools follow."""
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "the stand's own log\n")
-    tools.project_open(str(root))
-
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (elsewhere / "script_9.log").write_text("moved with the owner\n", encoding="utf-8")
-    monkeypatch.setattr("dayz_mcp.tools.logs.server_profiles_dir", lambda: elsewhere)
-
-    r = tools.log_tail()
-    assert r.ok, r.error
-    assert r.data["lines"] == ["moved with the owner"]
-
-
-def test_log_tail_filters(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "one\ntwo needle\nthree\n")
-    tools.project_open(str(root))
-    r = tools.log_tail(pattern="needle")
-    assert r.data["lines"] == ["two needle"]
-
-
-# --- Extra requirement 1: the verdict must be tied to the run it judges (`since`) ---
-
-
-def test_log_verdict_refuses_a_log_older_than_since(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=12\n")
-    tools.project_open(str(root))
-    log = tmp_path / "stand" / "profiles" / "script_1.log"
-    since = log.stat().st_mtime + 1000  # a "run" that supposedly started after this log was written
-    r = tools.log_verdict(since=since)
-    assert not r.ok
-    assert "predates" in r.error
-    assert "wait" in r.hint
-
-
-def test_log_verdict_accepts_a_log_at_or_after_since(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=12\n")
-    tools.project_open(str(root))
-    log = tmp_path / "stand" / "profiles" / "script_1.log"
-    since = log.stat().st_mtime - 1000  # the run started well before the log was last written
-    r = tools.log_verdict(since=since)
-    assert r.ok, r.error
-    assert r.data["verdict"] == "pass"
+from conftest import PROFILE_WITHOUT_READY_LINE, make_project, with_stand_and_game
 
 
 def test_server_start_returns_since_matching_the_job_it_created(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -287,7 +50,6 @@ def test_server_start_finishes_promptly_when_no_ready_line_is_declared(tmp_path,
     The wait is what is wrong, so the wait is what goes. The server is
     started, confirmed alive, and the job finishes saying what it can and
     cannot know."""
-    session.reset()
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -324,7 +86,6 @@ def test_server_start_without_a_ready_line_still_reports_a_server_that_died(tmp_
     """Not waiting for readiness must not become not looking at all: if the
     process is gone by the time it is checked, that is a failed boot, and the
     only signal this configuration has left."""
-    session.reset()
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -348,7 +109,6 @@ def test_server_start_without_a_ready_line_still_reports_a_server_that_died(tmp_
 
 
 def test_server_start_does_not_delete_pre_existing_logs(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -368,7 +128,6 @@ def test_server_start_does_not_delete_pre_existing_logs(tmp_path, monkeypatch):
 
 
 def test_server_start_ignores_a_stale_log_that_already_contains_the_marker(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -396,7 +155,6 @@ def test_server_start_ignores_a_stale_log_that_already_contains_the_marker(tmp_p
 
 
 def test_server_start_refuses_when_already_running(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     tools.project_open(str(root))
     session.set_server_pid(4242)
@@ -411,7 +169,6 @@ def test_server_start_refuses_when_already_running(tmp_path, monkeypatch):
 
 
 def test_server_start_uses_the_configured_port(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game, port=27016)
@@ -513,7 +270,6 @@ def test_server_image_recorded_for_liveness_is_the_one_that_was_launched(
 
 
 def test_server_status_with_no_log_yet(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     tools.project_open(str(root))
     r = lifecycle.server_status(pulse_seconds=0.01)
@@ -526,7 +282,6 @@ def test_server_status_with_no_log_yet(tmp_path):
 
 
 def test_server_status_detects_a_growing_log(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand = tmp_path / "stand"
     (stand / "profiles").mkdir(parents=True)
@@ -548,7 +303,6 @@ def test_server_status_detects_a_growing_log(tmp_path, monkeypatch):
 
 
 def test_server_status_detects_a_stalled_log(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand = tmp_path / "stand"
     (stand / "profiles").mkdir(parents=True)
@@ -570,7 +324,6 @@ def test_server_status_detects_a_stalled_log(tmp_path, monkeypatch):
 
 
 def test_server_start_passes_an_absolute_config_path(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -595,7 +348,6 @@ def test_server_start_passes_an_absolute_config_path(tmp_path, monkeypatch):
 
 
 def test_server_start_refuses_when_config_resolves_outside_stand_root(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     stand = tmp_path / "stand"
     (stand / "profiles").mkdir(parents=True)
@@ -623,7 +375,6 @@ def test_server_start_refuses_when_config_resolves_outside_stand_root(tmp_path):
 
 
 def test_mod_list_splits_server_only_mods_into_serverMod(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     (root / "dayz-mcp.local.toml").write_text(
         textwrap.dedent(
@@ -643,7 +394,6 @@ def test_mod_list_splits_server_only_mods_into_serverMod(tmp_path):
 
 
 def test_client_compile_check_excludes_server_only_mods(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     game = tmp_path / "game"
     game.mkdir()
@@ -679,622 +429,12 @@ def test_client_compile_check_excludes_server_only_mods(tmp_path, monkeypatch):
     assert "@ServerOnlyMod" not in mod_arg
 
 
-# --- Final review, item 2: log_verdict(source="client") and log_tail(source=
-# "client") looked under machine.stand_root, a directory nothing ever creates.
-# The client's logs live with the job that produced them. ---
-
-
-def _run_fake_client_compile(monkeypatch, log_text: str, rpt_text: str = "clean\n") -> str:
-    """Run client_compile_check with a stand-in for the diagnostic client that
-    writes its logs where the real one does: the -profiles directory the tool
-    hands to the executable. Returns the job id."""
-
-    def fake_spawn(cmd, cwd):
-        profiles = Path(next(a for a in cmd if a.startswith("-profiles=")).split("=", 1)[1])
-        (profiles / "script_1.log").write_text(log_text, encoding="utf-8")
-        (profiles / "crash.RPT").write_text(rpt_text, encoding="utf-8")
-        return 4242
-
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.stop", lambda pid: True)
-    job_id = tools.client_compile_check(wait_seconds=0).data["job_id"]
-    waited = tools.job_wait(job_id, timeout=15)
-    # Terminal either way: whether the check itself passed is the business of
-    # the test that cares (log_tail, for one, must work on a failing run).
-    assert waited.data["status"] in ("done", "failed"), waited.data
-    return job_id
-
-
-def test_log_verdict_judges_the_client_log_the_compile_check_produced(tmp_path, monkeypatch):
-    """The whole point of source="client": after a compile check, ask for a
-    verdict on what the client wrote. This failed for every project -- the
-    lookup went to <stand>/clientprofile while the check writes into the job's
-    own artifacts -- and no test ever passed source="client"."""
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
-    tools.project_open(str(root))
-    _run_fake_client_compile(monkeypatch, "SCRIPT : [MyMod] loaded: items=12\nModule: Mission\n")
-
-    r = tools.log_verdict(source="client")
-
-    assert r.ok, f"{r.error} | {r.hint}"
-    assert r.data["verdict"] == "pass"
-    assert r.data["counters"]["items"] == 12
-    assert "clientprofile" in r.data["log"]
-
-
-def test_log_tail_reads_the_client_log_the_compile_check_produced(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
-    tools.project_open(str(root))
-    _run_fake_client_compile(monkeypatch, "one\nSCRIPT (E): boom\ntwo\n")
-
-    r = tools.log_tail(source="client", pattern="SCRIPT (E)")
-
-    assert r.ok, f"{r.error} | {r.hint}"
-    assert r.data["lines"] == ["SCRIPT (E): boom"]
-    assert "clientprofile" in r.data["log"]
-
-
-def test_client_log_tools_do_not_send_the_user_to_change_stand_root(tmp_path):
-    """With no compile check run yet there is genuinely no client log -- but
-    the hint must name the thing that would produce one. It used to say
-    "check machine.stand_root", a setting the client side never reads."""
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand(root, tmp_path / "stand", "SCRIPT : [MyMod] loaded: items=12\n")
-    tools.project_open(str(root))
-
-    for r in (tools.log_verdict(source="client"), tools.log_tail(source="client")):
-        assert not r.ok
-        assert "stand_root" not in r.hint
-        assert "client_compile_check" in r.hint
-
-
-def test_client_verdict_does_not_answer_for_a_run_that_produced_nothing(tmp_path, monkeypatch):
-    """A compile check that died before the client ever wrote a line has no
-    log -- and must say so, rather than quietly handing back the PREVIOUS
-    run's log as this run's verdict. Same discipline as `since` on the server
-    side, and stricter here because nothing in the reply would reveal the
-    substitution."""
-    session.reset()
-    root = make_project(tmp_path)
-    with_stand_and_game(root, tmp_path / "stand", tmp_path / "game")
-    tools.project_open(str(root))
-    first = _run_fake_client_compile(monkeypatch, "SCRIPT : [MyMod] loaded: items=12\nModule: Mission\n")
-    assert tools.log_verdict(source="client").data["counters"]["items"] == 12
-
-    def boom(cmd, cwd):
-        raise RuntimeError("client never started")
-
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", boom)
-    later = tools.client_compile_check(wait_seconds=0).data["job_id"]
-    assert tools.job_wait(later, timeout=10).data["status"] == "failed"
-    assert lifecycle.client_profile_dir(later).is_dir()  # created, but empty
-
-    r = tools.log_verdict(source="client")
-    assert not r.ok, f"answered with a stale log: {r.data}"
-    # The earlier run's log is still on disk and still readable -- through its
-    # own job, which is where a question about it belongs.
-    assert (lifecycle.client_profile_dir(first) / "script_1.log").exists()
-
-
-# --- Review round 1, Finding 1 (Critical): worker bodies must not hang the job on
-# an uncaught exception ---
-
-
-def test_server_start_worker_exception_fails_the_job_instead_of_hanging(tmp_path):
-    """Reproduces the exact unmocked failure the reviewer found: a game directory
-    whose DayZDiag_x64.exe exists (so find_game's existence probe passes) but is
-    not a valid image (with_stand_and_game deliberately writes it as zero bytes).
-    subprocess.Popen then raises OSError ("not a valid Win32 application") inside
-    the worker thread. Without a catch there, the job would stay "running"
-    forever and the next process start would mislabel it as merely lost."""
-    session.reset()
-    root = make_project(tmp_path)
-    stand, game = tmp_path / "stand", tmp_path / "game"
-    with_stand_and_game(root, stand, game)
-    (stand / "serverDZ.cfg").write_text("", encoding="utf-8")
-    tools.project_open(str(root))
-
-    job_id = tools.server_start(timeout=5).data["job_id"]
-    waited = tools.job_wait(job_id, timeout=15)
-    assert waited.data["status"] == "failed"
-    assert waited.data["error"]
-    assert "OSError" in waited.data["error"]
-
-
-def test_mod_build_worker_exception_fails_the_job_instead_of_hanging(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-
-    def boom(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
-        raise RuntimeError("simulated packer crash")
-
-    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", boom)
-    job_id = tools.mod_build().data["job_id"]
-    waited = tools.job_wait(job_id, timeout=10)
-    assert waited.data["status"] == "failed"
-    assert "simulated packer crash" in waited.data["error"]
-
-
-def test_client_compile_check_worker_exception_fails_the_job_instead_of_hanging(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    game = tmp_path / "game"
-    game.mkdir()
-    (game / "DayZDiag_x64.exe").write_bytes(b"")
-    (root / "dayz-mcp.local.toml").write_text(
-        f'[machine]\ngame = "{game.as_posix()}"\n', encoding="utf-8"
-    )
-    tools.project_open(str(root))
-
-    def boom(cmd, cwd):
-        raise RuntimeError("simulated spawn crash")
-
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", boom)
-    job_id = tools.client_compile_check(wait_seconds=0).data["job_id"]
-    waited = tools.job_wait(job_id, timeout=10)
-    assert waited.data["status"] == "failed"
-    assert "simulated spawn crash" in waited.data["error"]
-
-
-# --- Final review, item 7: server_start refuses a second server; mod_build
-# refused nothing, and two builds share an output directory ---
-
-
-def test_mod_build_refuses_a_second_build_while_one_is_running(tmp_path, monkeypatch):
-    """Two builds of the same project write the same pbo and unlink the same
-    .bisign, so the second either loses the race or corrupts the artifact.
-    Tools run on worker threads, so an agent firing mod_build twice is not an
-    exotic case -- it is one impatient retry."""
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
-        started.set()
-        assert release.wait(timeout=10), "test never released the worker"
-        return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
-
-    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-
-    first = tools.mod_build()
-    assert first.ok, first.error
-    assert started.wait(timeout=10), "worker never started"
-
-    second = tools.mod_build()
-    assert not second.ok
-    assert first.data["job_id"] in second.error or first.data["job_id"] in second.hint
-    assert "job_wait" in second.hint
-
-    release.set()
-    assert tools.job_wait(first.data["job_id"], timeout=10).data["status"] == "done"
-
-    # Refusal only while one is in flight: the next build goes through.
-    release.set()
-    third = tools.mod_build()
-    assert third.ok, third.error
-    assert tools.job_wait(third.data["job_id"], timeout=10).data["status"] == "done"
-
-
-# --- Review round 1, Finding 2 (Important): a non-empty PackResult.note must
-# reach the job summary ---
-
-
-def test_mod_build_summary_includes_pack_result_notes(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-    note = "private key present but signer executable not found at C:/tools/Bin/DsUtils/DSSignFile.exe"
-    monkeypatch.setattr(
-        "dayz_mcp.tools.build.pack_all",
-        lambda names, root, tools_root, log_dir, exclude=None, sources=None, stage=False: [
-            PackResult(
-                name="MyMod",
-                pbo=str(root / "@MyMod/addons/MyMod.pbo"),
-                size=10,
-                signed=False,
-                note=note,
-            )
-        ],
-    )
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-    job_id = tools.mod_build().data["job_id"]
-    waited = tools.job_wait(job_id, timeout=10)
-    assert waited.data["status"] == "done"
-    assert "MyMod" in waited.data["summary"]
-    assert note in waited.data["summary"]
-
-
-# --- Review round 1, Finding 3 (Important): tools must not run inline on the
-# server's event loop ---
-
-
-@pytest.mark.anyio
-async def test_wrapped_tool_runs_the_sync_body_off_the_event_loop():
-    main_thread = threading.get_ident()
-    seen = {}
-
-    def probe(x: int):
-        seen["thread"] = threading.get_ident()
-        return errors_ok({"x": x})
-
-    wrapped = mcp_server._wrap(probe)
-    result = await wrapped(x=5)
-    assert result == {"ok": True, "data": {"x": 5}, "error": "", "hint": ""}
-    assert seen["thread"] != main_thread
-
-
-@pytest.mark.anyio
-async def test_real_tool_call_through_fastmcp_still_returns_the_result_envelope(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    _content, structured = await mcp_server.mcp.call_tool("project_open", {"path": str(root)})
-    assert structured["ok"] is True
-    assert structured["data"]["name"] == "my-mod"
-
-
-def test_server_reports_its_own_version_not_the_sdks():
-    """`initialize` returned serverInfo.version = "1.29.0" -- the mcp SDK's own
-    version, which the low-level server uses as a default when nothing supplies
-    one. Confirmed over a real stdio session. A client asking what version of
-    THIS product it is talking to was told the SDK's, and would go on being told
-    the SDK's through every release this project makes.
-
-    Asserted through create_initialization_options() because that is the exact
-    structure that becomes serverInfo in the initialize response, and it is also
-    what breaks if a future SDK moves where the version lives.
-    """
-    opts = mcp_server.mcp._mcp_server.create_initialization_options()
-
-    assert opts.server_name == DIST_NAME
-    assert opts.server_version != metadata_version("mcp")
-    assert opts.server_version == dayz_mcp_version
-    # Belt and braces: a fallback that silently became "unknown" would satisfy
-    # the inequality above while telling a client nothing.
-    assert opts.server_version == metadata_version(DIST_NAME)
-
-
-def test_job_wait_clamps_timeout_to_a_sane_upper_bound(tmp_path, monkeypatch):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-    store = session.jobs()
-    job = store.create("build")
-    store.finish(job.id, 0, summary="done")
-
-    captured = {}
-    real_wait = store.wait
-
-    def spy_wait(job_id, timeout):
-        captured["timeout"] = timeout
-        return real_wait(job_id, timeout)
-
-    monkeypatch.setattr(store, "wait", spy_wait)
-    tools.job_wait(job.id, timeout=100000)
-    assert captured["timeout"] == jobs_api.MAX_WAIT_SECONDS
-
-
-# --- Review round 1, Finding 4 (promoted): switching projects must not inherit
-# or kill a previous project's server pid ---
-
-
-def test_opening_a_new_project_does_not_inherit_or_kill_a_previous_projects_server(tmp_path):
-    session.reset()
-    root_a = tmp_path / "a"
-    root_a.mkdir()
-    make_project(root_a)
-    tools.project_open(str(root_a))
-
-    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
-    session.set_server_pid(real_pid)
-    try:
-        assert procs_is_alive(real_pid)
-
-        root_b = tmp_path / "b"
-        root_b.mkdir()
-        make_project(root_b)
-        opened_b = tools.project_open(str(root_b))
-        assert opened_b.ok, opened_b.error
-        assert opened_b.data.get("orphaned_server_pid") == real_pid
-
-        # B's session must not think a server is running...
-        assert session.server_pid() == 0
-        status_b = tools.project_status()
-        assert status_b.data["server_running"] is False
-
-        # ...and must not have touched A's process.
-        assert procs_is_alive(real_pid)
-
-        # server_stop from B's session must be a no-op for A's process.
-        stopped = tools.server_stop()
-        assert stopped.data["stopped"] is False
-        assert procs_is_alive(real_pid)
-    finally:
-        procs_stop(real_pid)
-
-
-# --- Review round 2, regression fix: reopening the SAME project must not drop
-# a server this session already has running ---
-
-
-def test_reopening_the_same_project_keeps_the_running_server(tmp_path):
-    session.reset()
-    root = tmp_path / "proj"
-    root.mkdir()
-    make_project(root)
-    tools.project_open(str(root))
-
-    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
-    session.set_server_pid(real_pid)
-    try:
-        assert procs_is_alive(real_pid)
-
-        # Simulate an agent editing dayz-mcp.local.toml and reopening the same root.
-        reopened = tools.project_open(str(root))
-        assert reopened.ok, reopened.error
-        assert "orphaned_server_pid" not in reopened.data
-
-        assert session.server_pid() == real_pid
-        status = tools.project_status()
-        assert status.data["server_running"] is True
-
-        stopped = tools.server_stop()
-        assert stopped.data["stopped"] is True
-        assert stopped.data["pid"] == real_pid
-        assert not procs_is_alive(real_pid)
-    finally:
-        if procs_is_alive(real_pid):
-            procs_stop(real_pid)
-
-
-def test_set_project_resolves_paths_before_comparing_them(tmp_path):
-    """A relative-looking path to the same root (here, one with a redundant '.'
-    segment) must still count as the same project as the original absolute
-    Profile.root -- proving the comparison resolves both sides rather than
-    comparing raw strings."""
-    session.reset()
-    root = make_project(tmp_path)
-    loaded = load_profile(str(root))
-    assert loaded.ok, loaded.error
-    session.set_project(loaded.data, None, None)
-    session.set_server_pid(999)
-
-    loaded_again = load_profile(str(root) + "/.")
-    assert loaded_again.ok, loaded_again.error
-    switch = session.set_project(loaded_again.data, None, None)
-    assert switch["orphaned_server_pid"] == 0
-    assert session.server_pid() == 999
-
-
-# --- Review round 2: server_stop(pid=...) closes the orphaned-server
-# reachability hole, guarded against stopping an arbitrary pid ---
-
-
-def test_server_stop_with_pid_can_stop_an_orphaned_server(tmp_path):
-    session.reset()
-    root_a = tmp_path / "a"
-    root_a.mkdir()
-    make_project(root_a)
-    tools.project_open(str(root_a))
-
-    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
-    session.set_server_pid(real_pid)
-    try:
-        root_b = tmp_path / "b"
-        root_b.mkdir()
-        make_project(root_b)
-        opened_b = tools.project_open(str(root_b))
-        assert opened_b.data.get("orphaned_server_pid") == real_pid
-        assert session.server_pid() == 0  # B's own session has no server
-
-        # Without a pid, server_stop only ever touches B's own (absent) server.
-        blind = tools.server_stop()
-        assert blind.data["stopped"] is False
-        assert procs_is_alive(real_pid)
-
-        # With the orphaned pid, it can actually be reached and stopped.
-        stopped = tools.server_stop(pid=real_pid)
-        assert stopped.data["stopped"] is True
-        assert stopped.data["pid"] == real_pid
-        assert not procs_is_alive(real_pid)
-    finally:
-        if procs_is_alive(real_pid):
-            procs_stop(real_pid)
-
-
-def test_server_stop_refuses_a_pid_the_session_never_touched(tmp_path):
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-
-    real_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
-    try:
-        # This session never started `real_pid` and was never told it is orphaned.
-        r = tools.server_stop(pid=real_pid)
-        assert not r.ok
-        assert str(real_pid) in r.error
-        assert procs_is_alive(real_pid)
-    finally:
-        procs_stop(real_pid)
-
-
-# --- Requirement 3 (pid reuse): server_stop must not taskkill a process that
-# has recycled a recorded pid ---
-
-
-def test_server_stop_does_not_kill_a_process_that_recycled_the_pid(tmp_path):
-    """If the recorded server pid has since been handed to an unrelated
-    Windows process, server_stop must notice the image-name mismatch and
-    leave that process alone rather than calling taskkill on it."""
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-
-    # A real, unrelated process standing in for "something else now holds
-    # this pid" -- it is this interpreter, not DayZDiag_x64.exe, so recording
-    # the pid together with that image name reproduces a recycled pid.
-    unrelated_pid = procs_spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
-    try:
-        session.set_server_pid(unrelated_pid, "DayZDiag_x64.exe")
-        assert procs_is_alive(unrelated_pid)
-
-        stopped = tools.server_stop()
-        assert stopped.data["stopped"] is True
-        assert stopped.data["pid"] == unrelated_pid
-        # The unrelated process must still be running: it was never touched.
-        assert procs_is_alive(unrelated_pid)
-        assert session.server_pid() == 0
-    finally:
-        procs_stop(unrelated_pid)
-
-
-# --- Review round 3: reopening the SAME project must not mark a still-running
-# job as lost ---
-
-
-def test_reopening_the_same_project_does_not_mark_a_running_job_as_lost(tmp_path, monkeypatch):
-    """End-to-end reproduction, not an internals check: a real job is created
-    through mod_build's normal path and deliberately held mid-flight (via
-    synchronization events on the worker thread, not by poking session state),
-    project_open is called again on the exact same root while it is still
-    running, and only then is the job allowed to finish. A store-identity
-    assertion would pass without proving this -- the actual observable bug was
-    the persisted/in-memory job record being flipped to "failed" underneath
-    the still-running worker."""
-    session.reset()
-    root = make_project(tmp_path)
-    tools.project_open(str(root))
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
-        started.set()
-        assert release.wait(timeout=10), "test never released the worker"
-        return [
-            PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)
-        ]
-
-    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-
-    job_id = tools.mod_build().data["job_id"]
-    assert started.wait(timeout=10), "worker never started"
-
-    # Confirm the job is genuinely RUNNING (store.start() already persisted
-    # this) before reopening -- otherwise this test would not reproduce the race.
-    status_before = tools.job_status(job_id)
-    assert status_before.data["status"] == "running"
-
-    # Simulate an agent editing dayz-mcp.local.toml and reopening the same root
-    # WHILE the build is still in flight.
-    reopened = tools.project_open(str(root))
-    assert reopened.ok, reopened.error
-
-    # The reopen must not have marked the still-running job as lost.
-    status_after_reopen = tools.job_status(job_id)
-    assert status_after_reopen.data["status"] == "running"
-    assert status_after_reopen.data["error"] == ""
-
-    release.set()
-    waited = tools.job_wait(job_id, timeout=10)
-    assert waited.data["status"] == "done"
-    assert waited.data["error"] == ""
-
-    # A fresh, independent lookup agrees -- not just job_wait's own return value.
-    final = tools.job_status(job_id)
-    assert final.data["status"] == "done"
-
-
-# --- Final review, item 3: the same defect returns when a project is left and
-# came back to. The previous fix compared against the immediately previous
-# project only, so A -> B -> A rebuilt and reloaded A's store while A's worker
-# was still alive in this very process. ---
-
-
-def test_switching_away_and_back_does_not_mark_a_running_job_as_lost(tmp_path, monkeypatch):
-    """A -> B -> A while a build of A is genuinely mid-flight. The agent is
-    otherwise told, permanently, that a build which then succeeded had failed:
-    the reloaded store's copy is stamped "lost: the server restarted while this
-    job was running" and every later job_status answers from that copy, while
-    the real worker writes "done" to disk underneath it."""
-    session.reset()
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    a = make_project(tmp_path / "a")
-    b = make_project(tmp_path / "b")
-    tools.project_open(str(a))
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def slow_pack_all(names, root, tools_root, log_dir, exclude=None, sources=None, stage=False):
-        started.set()
-        assert release.wait(timeout=10), "test never released the worker"
-        return [PackResult(name="MyMod", pbo=str(root / "@MyMod/addons/MyMod.pbo"), size=10, signed=True)]
-
-    monkeypatch.setattr("dayz_mcp.tools.build.pack_all", slow_pack_all)
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: "C:/tools")
-
-    job_id = tools.mod_build().data["job_id"]
-    assert started.wait(timeout=10), "worker never started"
-    assert tools.job_status(job_id).data["status"] == "running"
-
-    assert tools.project_open(str(b)).ok
-    assert tools.project_open(str(a)).ok
-
-    after = tools.job_status(job_id)
-    assert after.data["status"] == "running", f"the round trip lost the job: {after.data}"
-    assert after.data["error"] == ""
-
-    release.set()
-    waited = tools.job_wait(job_id, timeout=10)
-    assert waited.data["status"] == "done"
-    # The lasting half of the bug: the agent asks again later and is still told
-    # the build failed, long after it succeeded.
-    assert tools.job_status(job_id).data["status"] == "done"
-    assert tools.job_status(job_id).data["error"] == ""
-
-
-def test_a_project_opened_for_the_first_time_still_recovers_jobs_lost_to_a_restart(tmp_path):
-    """The other half of the rule: reuse must not cost restart recovery. A
-    project this process has never opened gets a store built and load()ed, so a
-    job left "running" on disk by a dead process is correctly marked lost --
-    its worker really is gone."""
-    session.reset()
-    root = make_project(tmp_path)
-    stale_dir = root / ".dayz-mcp" / "jobs" / "build-1-1"
-    stale_dir.mkdir(parents=True)
-    (stale_dir / "job.json").write_text(
-        '{"id": "build-1-1", "kind": "build", "status": "running", "started": 1.0, '
-        '"finished": null, "exit_code": null, "artifacts": [], "summary": "", "error": ""}',
-        encoding="utf-8",
-    )
-
-    tools.project_open(str(root))
-
-    recovered = tools.job_status("build-1-1")
-    assert recovered.data["status"] == "failed"
-    assert "lost" in recovered.data["error"]
-
-
 # --- Acceptance-driven fix: machine.config makes the server config filename
 # configurable, since a real stand can have a "serverDZ.cfg" that hangs forever
 # after world-compile and a working config under a different name ---
 
 
 def test_server_start_uses_the_configured_config_filename(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game, config="custom.cfg")
@@ -1319,7 +459,6 @@ def test_server_start_uses_the_configured_config_filename(tmp_path, monkeypatch)
 
 
 def test_server_start_missing_configured_file_names_the_file_and_the_key(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game, config="custom.cfg")
@@ -1333,7 +472,6 @@ def test_server_start_missing_configured_file_names_the_file_and_the_key(tmp_pat
 
 
 def test_server_start_refuses_when_a_custom_config_resolves_outside_stand_root(tmp_path):
-    session.reset()
     root = make_project(tmp_path)
     stand = tmp_path / "stand"
     (stand / "profiles").mkdir(parents=True)
@@ -1355,44 +493,6 @@ def test_server_start_refuses_when_a_custom_config_resolves_outside_stand_root(t
     r = tools.server_start(timeout=5)
     assert not r.ok
     assert "outside stand_root" in r.error
-
-
-# --- Phase-1 defect, reachable through the tool a real user calls: a rebuild
-# with the signing key gone used to leave the PREVIOUS signature over the new
-# pbo, while mod_build reported the build as unsigned and successful. ---
-
-
-def test_mod_build_does_not_leave_a_signature_over_a_pbo_it_no_longer_describes(tmp_path, monkeypatch):
-    """The user-facing half of packer.py's stale-signature fix: this goes
-    through mod_build and the REAL packer, with only FileBank stubbed out. A
-    project that was signed once, then builds on a machine without the private
-    key, must end up with no signature at all -- not one covering a pbo that
-    was replaced underneath it, which a signature-verifying stand rejects while
-    every tool in the chain reports success."""
-    session.reset()
-    root = make_project(tmp_path)
-    out_dir = root / "@MyMod" / "addons"
-    out_dir.mkdir(parents=True)
-    stale = out_dir / "MyMod.pbo.TheKey.bisign"
-    stale.write_bytes(b"signed when this machine still had the key")
-
-    tools_root = tmp_path / "tools"
-    (tools_root / "Bin" / "PboUtils").mkdir(parents=True)
-    (tools_root / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
-
-    def filebank_that_writes(cmd, cwd, log_path, timeout=None):
-        (out_dir / "MyMod.pbo").write_bytes(b"a genuinely new pbo")
-        return 0, "FileBank ok"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", filebank_that_writes)
-    monkeypatch.setattr("dayz_mcp.tools.build.session_tools_root", lambda: str(tools_root))
-    tools.project_open(str(root))
-
-    waited = tools.job_wait(tools.mod_build().data["job_id"], timeout=20)
-    assert waited.data["status"] == "done", waited.data
-    assert "unsigned" in waited.data["summary"]
-    assert not stale.exists(), "the old signature outlived the pbo it described"
-    assert not list(out_dir.glob("*.bisign"))
 
 
 # --- P1: the bridge transport must not survive a boot -------------------------
@@ -1423,7 +523,6 @@ def _spawn_capturing_profiles(captured):
 
 
 def test_server_start_clears_the_bridge_transport_before_spawning(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1458,7 +557,6 @@ def test_a_transport_file_that_cannot_be_removed_does_not_fail_the_boot(tmp_path
     """Clearing is hygiene, not a precondition. A file that cannot be removed
     must be reported and the boot must go ahead -- refusing to start a server
     over a leftover json would be a worse trade than booting with it."""
-    session.reset()
     # No ready line: this test is about the transport, so the boot should
     # settle and finish instead of polling for a marker nothing will print.
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
@@ -1501,7 +599,6 @@ def test_a_transport_file_that_cannot_be_removed_does_not_fail_the_boot(tmp_path
 
 def test_a_clean_boot_says_nothing_about_the_transport(tmp_path, monkeypatch):
     """No leftovers, no noise: the field only appears when something is wrong."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1536,7 +633,6 @@ def test_server_start_refuses_a_port_someone_else_is_holding(tmp_path, monkeypat
     with identification (the pid, and the -mod= tail where it can be read),
     because the caller is choosing what to kill. The tool itself still never
     auto-stops what it did not start."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1576,7 +672,6 @@ def test_the_port_refusal_degrades_to_pid_only_when_the_command_line_is_unreadab
     """Identification is best-effort: a pid that died between netstat and the
     lookup, or an access-denied process, yields no -mod= tail. The offer stands
     -- on the pid alone -- and nothing invents a mod list."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1649,7 +744,6 @@ def test_the_port_and_the_mission_module_are_the_readiness_signal(tmp_path, monk
     mission scripts -- it answers queries and refuses every player -- and a
     verdict taken there reads a log with no errors and says "pass".
     """
-    session.reset()
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1691,7 +785,6 @@ def test_a_declared_ready_line_stays_the_readiness_verdict(tmp_path, monkeypatch
     for the same verdict. With a ready line declared it remains THE answer --
     the port cannot say a mod finished loading -- and the port is reported
     beside it."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1723,7 +816,6 @@ def test_a_missing_ready_line_over_a_listening_server_says_which_half_failed(tmp
     """The failure worth telling apart: the server is up and listening, and it
     is the MOD's line that never appeared. "no ready line within Ns" alone sends
     the reader to look at the boot, which is fine."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1752,7 +844,6 @@ def test_a_dead_server_is_still_reported_dead(tmp_path, monkeypatch):
     """The premise that started this work claimed a boot which had really
     succeeded was being called a failure. It was not: that server genuinely
     died, and this must keep saying so."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1895,7 +986,6 @@ def test_server_start_refuses_a_single_string_rather_than_resplitting_it(tmp_pat
 def test_server_start_knows_the_pid_before_it_returns(tmp_path, monkeypatch):
     """The spawn happens in the CALLER's thread now, so there is no window in
     which a started server is invisible to the next call."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1928,7 +1018,6 @@ def test_a_spawn_that_fails_is_answered_by_the_call_itself(tmp_path, monkeypatch
     """An image that cannot be launched is not a boot outcome, it is a refusal:
     the caller learns at once instead of after a round trip through job_wait.
     The job is still recorded as failed, so nothing is left looking alive."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1961,7 +1050,6 @@ def test_a_spawn_that_fails_is_answered_by_the_call_itself(tmp_path, monkeypatch
 
 
 def test_a_missing_mission_is_refused_before_the_server_is_started(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -1986,7 +1074,6 @@ def test_a_missing_mission_is_refused_before_the_server_is_started(tmp_path, mon
 
 
 def test_a_mission_that_is_there_is_not_refused(tmp_path, monkeypatch):
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -2009,7 +1096,6 @@ def test_a_config_that_names_no_mission_is_not_second_guessed(tmp_path, monkeypa
     """No template means nothing to check. Refusing on a config this tool
     cannot read would block boots that work today, which is a worse failure
     than the one being fixed."""
-    session.reset()
     root = make_project(tmp_path)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)
@@ -2120,7 +1206,6 @@ def test_a_previous_boots_log_does_not_answer_for_this_one(tmp_path, monkeypatch
     module line for ever, and reading it would make every later boot look ready
     the instant its port bound -- which is the exact defect this signal was
     added to close."""
-    session.reset()
     root = make_project(tmp_path, PROFILE_WITHOUT_READY_LINE)
     stand, game = tmp_path / "stand", tmp_path / "game"
     with_stand_and_game(root, stand, game)

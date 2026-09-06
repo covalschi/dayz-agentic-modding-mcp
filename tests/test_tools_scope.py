@@ -118,7 +118,6 @@ def informing(name="a stand", **kw):
 
 
 def test_the_scope_tools_refuse_without_a_project():
-    session.reset()
     for call in (lambda: tools.knowledge_scope(), lambda: tools.server_mods("1.2.3.4", 27016)):
         result = call()
         assert not result.ok
