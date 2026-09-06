@@ -81,19 +81,6 @@ def server_profiles_dir() -> Path:
     return _stand() / "profiles"
 
 
-def _is_within(path: Path, base: Path) -> bool:
-    """True if `path` is `base` or lives underneath it.
-
-    Used to refuse a server config file that resolves (possibly through a
-    symlink) outside machine.stand_root -- see the -config note on server_start.
-    """
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
-
-
 def mod_list(profiles_extra: str = "") -> tuple[str, str]:
     """Split the profile's configured mods into (-mod, -serverMod) path strings.
 
@@ -119,6 +106,11 @@ def mod_list(profiles_extra: str = "") -> tuple[str, str]:
 
 
 def _newest(folder: Path, pattern: str) -> Path | None:
+    """The most recently written match, or None -- including when `folder`
+    does not exist, which is the ordinary state of a profile directory before
+    its first run."""
+    if not folder.is_dir():
+        return None
     items = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return items[0] if items else None
 
@@ -551,7 +543,7 @@ def server_signatures(value: int | None = None) -> Result:
                  f"the config there is not named {prof.machine.config!r}",
         )
     cfg = cfg_path.resolve()
-    if not _is_within(cfg, stand.resolve()):
+    if not cfg.is_relative_to(stand.resolve()):
         return fail(
             f"server config resolves outside stand_root: {cfg}",
             hint=f"{prof.machine.config} must be a real file inside machine.stand_root -- "
@@ -790,7 +782,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
     # outside the stand we were told to use.
     cfg = cfg_path.resolve()
     stand_resolved = stand.resolve()
-    if not _is_within(cfg, stand_resolved):
+    if not cfg.is_relative_to(stand_resolved):
         return fail(
             f"server config resolves outside stand_root: {cfg}",
             hint=f"{prof.machine.config} must be a real file inside machine.stand_root, not a "

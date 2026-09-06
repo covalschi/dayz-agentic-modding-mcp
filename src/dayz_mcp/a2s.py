@@ -74,9 +74,6 @@ DEFAULT_TIMEOUT = 6.0
 #: rotating it. Three is generous: a cooperative host answers on the second
 #: send, and a filtering one never answers at all.
 CHALLENGE_ROUNDS = 3
-#: Observed chunk size. Documented rather than enforced -- the decoder reads
-#: what arrives, and a host that chose another size still decodes.
-CHUNK_BYTES = 127
 _MAX_DATAGRAM = 65535
 #: The four bytes that stand in for "I have no challenge yet".
 _NO_CHALLENGE = WHOLE

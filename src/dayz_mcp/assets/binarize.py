@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -228,19 +229,18 @@ def digest_log(text: str, noise: Sequence[str] = NOISE) -> LogDigest:
     crashes = {c["text"] for c in classify(lines, [], [])["crashes"]}
 
     kept: list[str] = []
-    muted: dict[str, int] = {}
+    muted: Counter[str] = Counter()
     for line in lines:
         stripped = line.strip()
         if stripped not in crashes and any(n in line for n in noise):
-            key = group_key(line)[:120]
-            muted[key] = muted.get(key, 0) + 1
+            muted[group_key(line)[:120]] += 1
             continue
         kept.append(stripped)
     return LogDigest(
         total=len(lines),
         dropped=len(lines) - len(kept),
         kept=tuple(kept),
-        muted=tuple(sorted(muted.items(), key=lambda kv: -kv[1])),
+        muted=tuple(muted.most_common()),
     )
 
 

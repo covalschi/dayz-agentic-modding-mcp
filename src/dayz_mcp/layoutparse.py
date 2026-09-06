@@ -147,12 +147,11 @@ def parse_layout(text: str) -> LayoutNode:
             continue
 
         # Valid headers: "ClassName" / "ClassName {" / "ClassName InstanceName" / "ClassName InstanceName {"
+        # "ClassName", "ClassName {", "ClassName InstanceName" (the three
+        # one- and two-word shapes, whatever the second word is) or
+        # "ClassName InstanceName {".
         is_header = (words[0].endswith("Class") and
-                     (len(words) == 1 or  # Just "ClassName"
-                      (len(words) == 2 and words[1] == "{") or  # "ClassName {"
-                      (len(words) == 2 and words[1] != "{") or  # "ClassName InstanceName"
-                      (len(words) == 3 and words[2] == "{"))  # "ClassName InstanceName {"
-                     )
+                     (len(words) <= 2 or (len(words) == 3 and words[2] == "{")))
         if is_header:
             # A new widget (either root or child)
             # Extract instance name (may be empty/missing)

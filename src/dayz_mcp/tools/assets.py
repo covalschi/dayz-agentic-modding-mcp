@@ -158,14 +158,6 @@ def _model_dirs(base: Path) -> list[Path]:
     return sorted({p.parent for p in base.rglob(f"*{MODEL_SUFFIX}") if p.is_file()})
 
 
-def _within(path: Path, base: Path) -> bool:
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
-
-
 def _shipped(mod_dir: Path, exclude: list[str], suffix: str) -> list[Path]:
     """Every file of one suffix the packer will actually put in the pbo.
 
@@ -291,7 +283,7 @@ def _resolve_target(prof, mod: str, source: str, *, needs_models: bool = True):
 
     if source:
         source_dir = (prefix_dir / PurePosixPath(str(source).replace("\\", "/"))).resolve()
-        if not _within(source_dir, prefix_dir.resolve()):
+        if not source_dir.is_relative_to(prefix_dir.resolve()):
             return None, fail(
                 f"the source {source} climbs out of the mod's own {prefix!r} folder",
                 hint=f"source is relative to <{PROJECT_ROOT_KEY}>/{prefix} -- every path inside "
@@ -823,7 +815,7 @@ def asset_check(mod: str = "", model: str = "") -> Result:
 
     if model:
         one = (mod_dir / PurePosixPath(str(model).replace("\\", "/"))).resolve()
-        if not _within(one, mod_dir.resolve()) or not one.is_file():
+        if not one.is_relative_to(mod_dir.resolve()) or not one.is_file():
             return fail(
                 f"no such model in {mod_name}: {model}",
                 hint=f"model is a path relative to {mod_dir}",

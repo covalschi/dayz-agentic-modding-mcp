@@ -157,13 +157,12 @@ def test_a_top_level_string_value_is_a_note_not_a_group():
 
 
 def test_a_directly_constructed_tokens_still_resolves_device():
-    """`Tokens` is a public dataclass with `device` still in its
-    constructor signature; only `from_text` used to also register it into
-    `groups`, which is what `number()`/`pair()` actually read through for
-    `$device.*` -- so a `Tokens(device=...)` built by hand had `device`
-    filled but `groups` empty, and every `$device.*` token refused with
-    `unknown token` even though the value was right there."""
-    t = Tokens(device={"rail": 84, "page": [1282, 518]})
+    """`device` is a group like any other, and one place holds it: `groups`.
+    It used to also be a field of its own, kept in step by __post_init__, and
+    a `Tokens(device=...)` built by hand filled the field while leaving
+    `groups` empty -- so every `$device.*` token refused with `unknown token`
+    though the value was right there."""
+    t = Tokens(groups={"device": {"rail": 84, "page": [1282, 518]}})
     assert t.number("$device.rail", "f", "n") == 84.0
     assert t.pair("$device.page", "f", "n") == (1282.0, 518.0)
 

@@ -67,6 +67,7 @@ from . import session
 from .lifecycle import (
     CLIENT_PROFILE_DIRNAME,
     SIGNATURE_HINT,
+    _newest,
     mod_list,
     server_profiles_dir,
     signature_problem,
@@ -302,13 +303,6 @@ def client_profiles_dir() -> Path:
     runs would reset both every time.
     """
     return server_profiles_dir().parent / CLIENT_PROFILE_DIRNAME
-
-
-def _newest(folder: Path, pattern: str) -> Path | None:
-    if not folder.is_dir():
-        return None
-    items = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    return items[0] if items else None
 
 
 def _crash_dump_since(profiles: Path, since: float) -> Path | None:

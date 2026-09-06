@@ -474,13 +474,8 @@ ENTITY_LIMIT = 200
 
 
 def _date_args(year: int, month: int, day: int, hour: int, minute: int) -> dict:
-    return _args(
-        year=None if year == UNCHANGED else int(year),
-        month=None if month == UNCHANGED else int(month),
-        day=None if day == UNCHANGED else int(day),
-        hour=None if hour == UNCHANGED else int(hour),
-        minute=None if minute == UNCHANGED else int(minute),
-    )
+    fields = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute}
+    return _args(**{k: None if v == UNCHANGED else int(v) for k, v in fields.items()})
 
 
 def world_time_set(hour: int = UNCHANGED, minute: int = UNCHANGED,

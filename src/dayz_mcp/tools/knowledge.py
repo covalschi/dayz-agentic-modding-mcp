@@ -180,7 +180,7 @@ def _inapplicable(profile, game: str | None) -> dict[str, str]:
     state into a permanent complaint.
     """
     reasons = {PROJECT: "", CORE: "", DEPS: ""}
-    if not _dependency_folders(profile, game):
+    if not dependency_dirs(profile, game or ""):
         reasons[DEPS] = (
             "this project declares no dependency mods (mods.required / mods.extra "
             "in its profile), so there is nothing for a dependency layer to hold"
@@ -214,10 +214,6 @@ def _unbuildable(profile, game: str | None) -> dict[str, str]:
         if why and not blocked[layer]:
             blocked[layer] = why
     return blocked
-
-
-def _dependency_folders(profile, game: str | None) -> list[Path]:
-    return dependency_dirs(profile, game or "")
 
 
 def _age_text(seconds: float | None) -> str:
@@ -266,7 +262,7 @@ def _current_files(
         required = list(getattr(getattr(profile, "mods", None), "required", []) or [])
         if required and not game:
             return None
-        folders = _dependency_folders(profile, game)
+        folders = dependency_dirs(profile, game or "")
         if not folders:
             return None
         found: list[FileStat] = []
@@ -412,7 +408,7 @@ def _scoped(active: modscope.ActiveSet) -> list[str] | None:
     return list(active.mods) if active.active else None
 
 
-def _excluded_find(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
+def _excluded(store: KnowledgeStore, active: modscope.ActiveSet, name: str, search, **kw):
     """The same search, run over exactly what the set kept out.
 
     This is what makes "a filtered-out result is NAMED, never hidden" true. It
@@ -423,38 +419,16 @@ def _excluded_find(store: KnowledgeStore, active: modscope.ActiveSet, name: str,
     A timeout here returns nothing rather than failing: the real answer has
     already been computed, and a slow second opinion must never turn a good
     answer into a refusal.
+
+    `search` is the bound store method (`store.find`, `.callers`,
+    `.overrides`); everything else about the three questions is identical, and
+    was written out three times.
     """
     if not active.active:
         return []
     try:
         with store.time_limit(SEARCH_SECONDS):
-            return store.find(
-                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
-            )
-    except SearchTimeout:
-        return []
-
-
-def _excluded_callers(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
-    if not active.active:
-        return []
-    try:
-        with store.time_limit(SEARCH_SECONDS):
-            return store.callers(
-                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
-            )
-    except SearchTimeout:
-        return []
-
-
-def _excluded_overrides(store: KnowledgeStore, active: modscope.ActiveSet, name: str, **kw):
-    if not active.active:
-        return []
-    try:
-        with store.time_limit(SEARCH_SECONDS):
-            return store.overrides(
-                name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw
-            )
+            return search(name, mods=list(active.mods), outside=True, limit=EXCLUDED_LIMIT, **kw)
     except SearchTimeout:
         return []
 
@@ -659,7 +633,7 @@ def _build_one(store: KnowledgeStore, layer: str, profile, game: str | None,
     # that would reach the same conclusion.
     if layer == DEPS:
         return build_deps(
-            store, _dependency_folders(profile, game), tools=tools_root, full=full
+            store, dependency_dirs(profile, game or ""), tools=tools_root, full=full
         )
     return build_core(store, game=game, tools=tools_root, full=full)
 
@@ -1205,8 +1179,8 @@ def knowledge_find(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
-    scope_view = _scope_view(active, _excluded_find(
-        store, active, name, kind=kind or None, owner=owner or None,
+    scope_view = _scope_view(active, _excluded(
+        store, active, name, store.find, kind=kind or None, owner=owner or None,
         layer=layer or None, prefix=prefix,
     ))
 
@@ -1478,8 +1452,8 @@ def knowledge_show(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
 
-    scope_view = _scope_view(active, _excluded_find(
-        store, active, name, kind=kind or None, owner=owner or None,
+    scope_view = _scope_view(active, _excluded(
+        store, active, name, store.find, kind=kind or None, owner=owner or None,
         layer=layer or None,
     ))
     elsewhere = [] if shown else _elsewhere(store, name, kind, owner, layer, _scoped(active))
@@ -1584,8 +1558,8 @@ def knowledge_callers(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
-    scope_view = _scope_view(active, _excluded_callers(
-        store, active, name, kind=kind or None, owner=owner or None,
+    scope_view = _scope_view(active, _excluded(
+        store, active, name, store.callers, kind=kind or None, owner=owner or None,
         layer=layer or None,
     ))
 
@@ -1681,8 +1655,8 @@ def knowledge_overrides(
     except SearchTimeout as exc:
         return _timeout_refusal(exc)
     elapsed = (time.perf_counter() - started) * 1000.0
-    scope_view = _scope_view(active, _excluded_overrides(
-        store, active, name, owner=owner or None, layer=layer or None,
+    scope_view = _scope_view(active, _excluded(
+        store, active, name, store.overrides, owner=owner or None, layer=layer or None,
     ))
 
     page, truncated, views, missing = _answer(

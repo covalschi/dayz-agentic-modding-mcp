@@ -574,12 +574,7 @@ def ensure_patch_link(link_root: Path, name: str, src: Path) -> tuple[bool, str]
     # cleared it). Only the parent is resolved, so ancestor symlinks are
     # still normalised the way `target` itself is.
     link_lexical = link.parent.resolve() / link.name
-    try:
-        link_lexical.relative_to(target)
-        inside_target = True
-    except ValueError:
-        inside_target = False
-    if inside_target:
+    if link_lexical.is_relative_to(target):
         return False, (
             f"{link} would sit inside its own target {target} -- a mod whose source is "
             "the repository root cannot be patched by junction; turn client.file_patching "

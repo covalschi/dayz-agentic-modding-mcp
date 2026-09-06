@@ -168,15 +168,6 @@ def resolve_project_root(root: Path, project_root: str) -> Path | None:
     return (Path(root) / project_root).resolve() if project_root else None
 
 
-def _is_within(path: Path, base: Path) -> bool:
-    """True if `path` is `base` or lives underneath it (both already resolved)."""
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
-
-
 def _read_toml(path: Path) -> tuple[dict | None, str]:
     try:
         with path.open("rb") as fh:
@@ -316,7 +307,7 @@ def load_profile(path: str | Path) -> Result:
     root_resolved = root.resolve()
     for mod in build.mods:
         mod_dir = resolve_mod_dir(root, build.sources, mod)
-        if not _is_within(mod_dir, root_resolved):
+        if not mod_dir.is_relative_to(root_resolved):
             return fail(
                 f"build.sources.{mod} escapes the profile directory: {build.sources[mod]}",
                 hint='sources paths must resolve inside the mod repository -- use "." for the '
@@ -354,7 +345,7 @@ def load_profile(path: str | Path) -> Result:
         # layout this was measured against. Announced, though: the build then
         # depends on a directory this repository does not own, and nothing in
         # it is covered by this repository's history.
-        if not _is_within(declared_root, root_resolved):
+        if not declared_root.is_relative_to(root_resolved):
             notes.append(
                 f"build.project_root points outside the repository: {build.project_root} "
                 f"({declared_root}); the build depends on a directory this repository does "

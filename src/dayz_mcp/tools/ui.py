@@ -268,15 +268,6 @@ def _centre(rect: str) -> tuple[int, int] | None:
 _rect = parse_rect
 
 
-def _is_within(path: Path, base: Path) -> bool:
-    """True if `path` is `base` or lives underneath it (both already resolved)."""
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return False
-    return True
-
-
 #: The engine truncates a JSON string longer than this, silently (measured
 #: 2026-09-04: a 953-byte minified fixture file, re-serialised at 1029 bytes
 #: with Python's default separators, arrived cut). Everything below is what
@@ -304,7 +295,7 @@ def _fixture_text(fixture, root: Path) -> tuple[str | None, str, list[str]]:
         else:
             root_resolved = root.resolve()
             path = (root / fixture).resolve()
-            if not _is_within(path, root_resolved):
+            if not path.is_relative_to(root_resolved):
                 return None, f"fixture path must stay inside the project: {path}", []
             if not path.is_file():
                 return None, f"fixture file not found: {path}", []
@@ -1049,12 +1040,9 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
         # page run in two languages needs the failure to say which one --
         # and is left off otherwise so a caller not using this axis sees
         # exactly the message it always has.
-        if langs:
-            bad = [f"{e['name']}@{e['size']}@{e['language']}" for e in entries
-                   if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
-        else:
-            bad = [f"{e['name']}@{e['size']}" for e in entries
-                   if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
+        bad = [f"{e['name']}@{e['size']}" + (f"@{e['language']}" if langs else "")
+               for e in entries
+               if not e.get("ok") or int((e.get("issues") or {}).get("error", 0)) > 0]
         if bad:
             return Result(False, data, f"{len(bad)} entries with errors: {', '.join(bad)}",
                           "open index.html -- every error is a rectangle the engine drew, not a guess")

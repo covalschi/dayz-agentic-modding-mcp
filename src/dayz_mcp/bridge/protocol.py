@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -295,7 +294,9 @@ def parse_rejection(text: str) -> ParseRejection | None:
     return rejection
 
 
-_id_lock = threading.Lock()
+#: `itertools.count.__next__` is atomic, so the sequence needs no lock of
+#: its own -- and the timestamp, not the counter, is what carries
+#: uniqueness anyway (see new_command_id).
 _id_seq = itertools.count(1)
 
 
@@ -317,9 +318,7 @@ def new_command_id(verb: str) -> str:
     anywhere and is allowed to restart at 1 on every process start, because
     the timestamp component is what carries uniqueness across that boundary.
     """
-    with _id_lock:
-        seq = next(_id_seq)
-    return f"{verb}-{time.time_ns()}-{seq}"
+    return f"{verb}-{time.time_ns()}-{next(_id_seq)}"
 
 
 def classify_timeout(sent_at: float, now: float, timeout: float) -> str:

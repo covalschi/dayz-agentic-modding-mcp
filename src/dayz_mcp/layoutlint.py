@@ -226,31 +226,26 @@ def _check_proportional_magnitude(node: LayoutNode, file: str, out: list[Finding
     as "proportional" would warn on every ordinary vanilla widget that
     leaves the flag out (`size 1 1` with no flags at all is the single most
     common shape in the vanilla layouts, and is not this bug)."""
-    size = node.prop("size")
-    if size and len(size) > 0 and node.prop("hexactsize") == ["0"] and _gt1(size[0]):
+    # size/position x horizontal/vertical: one rule, four instances. Written
+    # out four times it was four places to change the wording and four
+    # chances to change only three of them.
+    for prop, flag, index, unit, what in (
+        ("size", "hexactsize", 0, "widths", "width"),
+        ("size", "vexactsize", 1, "heights", "height"),
+        ("position", "hexactpos", 0, "widths from the edge", "x position"),
+        ("position", "vexactpos", 1, "heights from the edge", "y position"),
+    ):
+        values = node.prop(prop)
+        if not values or len(values) <= index or node.prop(flag) != ["0"]:
+            continue
+        if not _gt1(values[index]):
+            continue
         out.append(Finding("layout-proportional-magnitude", WARN,
-                           f"`size {' '.join(size)}` with `hexactsize 0` asks for {size[0]} parent "
-                           "widths -- a proportional flag with a pixel number",
-                           "set hexactsize 1 for a pixel width, or a fraction 0..1 for a proportional one",
-                           file, node.line))
-    if size and len(size) > 1 and node.prop("vexactsize") == ["0"] and _gt1(size[1]):
-        out.append(Finding("layout-proportional-magnitude", WARN,
-                           f"`size {' '.join(size)}` with `vexactsize 0` asks for {size[1]} parent "
-                           "heights -- a proportional flag with a pixel number",
-                           "set vexactsize 1 for a pixel height, or a fraction 0..1 for a proportional one",
-                           file, node.line))
-    pos = node.prop("position")
-    if pos and len(pos) > 0 and node.prop("hexactpos") == ["0"] and _gt1(pos[0]):
-        out.append(Finding("layout-proportional-magnitude", WARN,
-                           f"`position {' '.join(pos)}` with `hexactpos 0` asks for {pos[0]} parent "
-                           "widths from the edge -- a proportional flag with a pixel number",
-                           "set hexactpos 1 for a pixel x position, or a fraction 0..1 for a proportional one",
-                           file, node.line))
-    if pos and len(pos) > 1 and node.prop("vexactpos") == ["0"] and _gt1(pos[1]):
-        out.append(Finding("layout-proportional-magnitude", WARN,
-                           f"`position {' '.join(pos)}` with `vexactpos 0` asks for {pos[1]} parent "
-                           "heights from the edge -- a proportional flag with a pixel number",
-                           "set vexactpos 1 for a pixel y position, or a fraction 0..1 for a proportional one",
+                           f"`{prop} {' '.join(values)}` with `{flag} 0` asks for "
+                           f"{values[index]} parent {unit} -- a proportional flag with a "
+                           "pixel number",
+                           f"set {flag} 1 for a pixel {what}, or a fraction 0..1 for a "
+                           "proportional one",
                            file, node.line))
 
 

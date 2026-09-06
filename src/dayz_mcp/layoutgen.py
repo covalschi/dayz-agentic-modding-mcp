@@ -78,31 +78,15 @@ class Tokens:
     plain number, e.g. a rail width) or a string (e.g. `iconset`, an
     imageset name) -- the caller's own reader (`number()`, `pair()`,
     `_iconset`) is what decides which shape it expects. `groups` holds every
-    such group, `device` included; `device` stays its own attribute because
-    other code (`_iconset`) and the dataclass's own long-time callers read
-    it directly."""
+    such group, `device` among them and no different from the rest -- it had
+    a parallel attribute of its own once, hand-synchronised in __post_init__,
+    which is two places for one fact."""
 
     color: dict[str, list[float]] = field(default_factory=dict)
     font: dict[str, dict] = field(default_factory=dict)
     space: dict[str, float] = field(default_factory=dict)
     size: dict[str, float] = field(default_factory=dict)
-    device: dict = field(default_factory=dict)
     groups: dict[str, dict] = field(default_factory=dict)
-    file: str = "ui/tokens.json"
-
-    def __post_init__(self) -> None:
-        """`from_text` fills `groups` (including `groups["device"]`) and
-        only then points `device` at it; a `Tokens(device=...)` built
-        directly sets only `device`, by the dataclass's own field order, and
-        would otherwise leave `groups` without it -- `$device.*` resolves
-        through `groups`, so `number()`/`pair()` would find nothing. Register
-        `device` into `groups` when a caller left `groups` without one; when
-        a caller passed both, `groups["device"]` wins and `device` becomes a
-        view of it, so the two can never disagree."""
-        if "device" in self.groups:
-            self.device = self.groups["device"]
-        else:
-            self.groups["device"] = self.device
 
     @classmethod
     def from_text(cls, text: str, file: str = "ui/tokens.json") -> "Tokens":
@@ -112,7 +96,7 @@ class Tokens:
             raise LayoutGenError(f"tokens do not parse: {exc}", file) from None
         if not isinstance(data, dict):
             raise LayoutGenError("tokens must be a JSON object", file)
-        t = cls(file=file)
+        t = cls()
         for name, rgba in dict(data.get("color") or {}).items():
             good = (isinstance(rgba, list) and len(rgba) == 4
                     and all(_is_number(v) and 0 <= v <= 1 for v in rgba))
@@ -154,7 +138,6 @@ class Tokens:
                         f"{gname}.{name} must be a number, a [w, h] pair or a string", file)
                 group_tokens[name] = value
             t.groups[gname] = group_tokens
-        t.device = t.groups.get("device", {})
         return t
 
     @classmethod
@@ -1320,7 +1303,7 @@ BUILDERS.update({
 
 
 def _iconset(attrs: dict, ctx: Ctx, path: str) -> str:
-    iconset = attrs.get("set") or ctx.tokens.device.get("iconset")
+    iconset = attrs.get("set") or ctx.tokens.groups.get("device", {}).get("iconset")
     if not isinstance(iconset, str) or not iconset:
         raise LayoutGenError("icon needs set, or device.iconset in the tokens", ctx.file, path)
     return iconset

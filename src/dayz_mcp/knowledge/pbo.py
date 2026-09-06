@@ -234,9 +234,7 @@ def read_index(
         name = raw.decode("utf-8", "replace")
         if keep(name):
             entries.append(PboEntry(name, packing, original, size, running))
-            running += size
-        else:
-            running += size
+        running += size
     data_start = pos
     return (
         [

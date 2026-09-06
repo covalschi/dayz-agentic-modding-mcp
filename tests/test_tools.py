@@ -562,12 +562,6 @@ def test_server_status_detects_a_stalled_log(tmp_path, monkeypatch):
 # --- Extra requirement 6: -config must be absolute and inside stand_root ---
 
 
-def test_is_within_detects_paths_outside_the_base():
-    assert lifecycle._is_within(Path("C:/stand/serverDZ.cfg"), Path("C:/stand"))
-    assert lifecycle._is_within(Path("C:/stand"), Path("C:/stand"))
-    assert not lifecycle._is_within(Path("C:/other/serverDZ.cfg"), Path("C:/stand"))
-
-
 def test_server_start_passes_an_absolute_config_path(tmp_path, monkeypatch):
     session.reset()
     root = make_project(tmp_path)
