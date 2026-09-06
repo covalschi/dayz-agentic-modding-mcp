@@ -253,6 +253,50 @@ def test_the_tail_of_a_multi_megabyte_log_decodes_each_block_once(tmp_path, monk
     assert decoded_bytes <= size
 
 
+def test_a_multi_byte_character_split_across_a_block_boundary_survives(tmp_path):
+    """`_tail_lines` decodes each block's raw bytes before it has the rest of
+    the file to compare them against. If a multi-byte UTF-8 character (the
+    series' logs carry Ukrainian text) straddles the boundary between two
+    blocks, decoding each half on its own turns both halves into replacement
+    characters instead of the one character they spell together.
+
+    This builds a log whose size is chosen, from `_TAIL_BLOCK` itself, so the
+    very first block boundary lands one byte into a 3-byte UTF-8 character --
+    the character's lead byte ends up alone at the end of the earlier block,
+    and its two continuation bytes start the later block with no lead byte of
+    their own. The fix must still produce exactly what a plain, whole-file
+    decode would.
+    """
+    from dayz_mcp.tools.logs import _TAIL_BLOCK, _tail_lines
+
+    char = "₴"  # Ukrainian hryvnia sign -- 3 bytes in UTF-8
+    char_bytes = char.encode("utf-8")
+    assert len(char_bytes) == 3
+
+    prefix = ("line0\n" + "line1\n" + "pad" * 20 + "\n").encode("utf-8")
+    boundary_offset_in_char = 1  # 1 byte before the boundary, 2 bytes after
+    suffix_len = _TAIL_BLOCK + boundary_offset_in_char - len(char_bytes)
+    filler = b"S" * (suffix_len - len(b"\nlastline\n"))
+    suffix = filler + b"\nlastline\n"
+
+    data = prefix + char_bytes + suffix
+    size = len(data)
+    boundary = size - _TAIL_BLOCK
+    assert len(prefix) < boundary < len(prefix) + len(char_bytes), "test setup: boundary must land inside the character"
+
+    log = tmp_path / "script_ukrainian.log"
+    log.write_bytes(data)
+
+    text = data.decode("utf-8")
+    naive = text.splitlines()
+
+    for n in (1, 5, len(naive) + 5):
+        result = _tail_lines(log, n, "")
+        assert result == naive[-n:]
+        assert not any("�" in ln for ln in result)
+    assert any(char in ln for ln in _tail_lines(log, len(naive), ""))
+
+
 def test_the_tail_of_a_short_or_missing_log_is_answered_not_raised(tmp_path):
     from dayz_mcp.tools.logs import _tail_lines
 

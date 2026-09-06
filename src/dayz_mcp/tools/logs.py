@@ -77,11 +77,12 @@ def log_verdict(source: str = "server", since: float | None = None) -> Result:
 _TAIL_BLOCK = 64 * 1024
 
 
-def _decode(block: bytes) -> str:
-    """Decode one block's raw bytes. Broken out of `_tail_lines` so a test can
-    meter how much work a block read costs -- the whole point of the fix below
-    is that this is called once per block, never on a growing buffer."""
-    return block.decode("utf-8", errors="replace")
+def _decode(segment: bytes) -> str:
+    """Decode one complete line's raw bytes. Broken out of `_tail_lines` so a
+    test can meter how much work a block read costs -- the whole point of the
+    fix below is that each byte of the log is handed to this exactly once,
+    never re-decoded on a growing buffer."""
+    return segment.decode("utf-8", errors="replace")
 
 
 def _tail_lines(log: Path, n: int, pattern: str) -> list[str]:
@@ -95,33 +96,52 @@ def _tail_lines(log: Path, n: int, pattern: str) -> list[str]:
     except when a `pattern` matches nothing near the end and the whole file
     genuinely has to be searched.
 
-    Each block is decoded and split ONCE, not accumulated with every earlier
-    block and re-decoded/re-split/re-filtered on every iteration -- that
-    earlier shape was quadratic in the number of blocks, which is exactly the
-    case a non-matching `pattern` hits (it has to walk the whole file). A
-    block boundary lands mid-line, so the block's first line is still missing
-    its beginning; it is carried forward as `carry` and glued onto the front
-    of the NEXT (earlier) block's own text before that block is split, which
-    is where its true beginning lives. Once the read reaches byte 0 there is
-    no earlier block left to complete it, so what remains is a real line, not
-    a carry.
+    A block boundary lands mid-line, so the block's first line is still
+    missing its beginning, which lives in the NEXT (earlier) block. That
+    partial first line is carried forward as RAW BYTES (`carry`), not as
+    decoded text: the series' logs carry Ukrainian text, and a multi-byte
+    UTF-8 character can straddle the boundary, with one half in each block.
+    Decoding each block on its own -- the earlier shape -- decodes each half
+    separately and turns the character into two replacement characters
+    instead of carrying the undecoded bytes through to where the character is
+    whole again. `carry` is glued onto the END of the next block's own bytes
+    (that block precedes it in the file) and the combined bytes are split on
+    b"\\n" before anything is decoded, so a split character is always decoded
+    once it is complete, and each byte of the log is decoded at most once --
+    not accumulated and re-decoded every iteration, which was quadratic in the
+    number of blocks (the case a non-matching `pattern` hits, since it has to
+    walk the whole file). Once the read reaches byte 0 there is no earlier
+    block left to complete the first segment, so it is a real line, not a
+    carry.
     """
     try:
         with log.open("rb") as fh:
             end = log.stat().st_size
             found: list[str] = []
-            carry = ""
+            carry = b""
+            at_log_end = True
             while end > 0:
                 start = max(0, end - _TAIL_BLOCK)
                 fh.seek(start)
                 block = fh.read(end - start)
                 end = start
-                lines = (_decode(block) + carry).splitlines()
+                segments = (block + carry).split(b"\n")
+                if at_log_end and segments and segments[-1] == b"":
+                    # The log's own trailing "\n" would otherwise read as one
+                    # more, empty, final line -- splitlines() drops it too.
+                    segments.pop()
+                at_log_end = False
                 if start > 0:
-                    carry = lines[0] if lines else ""
-                    lines = lines[1:]
+                    carry = segments[0]
+                    segments = segments[1:]
                 else:
-                    carry = ""
+                    carry = b""
+                # A trailing "\r" is the other half of a "\r\n" terminator,
+                # not content -- str.splitlines() would have consumed it too.
+                lines = [
+                    _decode(seg[:-1] if seg.endswith(b"\r") else seg)
+                    for seg in segments
+                ]
                 if pattern:
                     lines = [ln for ln in lines if pattern in ln]
                 found = lines + found
