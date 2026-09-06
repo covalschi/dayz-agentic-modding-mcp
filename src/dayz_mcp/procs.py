@@ -60,6 +60,16 @@ def run_blocking(
     return code, text[-TAIL_CHARS:]
 
 
+# Handles of what THIS process started, keyed by pid, with the image name the
+# command line asked for. Kept because a live handle answers "is it running"
+# with one syscall (`Popen.poll`), while the fallback -- spawning `tasklist` --
+# was measured at ~230 ms per call on this machine, and liveness is checked on
+# every world_*/ui_* command, every lifecycle poll and twice per client_status.
+# Holding the handle also pins the pid: Windows cannot recycle it under us
+# while the handle is open, which is the very lie `is_alive` exists to avoid.
+_spawned: dict[int, tuple[subprocess.Popen, str]] = {}
+
+
 def spawn(cmd: list[str], cwd: Path) -> int:
     proc = subprocess.Popen(  # noqa: S603
         cmd, cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -68,7 +78,24 @@ def spawn(cmd: list[str], cwd: Path) -> int:
         stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
+    _spawned[proc.pid] = (proc, Path(cmd[0]).name if cmd else "")
     return proc.pid
+
+
+def _handle(pid: int, image: str) -> subprocess.Popen | None:
+    """The handle for `pid`, or None when this process did not start it.
+
+    An `image` that disagrees with the command line we spawned means the caller
+    is asking about a different process than the one we hold; that question
+    only `tasklist` can answer, so the fast path steps aside.
+    """
+    tracked = _spawned.get(pid)
+    if tracked is None:
+        return None
+    proc, spawned_image = tracked
+    if image and spawned_image and image.lower() != spawned_image.lower():
+        return None
+    return proc
 
 
 def udp_port_holders(port: int) -> list[int]:
@@ -195,6 +222,14 @@ def is_alive(pid: int, image: str = "") -> bool:
     """
     if pid <= 0:
         return False
+    proc = _handle(pid, image)
+    if proc is not None:
+        if proc.poll() is None:
+            return True
+        # Reaped: the pid is free to be recycled from here on, so later
+        # questions about it must go back to asking the operating system.
+        _spawned.pop(pid, None)
+        return False
     if os.name == "nt":
         # /FO CSV, not the default table format: the default truncates the
         # Image Name column at 25 characters (confirmed against real
@@ -232,6 +267,16 @@ def stop(pid: int, grace: float = 3.0) -> bool:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             return True
+    proc = _handle(pid, "")
+    if proc is not None:
+        # Waiting on the handle beats polling: it returns the moment the
+        # process is gone instead of on the next 0.2 s tick.
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            return False
+        _spawned.pop(pid, None)
+        return True
     deadline = time.time() + grace
     while time.time() < deadline:
         if not is_alive(pid):

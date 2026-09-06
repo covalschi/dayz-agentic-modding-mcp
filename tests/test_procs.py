@@ -65,6 +65,47 @@ def test_spawn_stop_and_liveness(tmp_path):
     assert not is_alive(pid)
 
 
+def test_liveness_of_a_process_we_started_never_shells_out(tmp_path, monkeypatch):
+    """The measured cost of `tasklist` here is ~230 ms, and liveness is asked on
+    every world_*/ui_* command and every lifecycle poll. For a pid this process
+    spawned the answer is already in hand -- the process handle -- so no
+    subprocess may be started to re-derive it, alive or dead."""
+    import subprocess as sp
+
+    from dayz_mcp import procs
+
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+
+    def no_shelling_out(*args, **kwargs):
+        raise AssertionError(f"asked the system about a pid we hold: {args!r}")
+
+    short = spawn([sys.executable, "-c", ""], tmp_path)
+    procs._spawned[short][0].wait(timeout=30)
+
+    monkeypatch.setattr(sp, "run", no_shelling_out)
+    try:
+        assert is_alive(pid)
+        assert is_alive(pid, image=Path(sys.executable).name)
+        # And the process that ended on its own: the handle carries the exit
+        # code, so death is reported without asking anyone either.
+        assert not is_alive(short)
+    finally:
+        monkeypatch.undo()
+        stop(pid)
+
+
+def test_a_foreign_image_name_still_goes_to_the_system(tmp_path):
+    """The handle proves a process is running; it does not prove it is the
+    process the caller means. A caller asking about a different image gets the
+    same answer it always got, from tasklist."""
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    try:
+        assert is_alive(pid, image=Path(sys.executable).name)
+        assert not is_alive(pid, image="definitely-not-this-image.exe")
+    finally:
+        stop(pid)
+
+
 def test_run_blocking_does_not_leak_stdin_to_child(tmp_path):
     """This server talks MCP over stdio: its own stdin is a live JSON-RPC pipe.
     A child process that inherits it can read from it, stealing input meant
