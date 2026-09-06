@@ -1064,44 +1064,71 @@ def test_ui_gallery_strict_names_entries_with_language_when_langs_given(live, mo
     assert strict.data["entries"][1]["language"] == "English"
 
 
-def test_restart_client_with_no_size_leaves_the_window_alone(live, monkeypatch):
-    """`size=None` -- a language-only round -- must start the client with
-    `window=None` (the machine's own configured size), not invent one."""
-    calls = {}
+_KEEP = object()
+
+
+def restart_fakes(monkeypatch, *, stop=None, start=None, wait=None, players=_KEEP):
+    """The three collaborators `_restart_client` talks to, plus the server's
+    player count, and a record of every call in order.
+
+    Ten byte-identical `fake_stop`/`fake_start`/`fake_wait` triples used to
+    live one per test, exactly as four copies of the `ui_preview` pair did
+    before `gallery_fakes` (above) absorbed them. Each argument is the RESULT
+    that fake should return, so a test overrides only the answer it is about
+    and still gets the recording. `players` may be a single reading or an
+    iterable of them, and is left unpatched unless given.
+
+    Returns `calls`, which records ("stop",), ("start", window, language),
+    ("wait", job_id, timeout) and ("players",) in the order they happened --
+    so a test can assert the interleaving, not just how many of each.
+    """
+    from dayz_mcp.errors import ok as _ok
+
+    calls: list[tuple] = []
+    stop_result = _ok({"stopped": True}) if stop is None else stop
+    start_result = _ok({"job_id": "j1"}) if start is None else start
+    wait_result = _ok({"status": "done"}) if wait is None else wait
 
     def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
+        calls.append(("stop",))
+        return stop_result
 
     def fake_start(window=None, language=""):
-        from dayz_mcp.errors import ok as _ok
-        calls["window"] = window
-        calls["language"] = language
-        return _ok({"job_id": "j1"})
+        calls.append(("start", window, language))
+        return start_result
 
     def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "done"})
+        calls.append(("wait", job_id, timeout))
+        return wait_result
 
     monkeypatch.setattr(ui, "client_stop", fake_stop)
     monkeypatch.setattr(ui, "client_start", fake_start)
     monkeypatch.setattr(ui, "job_wait", fake_wait)
+
+    if players is not _KEEP:
+        readings = iter(players) if isinstance(players, (list, tuple)) else None
+
+        def fake_players():
+            calls.append(("players",))
+            return next(readings) if readings is not None else players
+
+        monkeypatch.setattr(ui, "_server_players", fake_players)
+
+    return calls
+
+
+def test_restart_client_with_no_size_leaves_the_window_alone(live, monkeypatch):
+    """`size=None` -- a language-only round -- must start the client with
+    `window=None` (the machine's own configured size), not invent one."""
+    calls = restart_fakes(monkeypatch)
     assert ui._restart_client(None, 45.0, "Russian") == ""
-    assert calls["window"] is None
-    assert calls["language"] == "Russian"
+    assert ("start", None, "Russian") in calls
 
 
 def test_restart_client_names_current_in_its_failures_when_size_is_none(live, monkeypatch):
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
+    from dayz_mcp.errors import fail as _fail
 
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import fail as _fail
-        return _fail("no stand")
-
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
+    restart_fakes(monkeypatch, start=_fail("no stand"))
     reason = ui._restart_client(None, 45.0, "Russian")
     assert "could not start the client at current" in reason
 
@@ -1146,28 +1173,12 @@ def test_ui_gallery_refuses_a_malformed_size(live):
 def test_restart_client_stops_then_starts_at_the_new_size_and_waits_for_it_to_connect(live, monkeypatch):
     """The success path, through the real function -- nothing about
     _restart_client itself is faked here, only its three collaborators."""
-    calls = {}
+    from dayz_mcp.errors import ok as _ok
 
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
-
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import ok as _ok
-        calls["window"] = window
-        return _ok({"job_id": "j1"})
-
-    def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        calls["wait"] = (job_id, timeout)
-        return _ok({"status": "done", "summary": "connected"})
-
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    calls = restart_fakes(monkeypatch, wait=_ok({"status": "done", "summary": "connected"}))
     assert ui._restart_client((1920, 1080), 45.0) == ""
-    assert calls["window"] == [1920, 1080]
-    assert calls["wait"] == ("j1", 240)  # max(45.0, 240) floor
+    assert ("start", [1920, 1080], "") in calls
+    assert ("wait", "j1", 240) in calls  # max(45.0, 240) floor
 
 
 def test_restart_client_waits_for_the_server_to_drop_the_killed_player(live, monkeypatch):
@@ -1176,63 +1187,24 @@ def test_restart_client_waits_for_the_server_to_drop_the_killed_player(live, mon
     kicked at login. before=1, the poll sees 1 again (not yet dropped), and
     only the THIRD read of _server_players (0, below before) releases the
     wait -- three reads total, and only then does the client start."""
-    readings = iter([1, 1, 0])
-    calls = []
-
-    def fake_players():
-        calls.append("players")
-        return next(readings)
-
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        calls.append("stop")
-        return _ok({"stopped": True})
-
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import ok as _ok
-        calls.append("start")
-        return _ok({"job_id": "j1"})
-
-    def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "done"})
-
-    monkeypatch.setattr(ui, "_server_players", fake_players)
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    calls = restart_fakes(monkeypatch, players=[1, 1, 0])
     monkeypatch.setattr(ui.time, "sleep", lambda seconds: None)
     assert ui._restart_client((1920, 1080), 45.0) == ""
-    assert calls == ["players", "stop", "players", "players", "start"]
+    assert [c[0] for c in calls if c[0] != "wait"] == [
+        "players", "stop", "players", "players", "start"]
 
 
 def test_restart_client_gives_up_if_the_server_never_drops_the_player(live, monkeypatch):
     """The wait is not unbounded: a server that keeps reporting the old
     player forever must not block the gallery past RESTART_RELEASE_SECONDS,
     and must never reach client_start."""
-    def fake_players():
-        return 1  # never drops, however many times it is read
-
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
-
-    started = []
-
-    def fake_start(window=None, language=""):
-        started.append(window)
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"job_id": "j1"})
-
-    monkeypatch.setattr(ui, "_server_players", fake_players)
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
+    calls = restart_fakes(monkeypatch, players=1)  # never drops, however often read
     monkeypatch.setattr(ui.time, "sleep", lambda seconds: None)
     reason = ui._restart_client((1920, 1080), 45.0)
     assert "still reports 1 player(s)" in reason
     assert f"{ui.RESTART_RELEASE_SECONDS}s" in reason
     assert "already in game" in reason
-    assert started == []
+    assert not [c for c in calls if c[0] == "start"]
 
 
 def test_restart_client_does_not_wait_when_the_server_signal_is_unreadable(live, monkeypatch):
@@ -1241,74 +1213,25 @@ def test_restart_client_does_not_wait_when_the_server_signal_is_unreadable(live,
     not "wait and see" either, since a signal that is not there now will not
     become readable by waiting. Starting proceeds immediately, with no wait
     and no second read of _server_players."""
-    calls = []
-
-    def fake_players():
-        calls.append("players")
-        return None
-
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        calls.append("stop")
-        return _ok({"stopped": True})
-
-    def fake_start(window=None, language=""):
-        calls.append("start")
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"job_id": "j1"})
-
-    def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "done"})
-
-    monkeypatch.setattr(ui, "_server_players", fake_players)
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    calls = restart_fakes(monkeypatch, players=None)
     assert ui._restart_client((1920, 1080), 45.0) == ""
-    assert calls == ["players", "stop", "start"]
+    assert [c[0] for c in calls if c[0] != "wait"] == ["players", "stop", "start"]
 
 
 def test_restart_client_reports_a_start_that_refused(live, monkeypatch):
-    waited = []
+    from dayz_mcp.errors import fail as _fail
 
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
-
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import fail as _fail
-        return _fail("no stand")
-
-    def fake_wait(job_id, timeout):
-        waited.append((job_id, timeout))
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "done"})
-
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    calls = restart_fakes(monkeypatch, start=_fail("no stand"))
     reason = ui._restart_client((1920, 1080), 45.0)
     assert "could not start" in reason and "1920x1080" in reason
-    assert waited == []  # a start that never got a job id must not reach job_wait
+    # A start that never got a job id must not reach job_wait.
+    assert not [c for c in calls if c[0] == "wait"]
 
 
 def test_restart_client_reports_a_client_that_never_connected(live, monkeypatch):
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
+    from dayz_mcp.errors import ok as _ok
 
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"job_id": "j1"})
-
-    def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "failed", "error": "died"})
-
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    restart_fakes(monkeypatch, wait=_ok({"status": "failed", "error": "died"}))
     reason = ui._restart_client((1920, 1080), 45.0)
     assert "did not connect" in reason
 
@@ -1317,26 +1240,12 @@ def test_restart_client_does_not_treat_nothing_to_stop_as_a_failure(live, monkey
     """client_stop answers ok even when this session started no client --
     stopped=False there is a fact about the machine, not a refusal, and the
     restart must still go on to start the client at the new size."""
-    started = []
+    from dayz_mcp.errors import ok as _ok
 
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": False, "reason": "no client was started by this session"})
-
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import ok as _ok
-        started.append(window)
-        return _ok({"job_id": "j1"})
-
-    def fake_wait(job_id, timeout):
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"status": "done"})
-
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
-    monkeypatch.setattr(ui, "job_wait", fake_wait)
+    calls = restart_fakes(monkeypatch, stop=_ok(
+        {"stopped": False, "reason": "no client was started by this session"}))
     assert ui._restart_client((1920, 1080), 45.0) == ""
-    assert started == [[1920, 1080]]
+    assert [c for c in calls if c[0] == "start"] == [("start", [1920, 1080], "")]
 
 
 def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(live, monkeypatch):
@@ -1349,14 +1258,9 @@ def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(
     (root / "preview" / "index.json").write_text(
         json.dumps({"entries": [{"name": "t", "layout": "a.layout"}]}), encoding="utf-8")
 
-    def fake_stop():
-        from dayz_mcp.errors import ok as _ok
-        return _ok({"stopped": True})
+    from dayz_mcp.errors import fail as _fail
 
-    def fake_start(window=None, language=""):
-        from dayz_mcp.errors import fail as _fail
-        return _fail("no stand")
-
+    restart_fakes(monkeypatch, start=_fail("no stand"))
     preview_calls = []
 
     def fake_preview(**kw):
@@ -1365,8 +1269,6 @@ def test_ui_gallery_records_a_failed_restart_and_never_calls_preview_that_round(
         return _ok({"dir": str(root), "shot": "", "report": str(root / "r.html"), "count": 0, "total": 0,
                     "issues": {"error": 0, "warn": 0}, "notes": [], "host": None, "emulated": False})
 
-    monkeypatch.setattr(ui, "client_stop", fake_stop)
-    monkeypatch.setattr(ui, "client_start", fake_start)
     monkeypatch.setattr(ui, "ui_preview", fake_preview)
     result = ui.ui_gallery(sizes=[[1920, 1080]])
     assert result.ok, result.error

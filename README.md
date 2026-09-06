@@ -765,10 +765,49 @@ it; they do not replace it.
   `config.bin` holds the binary form while the index holds what `CfgConvert`
   made of it. The answer says so instead of returning nothing.
 
-## Install
+## Testing
 
     python -m pip install -e ".[dev]"
     python -m pytest
+
+That is the hermetic suite: everything runs against fixtures, on any machine,
+in about eighty seconds.
+
+### Corpus tests
+
+A second half of the suite runs the readers and the checks against REAL
+artifacts — a binarized model that works in game, one built from the wrong
+directory, a texture whose alpha survived conversion and one whose did not, an
+unpacked `scripts.pbo`, a folder of installed mods. Those artifacts are not in
+this repository and never will be: they are gigabytes, and most of them belong
+to somebody's mod rather than to this server. The tests find them through
+environment variables named after the PROPERTY under test, never after the mod
+they came from, and skip when a variable is unset.
+
+Set them once per machine: copy `tests/samples.local.example.toml` to
+`tests/samples.local.toml` (git-ignored) and fill in your own paths. That file
+is read by `tests/conftest.py` before any test module is imported — which is
+when the skips are decided — and never overrides a variable the environment
+already carries, so a one-off `DAYZ_MCP_SAMPLE_ODOL=... pytest` still wins.
+
+The cheap half then runs by default. The expensive half — anything that
+launches DayZ Tools or Blender, or indexes a whole corpus — carries the
+`corpus` marker and stays out of the default run, because it takes minutes
+rather than seconds:
+
+    python -m pytest -m corpus
+
+The one sample a normal machine does not already have is the vanilla layout
+corpus, because the game ships it packed. Unpack it once with this server's
+own formula, then point `DAYZ_GUI_LAYOUTS` at the result:
+
+    python -c "import subprocess; from pathlib import Path; from dayz_mcp.packer import bankrev_cmd; from dayz_mcp.paths import BANKREV_REL, find_tools; subprocess.run(bankrev_cmd(Path(find_tools()) / BANKREV_REL, Path(r'<game>/dta/gui.pbo'), Path(r'<corpus>')))"
+
+`<corpus>/gui/gui/layouts` is then the directory to name. If you regenerate
+`data/layout-vocab.json` at all, regenerate it from the same unpack, so the
+vocabulary and the parse test are talking about one build of the game.
+
+## Install
 
 Register in your MCP client:
 

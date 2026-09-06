@@ -8,6 +8,35 @@ import pytest
 from dayz_mcp.packer import DEFAULT_EXCLUDE, config_syntax_cmd, ensure_patch_link, filebank_cmd, find_excluded, find_keys, is_junction, newest_source_mtime, pack_all, pack_one, sign_cmd
 
 
+def _pbo_writing_filebank(root: Path, name: str = "MyMod", body: bytes = b"fresh pbo"):
+    def run(cmd, cwd, log_path, timeout=None):
+        out_dir = root / f"@{name}" / "addons"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{name}.pbo").write_bytes(body)
+        return 0, "FileBank ok"
+    return run
+
+
+def _mod_source(root: Path, name: str = "MyMod") -> Path:
+    src = root / name
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
+    return src
+
+
+def _stub_filebank_tools(tmp_path: Path) -> Path:
+    tools = tmp_path / "tools"
+    (tools / "Bin" / "PboUtils").mkdir(parents=True, exist_ok=True)
+    (tools / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
+    return tools
+
+
+#: The FileBank stub nine tests wrote out by hand, byte for byte.
+#: `_pbo_writing_filebank` is the same thing with a name.
+def _plain_filebank(root: Path):
+    return _pbo_writing_filebank(root, body=b"fake pbo data")
+
+
 def test_filebank_command_shape():
     cmd = filebank_cmd(Path("C:/T/FileBank.exe"), "MyMod", Path("C:/r/MyMod"), Path("C:/r/@MyMod/addons"))
     assert cmd[0].endswith("FileBank.exe")
@@ -76,15 +105,7 @@ def test_pack_one_happy_path(tmp_path, monkeypatch):
     log_path = root / "build.log"
 
     # Mock run_blocking to simulate FileBank creating the PBO
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        # Simulate FileBank behavior: create the output PBO
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path)
     assert result.name == "MyMod"
@@ -252,14 +273,7 @@ def test_pack_one_with_keys_creates_public_key_copy(tmp_path, monkeypatch):
     log_path = root / "build.log"
 
     # Mock run_blocking to create the PBO
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path)
 
@@ -291,14 +305,7 @@ def test_pack_one_with_private_key_but_no_signer(tmp_path, monkeypatch):
     log_path = root / "build.log"
 
     # Mock run_blocking to create the PBO
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path)
 
@@ -325,13 +332,7 @@ def test_pack_one_says_why_it_did_not_sign_when_there_is_no_keys_directory(tmp_p
     filebank_dir.mkdir(parents=True, exist_ok=True)
     (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, root / "build.log")
 
@@ -359,13 +360,7 @@ def test_pack_one_says_why_it_did_not_sign_when_the_keys_directory_is_empty(tmp_
     filebank_dir.mkdir(parents=True, exist_ok=True)
     (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, root / "build.log")
 
@@ -526,14 +521,7 @@ def test_pack_one_proceeds_when_cfgconvert_is_not_available(tmp_path, monkeypatc
 
     log_path = root / "build.log"
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path)
     assert result.error == ""
@@ -717,14 +705,7 @@ def test_pack_one_succeeds_with_git_present_when_exclude_list_is_empty(tmp_path,
 
     log_path = root / "build.log"
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path, exclude=[])
     assert result.error == ""
@@ -754,14 +735,7 @@ def test_pack_one_stages_and_packs_a_root_layout_mod(tmp_path, monkeypatch):
 
     log_path = root / "build.log"
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pbo = out_dir / "MyMod.pbo"
-        pbo.write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, log_path, src=root, stage=True)
 
@@ -1104,13 +1078,7 @@ def test_the_staged_copy_note_marks_reserved_omissions_apart_from_routine_ones(t
     filebank_dir.mkdir(parents=True, exist_ok=True)
     (filebank_dir / "FileBank.exe").write_text("stub", encoding="utf-8")
 
-    def fake_run_blocking(cmd, cwd, log_path_arg, timeout=None):
-        out_dir = root / "@MyMod" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "MyMod.pbo").write_text("fake pbo data", encoding="utf-8")
-        return 0, "FileBank success"
-
-    monkeypatch.setattr("dayz_mcp.packer.run_blocking", fake_run_blocking)
+    monkeypatch.setattr("dayz_mcp.packer.run_blocking", _plain_filebank(root))
 
     result = pack_one("MyMod", root, tools, root / "build.log", src=root, stage=True)
 
@@ -1279,29 +1247,6 @@ def test_pack_one_staging_dir_removed_after_success_and_after_failure(tmp_path, 
 # so a build with the key gone kept the previous signature over a brand-new pbo
 # while the result reported signed=False. A stand that verifies signatures then
 # rejects the mod, and every tool in the chain reports success.
-
-
-def _pbo_writing_filebank(root: Path, name: str = "MyMod", body: bytes = b"fresh pbo"):
-    def run(cmd, cwd, log_path, timeout=None):
-        out_dir = root / f"@{name}" / "addons"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f"{name}.pbo").write_bytes(body)
-        return 0, "FileBank ok"
-    return run
-
-
-def _mod_source(root: Path, name: str = "MyMod") -> Path:
-    src = root / name
-    src.mkdir(parents=True, exist_ok=True)
-    (src / "config.cpp").write_text("class CfgMods {};", encoding="utf-8")
-    return src
-
-
-def _stub_filebank_tools(tmp_path: Path) -> Path:
-    tools = tmp_path / "tools"
-    (tools / "Bin" / "PboUtils").mkdir(parents=True, exist_ok=True)
-    (tools / "Bin" / "PboUtils" / "FileBank.exe").write_text("stub", encoding="utf-8")
-    return tools
 
 
 def test_pack_one_removes_a_signature_it_cannot_replace(tmp_path, monkeypatch):
