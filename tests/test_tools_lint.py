@@ -185,7 +185,7 @@ def test_project_layout_classes_are_allowed_by_the_layout_lint(tmp_path):
 
 
 TOKENS_MIN = {"color": {"text": [1, 1, 1, 1], "panel": [0, 0, 0, 1]}, "font": {"body": {"size": 15}}}
-DESC = {"layout": "oz_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+DESC = {"layout": "my_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
         "body": {"label": {"name": "T", "h": 20, "text": "Hi", "color": "$text"}}}
 
 
@@ -193,7 +193,7 @@ def with_ui(root: Path, desc=DESC) -> Path:
     (root / "ui").mkdir(exist_ok=True)
     (root / "ui" / "tokens.json").write_text(_json.dumps(TOKENS_MIN), encoding="utf-8")
     (root / "ui" / "MyMod").mkdir(exist_ok=True)
-    (root / "ui" / "MyMod" / "oz_page.json").write_text(_json.dumps(desc), encoding="utf-8")
+    (root / "ui" / "MyMod" / "my_page.json").write_text(_json.dumps(desc), encoding="utf-8")
     return root
 
 
@@ -207,7 +207,7 @@ def test_a_described_layout_that_was_never_built_refuses(tmp_path):
     res = tools.mod_lint()
     stale = by_check(res, "layout-stale")
     assert len(stale) == 1 and stale[0]["severity"] == REFUSE
-    assert "has not been built" in stale[0]["message"] and stale[0]["file"] == "MyMod/gui/layouts/oz_page.layout"
+    assert "has not been built" in stale[0]["message"] and stale[0]["file"] == "MyMod/gui/layouts/my_page.layout"
 
 
 def test_a_built_layout_that_matches_its_description_is_quiet(tmp_path):
@@ -225,10 +225,10 @@ def test_a_layout_behind_its_description_refuses_with_the_line(tmp_path):
     assert tools.layout_build().ok
     changed = dict(DESC)
     changed["body"] = {"label": {"name": "T", "h": 24, "text": "Hi", "color": "$text"}}
-    (root / "ui" / "MyMod" / "oz_page.json").write_text(_json.dumps(changed), encoding="utf-8")
+    (root / "ui" / "MyMod" / "my_page.json").write_text(_json.dumps(changed), encoding="utf-8")
     res = tools.mod_lint()
     stale = by_check(res, "layout-stale")
-    assert len(stale) == 1 and "is behind ui/MyMod/oz_page.json" in stale[0]["message"]
+    assert len(stale) == 1 and "is behind ui/MyMod/my_page.json" in stale[0]["message"]
     assert stale[0]["line"] > 1 and stale[0]["hint"] == "run layout_build and commit the result"
 
 
@@ -264,7 +264,7 @@ def test_a_generated_layout_of_a_root_sourced_mod_is_not_an_orphan(tmp_path):
     assert opened.ok, opened.error
     with_ui(root)
     assert tools.layout_build().ok
-    assert (root / "gui" / "layouts" / "oz_page.layout").is_file()
+    assert (root / "gui" / "layouts" / "my_page.layout").is_file()
     res = tools.mod_lint(strict=True)
     assert by_check(res, "layout-orphan") == [] and by_check(res, "layout-stale") == []
     assert res.ok, res.error
@@ -273,12 +273,12 @@ def test_a_generated_layout_of_a_root_sourced_mod_is_not_an_orphan(tmp_path):
 def test_a_description_that_does_not_build_refuses_and_a_note_warns(tmp_path):
     open_with(tmp_path / "proj", {})
     root = tmp_path / "proj"
-    with_ui(root, {"layout": "oz_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+    with_ui(root, {"layout": "my_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
                    "body": {"sparkle": {}}})
     res = tools.mod_lint()
     desc = by_check(res, "layout-desc")
     assert len(desc) == 1 and desc[0]["severity"] == REFUSE and "unknown primitive 'sparkle'" in desc[0]["message"]
-    with_ui(root, {"layout": "oz_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+    with_ui(root, {"layout": "my_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
                    "body": {"label": {"name": "T", "h": 20, "color": [1, 0, 0, 1]}}})
     assert tools.layout_build().ok
     res = tools.mod_lint()
@@ -288,13 +288,13 @@ def test_a_description_that_does_not_build_refuses_and_a_note_warns(tmp_path):
     # a finding nobody can act on.
     assert len(desc) == 1 and desc[0]["severity"] == WARN
     assert desc[0]["message"] == "root.0: color given as a literal -- use a $color token"
-    assert desc[0]["file"] == "ui/MyMod/oz_page.json"
+    assert desc[0]["file"] == "ui/MyMod/my_page.json"
 
 
 def test_an_unreadable_layout_is_a_warning_not_a_crash(tmp_path, monkeypatch):
     """The stale loop re-reads disk a second time (build_project's own compare
     already succeeded) to compute the first-difference line. A lock acquired
-    in between must not crash mod_lint -- so this test makes oz_page.layout
+    in between must not crash mod_lint -- so this test makes my_page.layout
     genuinely stale (report.written), the only way the second read is ever
     reached."""
     open_with(tmp_path / "proj", {})
@@ -303,10 +303,10 @@ def test_an_unreadable_layout_is_a_warning_not_a_crash(tmp_path, monkeypatch):
     assert tools.layout_build().ok
     changed = dict(DESC)
     changed["body"] = {"label": {"name": "T", "h": 24, "text": "Hi", "color": "$text"}}
-    (root / "ui" / "MyMod" / "oz_page.json").write_text(_json.dumps(changed), encoding="utf-8")
+    (root / "ui" / "MyMod" / "my_page.json").write_text(_json.dumps(changed), encoding="utf-8")
     from dayz_mcp.tools import lint as lint_tool
     real = lint_tool._read_text
-    target = root / "MyMod" / "gui" / "layouts" / "oz_page.layout"
+    target = root / "MyMod" / "gui" / "layouts" / "my_page.layout"
 
     def locked(path):
         if Path(path) == target:
@@ -317,7 +317,7 @@ def test_an_unreadable_layout_is_a_warning_not_a_crash(tmp_path, monkeypatch):
     res = tools.mod_lint()
     found = by_check(res, "unreadable")
     assert len(found) == 1 and found[0]["severity"] == WARN and "locked" in found[0]["message"]
-    assert found[0]["file"] == "MyMod/gui/layouts/oz_page.layout"
+    assert found[0]["file"] == "MyMod/gui/layouts/my_page.layout"
     assert by_check(res, "layout-stale") == [] and by_check(res, "layout-orphan") == []
 
 

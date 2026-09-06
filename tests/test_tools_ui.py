@@ -1471,18 +1471,18 @@ def test_layout_build_generates_the_project_layouts(tmp_path):
     (root / "ui").mkdir()
     (root / "ui" / "tokens.json").write_text(json.dumps({"color": {"text": [1, 1, 1, 1]}, "font": {"body": {"size": 15}}}), encoding="utf-8")
     (root / "ui" / "MyMod").mkdir()
-    (root / "ui" / "MyMod" / "oz_page.json").write_text(json.dumps(
-        {"layout": "oz_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+    (root / "ui" / "MyMod" / "my_page.json").write_text(json.dumps(
+        {"layout": "my_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
          "body": {"label": {"name": "T", "h": 20, "text": "Hi", "color": "$text"}}}), encoding="utf-8")
     session.reset()
     assert tools.project_open(str(root)).ok
     res = tools.layout_build()
     assert res.ok, res.error
-    assert res.data["written"] == ["MyMod/gui/layouts/oz_page.layout"]
-    assert res.data["descriptions"] == ["ui/MyMod/oz_page.json"]
-    assert (root / "MyMod" / "gui" / "layouts" / "oz_page.layout").is_file()
+    assert res.data["written"] == ["MyMod/gui/layouts/my_page.layout"]
+    assert res.data["descriptions"] == ["ui/MyMod/my_page.json"]
+    assert (root / "MyMod" / "gui" / "layouts" / "my_page.layout").is_file()
     again = tools.layout_build()
-    assert again.data["written"] == [] and again.data["unchanged"] == ["MyMod/gui/layouts/oz_page.layout"]
+    assert again.data["written"] == [] and again.data["unchanged"] == ["MyMod/gui/layouts/my_page.layout"]
     assert tools.layout_build(mod="Other").ok is False
 
 

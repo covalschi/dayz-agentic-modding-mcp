@@ -86,7 +86,13 @@ def offending_tokens(text: str, *, is_python: bool = False) -> set[str]:
 # A mod FOLDER is only one shape a project name takes. A class prefix, a page
 # file name or a repository name is another, and three of them reached this
 # repository -- one of them a module docstring in `src/` -- while the guard
-# above watched for `@`-prefixed folders alone. Case-SENSITIVE and whole
+# above watched for `@`-prefixed folders alone.
+#
+# The lowercase half matches the whole prefix, not one known suffix of it. It
+# was written as the prefix plus one specific device suffix, and a set of the
+# owner's layout-file names -- same prefix, three other suffixes -- walked
+# straight past it in this suite's own fixtures for as long as that list, and
+# not the prefix, was the rule. Case-SENSITIVE and whole
 # tokens: these are spellings, not words, and a lowercase `oz` on its own is
 # ordinary text.
 #
@@ -96,7 +102,7 @@ def offending_tokens(text: str, *, is_python: bool = False) -> set[str]:
 # generator rather than by `"Open" + "Zone..."` on purpose -- the compiler
 # folds two adjacent literals into one, and the whole token would then sit
 # spelled out in this file's own .pyc, where a grep across the tree finds it.
-OWNER_PREFIXES = (("Open", r"Zone\w*"), ("OZ", r"_\w+"), ("oz", r"_pda\w*"))
+OWNER_PREFIXES = (("Open", r"Zone\w*"), ("OZ", r"_\w+"), ("oz", r"_\w+"))
 OWNER_TOKEN = re.compile("|".join(r"\b" + head + tail for head, tail in OWNER_PREFIXES))
 #: Where the owner's prefixes are swept: the server, its tests, and the one
 #: document that describes it to a stranger. Plan folders and notes are the
