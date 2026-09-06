@@ -293,7 +293,49 @@ def _compile_dialog(pid: int) -> str:
     return said
 
 
-def mission_module_compiled(profiles: Path, since: float) -> bool:
+class LogTails:
+    """What each log has GROWN by since this reader last looked at it.
+
+    A boot watcher polls its logs every two seconds for up to 420 s, and the
+    logs grow the whole time. Re-reading each one whole on every poll makes
+    the total bytes read grow with the SQUARE of the boot time -- on the same
+    disk the engine is loading a world from -- to re-examine text that was
+    already examined up to 200 times. Keeping a byte offset per file turns
+    that back into reading each byte once.
+
+    The offset only ever advances to the last complete LINE, so a marker that
+    happens to straddle two polls is still seen whole by the poll that gets
+    its newline. A file that has SHRUNK since the last look was replaced or
+    truncated (a new boot writing over the same name), so its offset goes back
+    to the start rather than into the middle of unrelated text.
+
+    Every failure answers "" -- a log being written while it is read is the
+    ordinary case here, not a fault, and the next poll gets what this one
+    missed. One instance per watcher: the offsets belong to one boot's reading
+    of one set of files, and must not be shared with the next boot's.
+    """
+
+    def __init__(self) -> None:
+        self._at: dict[Path, int] = {}
+
+    def fresh(self, log: Path) -> str:
+        start = self._at.get(log, 0)
+        try:
+            if log.stat().st_size < start:
+                start = 0
+            with log.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except OSError:
+            return ""
+        cut = chunk.rfind(b"\n")
+        if cut < 0:
+            return ""
+        self._at[log] = start + cut + 1
+        return chunk[:cut + 1].decode("utf-8", errors="replace")
+
+
+def mission_module_compiled(profiles: Path, since: float, tails: LogTails | None = None) -> bool:
     """Has THIS run compiled its mission module yet?
 
     Measured on this machine: the port binds about 17 s after spawn and the
@@ -305,10 +347,18 @@ def mission_module_compiled(profiles: Path, since: float) -> bool:
 
     Only logs written by this run are read, by the same `since` cutoff
     log_verdict uses, so a previous boot's log cannot answer for this one.
+
+    With a `LogTails` only what each log has grown by is read -- the shape a
+    caller polling every two seconds needs. Without one every log is read
+    whole, which is what a caller asking once wants.
     """
     for log in profiles.glob("script_*.log"):
         try:
             if not belongs_to_run(log.stat().st_mtime, since):
+                continue
+            if tails is not None:
+                if MISSION_MODULE_LINE in tails.fresh(log):
+                    return True
                 continue
             if MISSION_MODULE_LINE in log.read_text(encoding="utf-8", errors="replace"):
                 return True
@@ -915,13 +965,16 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 deadline = time.time() + min(timeout, PORT_READY_WAIT_SECONDS)
                 port_bound = False
                 scripts_up = False
+                # Read each log's new bytes only: this loop runs every two
+                # seconds while the logs grow -- see LogTails.
+                tails = LogTails()
                 while time.time() < deadline:
                     stopper = _compile_dialog(pid)
                     if stopper:
                         store.fail(job.id, stopper)
                         return
                     port_bound = port_bound or pid in udp_port_holders(port)
-                    scripts_up = scripts_up or mission_module_compiled(profiles, since)
+                    scripts_up = scripts_up or mission_module_compiled(profiles, since, tails)
                     if port_bound and scripts_up:
                         store.finish(
                             job.id, 0,
@@ -969,6 +1022,10 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 return
             deadline = time.time() + timeout
             port_bound = False
+            # Same reason as the branch above: the ready line is looked for
+            # every two seconds for as long as `timeout` allows (420 s by
+            # default), and the logs grow the whole time.
+            tails = LogTails()
             while time.time() < deadline:
                 if not is_alive(pid, image=srv_image):
                     store.fail(job.id, "the server process died before it was ready")
@@ -987,7 +1044,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                 for log in profiles.glob("script_*.log"):
                     if not belongs_to_run(log.stat().st_mtime, since):
                         continue
-                    if marker and marker in log.read_text(encoding="utf-8", errors="replace"):
+                    if marker and marker in tails.fresh(log):
                         store.add_artifact(job.id, log)
                         bound_note = f"; udp/{port} bound" if port_bound else ""
                         store.finish(
