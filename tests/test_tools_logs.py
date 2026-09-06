@@ -178,3 +178,43 @@ def test_client_verdict_does_not_answer_for_a_run_that_produced_nothing(tmp_path
     # The earlier run's log is still on disk and still readable -- through its
     # own job, which is where a question about it belongs.
     assert (lifecycle.client_profile_dir(first) / "script_1.log").exists()
+
+
+# --- log_tail reads from the end -------------------------------------------
+
+
+def test_the_tail_of_a_big_log_is_read_from_the_end_not_from_the_start(tmp_path):
+    """log_tail is called repeatedly WHILE a boot runs, on a file that grows
+    the whole time and reaches megabytes. Reading it whole to answer with
+    fifty lines made every call cost the size of the log.
+
+    A line that straddles a block boundary is the thing this can get wrong,
+    so the log here is deliberately much bigger than one block and its lines
+    are deliberately uneven.
+    """
+    from dayz_mcp.tools.logs import _TAIL_BLOCK, _tail_lines
+
+    log = tmp_path / "script_big.log"
+    lines = [f"line {i} " + "x" * (i % 197) for i in range(20_000)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert log.stat().st_size > _TAIL_BLOCK * 4
+
+    assert _tail_lines(log, 50, "") == lines[-50:]
+    # A pattern whose matches are all near the START still has to be found,
+    # which is the one case that genuinely reads the whole file.
+    assert _tail_lines(log, 50, "line 3 ") == [ln for ln in lines if "line 3 " in ln][-50:]
+    # Asking for more lines than exist is the whole file, in order.
+    assert _tail_lines(log, len(lines) * 2, "") == lines
+
+
+def test_the_tail_of_a_short_or_missing_log_is_answered_not_raised(tmp_path):
+    from dayz_mcp.tools.logs import _tail_lines
+
+    short = tmp_path / "short.log"
+    short.write_text("a\nb\n", encoding="utf-8")
+    assert _tail_lines(short, 50, "") == ["a", "b"]
+
+    empty = tmp_path / "empty.log"
+    empty.write_bytes(b"")
+    assert _tail_lines(empty, 50, "") == []
+    assert _tail_lines(tmp_path / "not-there.log", 50, "") == []

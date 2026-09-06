@@ -570,9 +570,8 @@ def _finish(store, job_id: str, log_dir: Path, payload: dict, code: int,
         store.add_artifact(job_id, artifact)
     except (OSError, TypeError, ValueError):
         pass
-    store.finish(job_id, code, summary=summary)
-    if error:
-        store.fail(job_id, error + (f" -- {hint}" if hint else ""))
+    store.finish(job_id, code, summary=summary,
+                 error=(error + (f" -- {hint}" if hint else "")) if error else "")
 
 
 # ----------------------------------------------------------------- the export
@@ -740,8 +739,10 @@ def _run_export(
         pass
 
     if not result.ok:
-        store.finish(job_id, 1, summary=f"blender {result.seconds:.1f} s: {result.error}")
-        store.fail(job_id, result.error + (f" -- {result.hint}" if result.hint else ""))
+        store.finish(
+            job_id, 1, summary=f"blender {result.seconds:.1f} s: {result.error}",
+            error=result.error + (f" -- {result.hint}" if result.hint else ""),
+        )
         return
 
     parts = [

@@ -37,6 +37,10 @@ class JobStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        #: Signalled whenever a job reaches a terminal status, so `wait` can
+        #: sleep on it instead of polling. Shares `_lock`, because the thing it
+        #: announces is exactly what that lock protects.
+        self._settled = threading.Condition(self._lock)
         self._seq = 0
 
     def _file(self, job_id: str) -> Path:
@@ -103,16 +107,29 @@ class JobStore:
                 return None
             for k, v in fields.items():
                 setattr(job, k, v)
+            if job.status in (DONE, FAILED):
+                self._settled.notify_all()
         self._persist(job)
         return job
 
     def start(self, job_id: str) -> Job | None:
         return self._update(job_id, status=RUNNING)
 
-    def finish(self, job_id: str, exit_code: int, summary: str = "") -> Job | None:
+    def finish(self, job_id: str, exit_code: int, summary: str = "",
+               error: str = "") -> Job | None:
+        """Resolve a job -- ONCE, with everything it is resolved with.
+
+        `error` belongs here rather than in a `fail` call after this one: two
+        calls means the job is already terminal, and already visible to a
+        waiter, between them. A caller that reads it in that window sees
+        "failed" with no reason at all, which is precisely the shape this
+        project exists to abolish -- and it is not a theoretical window, since
+        `wait` returns the moment the status turns terminal.
+        """
         status = DONE if exit_code == 0 else FAILED
         return self._update(
-            job_id, status=status, exit_code=exit_code, summary=summary, finished=time.time()
+            job_id, status=status, exit_code=exit_code, summary=summary,
+            error=error, finished=time.time(),
         )
 
     def fail(self, job_id: str, error: str) -> Job | None:
@@ -127,10 +144,21 @@ class JobStore:
         self._persist(job)
 
     def wait(self, job_id: str, timeout: float) -> Job | None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            job = self._jobs.get(job_id)
-            if job is None or job.status in (DONE, FAILED):
-                return job
-            time.sleep(0.1)
-        return self._jobs.get(job_id)
+        """Block until the job reaches a terminal status, or `timeout` passes.
+
+        On a condition, not on a poll. A job's status only ever changes under
+        `_lock`, so the thread that changes it can say so; polling at 10 Hz
+        woke this thread up to 6000 times over one long boot to re-read a
+        value that had not changed, and answered up to 0.1 s late when it
+        finally had.
+        """
+        deadline = time.monotonic() + timeout
+        with self._settled:
+            while True:
+                job = self._jobs.get(job_id)
+                if job is None or job.status in (DONE, FAILED):
+                    return job
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return job
+                self._settled.wait(remaining)

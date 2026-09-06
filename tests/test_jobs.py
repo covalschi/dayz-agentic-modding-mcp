@@ -1,6 +1,6 @@
 import threading
 import time
-from dayz_mcp.jobs import JobStore
+from dayz_mcp.jobs import DONE, FAILED, JobStore
 
 
 def test_new_job_is_queued(tmp_path):
@@ -129,3 +129,45 @@ def test_load_skips_malformed_job_json(tmp_path):
     # Bad job should not be in the registry (silently skipped)
     got_bad = revived.get("bad-job")
     assert got_bad is None
+
+
+def test_a_job_is_never_visible_as_failed_without_its_reason(tmp_path):
+    """`wait` returns the instant a job turns terminal, so anything that
+    resolves a job in two steps -- finish() and then fail() to attach the
+    message -- leaves a window where the answer is "failed" and the reason is
+    the empty string. That is the exact shape this whole product exists to
+    abolish, and the asset build really did resolve its jobs that way.
+    """
+    store = JobStore(tmp_path)
+    job = store.create("build")
+    store.start(job.id)
+
+    seen: dict = {}
+
+    def watcher():
+        seen["job"] = store.wait(job.id, timeout=10)
+
+    reader = threading.Thread(target=watcher)
+    reader.start()
+    store.finish(job.id, 1, summary="binarize said nothing useful", error="C4 refused it")
+    reader.join(10)
+
+    assert seen["job"].status == FAILED
+    assert seen["job"].error == "C4 refused it"
+
+
+def test_wait_returns_promptly_rather_than_on_the_next_poll(tmp_path):
+    """It used to sleep 0.1 s between reads, so every answer was up to a tenth
+    of a second late and a ten-minute wait woke six thousand times to re-read
+    a value that had not changed."""
+    store = JobStore(tmp_path)
+    job = store.create("build")
+    store.start(job.id)
+
+    threading.Timer(0.02, lambda: store.finish(job.id, 0, summary="done")).start()
+    started = time.monotonic()
+    got = store.wait(job.id, timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert got.status == DONE
+    assert elapsed < 0.09, f"waited {elapsed:.3f}s for an event 0.02s away"

@@ -72,6 +72,51 @@ def log_verdict(source: str = "server", since: float | None = None) -> Result:
     return ok(data)
 
 
+#: How much of a log to read at a time when only its end is wanted. 64 KB is
+#: several hundred lines of an engine log, so one block almost always answers.
+_TAIL_BLOCK = 64 * 1024
+
+
+def _tail_lines(log: Path, n: int, pattern: str) -> list[str]:
+    """The last `n` lines of `log` (matching `pattern`, if given), read from
+    the END rather than from the start.
+
+    This is the tool an agent calls repeatedly WHILE a boot is running, on a
+    file that grows the whole time -- and a DayZ script log reaches megabytes.
+    Reading it whole to answer with fifty lines made every call cost the size
+    of the log; reading backwards in blocks costs the size of the answer,
+    except when a `pattern` matches nothing near the end and the whole file
+    genuinely has to be searched.
+
+    Blocks are ACCUMULATED and re-split rather than split one at a time and
+    concatenated: a block boundary lands mid-line, and a line split across two
+    blocks would otherwise be reported as two lines, neither of them real.
+    While the read has not reached byte 0, the first line of what has been
+    read so far is still incomplete, so it is dropped -- an earlier block owns
+    its beginning.
+    """
+    try:
+        with log.open("rb") as fh:
+            end = log.stat().st_size
+            data = b""
+            found: list[str] = []
+            while end > 0:
+                start = max(0, end - _TAIL_BLOCK)
+                fh.seek(start)
+                data = fh.read(end - start) + data
+                end = start
+                found = data.decode("utf-8", errors="replace").splitlines()
+                if start > 0:
+                    found = found[1:]
+                if pattern:
+                    found = [ln for ln in found if pattern in ln]
+                if len(found) >= n:
+                    break
+    except OSError:
+        return []
+    return found[-n:]
+
+
 def log_tail(source: str = "server", pattern: str = "", n: int = 50) -> Result:
     """The last `n` lines of the newest log, optionally only the lines
     containing `pattern`.
@@ -87,7 +132,5 @@ def log_tail(source: str = "server", pattern: str = "", n: int = 50) -> Result:
     log = _newest_log(source)
     if log is None:
         return fail(f"no {source} log found", hint=NO_LOG_HINT.get(source, NO_LOG_HINT["server"]))
-    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
-    if pattern:
-        lines = [ln for ln in lines if pattern in ln]
-    return ok({"log": str(log), "lines": lines[-n:]})
+    lines = _tail_lines(log, n, pattern)
+    return ok({"log": str(log), "lines": lines})
