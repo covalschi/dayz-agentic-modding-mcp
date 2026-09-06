@@ -69,14 +69,6 @@ class PaaError(Exception):
 
 
 @dataclass(frozen=True)
-class PaaInfo:
-    path: str
-    size: int
-    signature: str
-    format: str
-
-
-@dataclass(frozen=True)
 class ConvertResult:
     """The outcome of one `ImageToPAA` run, judged on the artifact.
 
@@ -101,22 +93,6 @@ class ConvertResult:
 def paa_format(data: bytes) -> str:
     """The format named by the first two bytes, or `UNKNOWN`."""
     return PAA_FORMATS.get(bytes(data[:2]), UNKNOWN) if len(data) >= 2 else UNKNOWN
-
-
-def read_paa(path: str | os.PathLike[str]) -> PaaInfo:
-    """Read a paa's header off the disk. Refuses missing and empty by name."""
-    p = Path(path)
-    try:
-        with p.open("rb") as fh:
-            head = fh.read(2)
-        size = p.stat().st_size
-    except FileNotFoundError as exc:
-        raise PaaError(f"{p} is not there: nothing was converted into it") from exc
-    except OSError as exc:
-        raise PaaError(f"{p} cannot be read: {exc}") from exc
-    if size == 0:
-        raise PaaError(f"{p} is empty: the conversion wrote a file and no image into it")
-    return PaaInfo(path=str(p), size=size, signature=head.hex(), format=paa_format(head))
 
 
 def expected_format(name: str) -> str:

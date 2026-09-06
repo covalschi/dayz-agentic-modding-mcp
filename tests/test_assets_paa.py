@@ -26,7 +26,6 @@ from dayz_mcp.assets.paa import (
     convert,
     expected_format,
     paa_format,
-    read_paa,
 )
 from dayz_mcp.paths import IMAGETOPAA_REL, find_tools
 
@@ -109,29 +108,6 @@ def test_an_unrecognised_signature_is_UNKNOWN_rather_than_a_guess():
     assert paa_format(b"\x00\x00") == UNKNOWN
     assert paa_format(b"\x01") == UNKNOWN
     assert paa_format(b"") == UNKNOWN
-
-
-def test_read_paa_reports_the_signature_as_hex_the_way_a_dump_shows_it(tmp_path):
-    p = tmp_path / "thing_co.paa"
-    p.write_bytes(b"\x01\xff" + b"\x00" * 30)
-    info = read_paa(p)
-    assert info.signature == "01ff"
-    assert info.format == DXT1
-    assert info.size == 32
-    assert info.path == str(p)
-
-
-def test_a_zero_length_paa_is_refused_by_name(tmp_path):
-    p = tmp_path / "empty.paa"
-    p.write_bytes(b"")
-    with pytest.raises(PaaError) as excinfo:
-        read_paa(p)
-    assert "empty" in str(excinfo.value).lower()
-
-
-def test_a_missing_paa_is_refused_by_name(tmp_path):
-    with pytest.raises(PaaError):
-        read_paa(tmp_path / "nothing.paa")
 
 
 # ------------------------------------------------------- suffix drives format

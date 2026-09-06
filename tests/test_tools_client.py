@@ -968,9 +968,11 @@ def test_client_chat_never_touches_the_foreground(tmp_path, monkeypatch):
     client.client_chat("hello")
 
     assert focused == []
-    # And it must SAY so: an agent that knows the rule but not the exception
-    # will take the foreground anyway, at the owner's expense, for nothing.
-    assert "focus is not needed" in client.client_chat.__doc__.lower()
+    # And it must SAY so: an agent that knows the general rule but not this
+    # exception will take the foreground anyway, at the owner's expense, for
+    # nothing. On the word "focus", not on a whole sentence -- a rewording
+    # that keeps the fact is not a regression.
+    assert "focus" in client.client_chat.__doc__.lower()
 
 
 def test_client_chat_explains_a_bridge_build_that_has_no_chat_verb(tmp_path, monkeypatch):

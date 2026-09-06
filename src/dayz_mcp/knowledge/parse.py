@@ -54,7 +54,7 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .calls import CALL, NEW, Call, find_calls
+from .calls import Call, find_calls
 
 CLASS = "class"
 METHOD = "method"
@@ -582,11 +582,6 @@ class _Parser:
 def parse_source(source: str, file: str = "") -> list[Declaration]:
     """Every declaration in one Enforce Script source, in the order written."""
     return _walk(source, file, collect_calls=False).out
-
-
-def parse_calls(source: str, file: str = "") -> list[Call]:
-    """Every call site in one Enforce Script source, in the order written."""
-    return _walk(source, file, collect_calls=True).calls
 
 
 def parse_all(source: str, file: str = "") -> tuple[list[Declaration], list[Call]]:

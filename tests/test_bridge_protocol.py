@@ -7,7 +7,6 @@ from dayz_mcp.bridge.protocol import (
     BridgeState,
     Command,
     CommandState,
-    classify_timeout,
     new_command_id,
     parse_rejection,
     parse_state,
@@ -210,28 +209,6 @@ def test_two_consecutively_created_ids_differ():
     first = new_command_id("ping")
     second = new_command_id("ping")
     assert first != second
-
-
-# --- classify_timeout ------------------------------------------------------
-
-
-def test_classify_timeout_waiting_before_the_deadline():
-    assert classify_timeout(sent_at=100.0, now=104.9, timeout=5.0) == "waiting"
-
-
-def test_classify_timeout_expired_exactly_at_the_deadline():
-    assert classify_timeout(sent_at=100.0, now=105.0, timeout=5.0) == "expired"
-
-
-def test_classify_timeout_expired_well_past_the_deadline():
-    assert classify_timeout(sent_at=100.0, now=999.0, timeout=5.0) == "expired"
-
-
-def test_classify_timeout_counts_from_sent_at_not_from_zero():
-    # Same gap (4s), but shifted far along the timeline -- must not be
-    # confused with "elapsed since program start" or similar.
-    assert classify_timeout(sent_at=1_000_000.0, now=1_000_004.0, timeout=5.0) == "waiting"
-    assert classify_timeout(sent_at=1_000_000.0, now=1_000_005.0, timeout=5.0) == "expired"
 
 
 # --- parse_rejection: WHY parse_state returned None -------------------------

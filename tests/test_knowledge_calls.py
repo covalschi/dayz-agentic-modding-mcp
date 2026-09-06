@@ -7,11 +7,12 @@ comments, and inside string literals, and a sweep counts all three.
 """
 
 from dayz_mcp.knowledge.calls import Call
-from dayz_mcp.knowledge.parse import parse_calls
+from dayz_mcp.knowledge.parse import parse_all
 
 
 def sites(source: str, file: str = "test.c") -> list[Call]:
-    return parse_calls(source, file)
+    # parse_all is the one the index builder uses: one walk, both answers.
+    return parse_all(source, file)[1]
 
 
 def named(source: str, name: str) -> list[Call]:
