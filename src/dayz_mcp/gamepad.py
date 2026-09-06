@@ -144,8 +144,9 @@ PLUG_IN_NOTICE = (
     "A virtual controller is now attached to this machine, and that is visible "
     "inside the game: DayZ switches its on-screen hints to controller mode as soon "
     "as a controller appears (measured 2026-08-21). Treat it as a change to the "
-    "system under test and call `close_pad` when the session is done, so the owner "
-    "is not left with a phantom controller plugged in."
+    "system under test and call `client_stop` when the session is done -- that is "
+    "the tool that unplugs this device -- so the owner is not left with a phantom "
+    "controller plugged in."
 )
 
 #: The other thing WINDOWS does when a controller appears, and the reason this
@@ -339,8 +340,17 @@ def _device_data(created: bool) -> dict:
         "open_seconds": round(max(0.0, time.monotonic() - opened_monotonic), 1),
     }
     if created:
-        data["side_effect"] = PLUG_IN_NOTICE
-        data["windows_note"] = GAME_BAR_NOTICE
+        _attach_notices(data)
+    return data
+
+
+def _attach_notices(data: dict) -> dict:
+    """The two things a caller must hear the moment a controller appears: what
+    the game does about it, and what Windows does about it. One place, because
+    they are one event and answering with only half of it has already been the
+    bug once."""
+    data["side_effect"] = PLUG_IN_NOTICE
+    data["windows_note"] = GAME_BAR_NOTICE
     return data
 
 
@@ -449,9 +459,9 @@ _STICK_HINT = (
 
 _RELEASE_HINT = (
     "Check that the virtual device is still present (ViGEmBus running, no driver "
-    "update in progress). Call `neutral` to force everything back to rest; if that "
-    "also fails, `close_pad` unplugs the device entirely, which stops the game from "
-    "seeing any input at all. The device also disappears with this process."
+    "update in progress). `client_stop` unplugs the device entirely, which releases "
+    "whatever is held and stops the game from seeing any input at all; it is the "
+    "only tool that can, and the device also disappears with this process."
 )
 
 
@@ -505,8 +515,7 @@ def _with_open_notice(data: dict, created: bool) -> dict:
     """
     data["opened"] = created
     if created:
-        data["side_effect"] = PLUG_IN_NOTICE
-        data["windows_note"] = GAME_BAR_NOTICE
+        _attach_notices(data)
     return data
 
 
@@ -593,11 +602,6 @@ _TRIGGER_HINT = (
     f"value is trigger travel between 0 and {TRIGGER_LIMIT}: 0 is at rest, 1 is "
     f"fully depressed. Triggers are named {' and '.join(TRIGGERS)}."
 )
-
-
-def trigger_names() -> list[str]:
-    """Every accepted `trigger` name. The tool layer shows this to the agent."""
-    return list(TRIGGERS)
 
 
 def trigger(which, value=TRIGGER_LIMIT, seconds=DEFAULT_PRESS_SECONDS) -> Result:

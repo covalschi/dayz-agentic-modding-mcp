@@ -25,11 +25,11 @@ worse than one that says so:
    which is indistinguishable from "this mod has no interface". That case is
    refused by name instead.
 
-NOTHING HERE HAS BEEN RUN AGAINST A LIVE CLIENT. The owner's instruction for
-this phase was not to start the stand. Every signature comes from the game's
-sources and every mechanism has unit tests, but "it compiles and the tests pass"
-is not "it works", and the spec keeps the list of what a first live run has to
-settle.
+These tools HAVE been run against a live client: the window scale (s = H/1080,
+exact), the zero-rectangle-before-the-first-layout-pass rule, the 300-node walk
+ceiling and the post-connect probe miss are all measurements taken on the stand
+on 2026-09-03/04, and the constants below cite them where they are set. What is
+still assumed rather than measured is called out at the line that assumes it.
 """
 from __future__ import annotations
 

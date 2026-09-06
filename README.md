@@ -78,7 +78,7 @@ in its notes.
 | `project_open(path)` | read the profile, discover the game and tools, report what is missing |
 | `project_status()` | current project, running server, recent jobs |
 | `mod_build()` | pack and sign every declared mod; returns a job id. Refuses a second build of the same project while one is still running |
-| `server_start(timeout)` | start the test server, finish when it is ready. **Refuses if the mission the config names is not under `<game>/mpmissions`** — the engine looks for missions beside the executable being run, not beside the `-config`. Returns the `pid` straight away — the process is spawned before the call returns, so the very next tool already sees a running server. Refuses if the game port is already held by someone else, and refuses on the spot if the image cannot be launched. Readiness comes from `expect.ready_line` when declared, otherwise from **two** engine signals together — the port bound AND the mission module compiled. The port binds about 17 s before the scripts do, and a boot called ready in between is listening with no mission: it answers queries and refuses every player. The job summary names which |
+| `server_start(timeout)` | start the test server, finish when it is ready. **Refuses if the mission the config names is not under `mpmissions` beside the executable being launched** (`machine.server` when one is declared, the game install otherwise) — the engine looks for missions beside the executable being run, not beside the `-config`. Returns the `pid` straight away — the process is spawned before the call returns, so the very next tool already sees a running server. Refuses if the game port is already held by someone else, and refuses on the spot if the image cannot be launched. Readiness comes from `expect.ready_line` when declared, otherwise from **two** engine signals together — the port bound AND the mission module compiled. The port binds about 17 s before the scripts do, and a boot called ready in between is listening with no mission: it answers queries and refuses every player. The job summary names which |
 | `server_status(pulse_seconds)` | pid, whether the process is alive, whether the log is growing (sampled `pulse_seconds` apart), and how long it has been stalled |
 | `server_stop(pid)` | stop the server this session started (optional pid for orphaned servers) |
 | `server_signatures(value)` | read — or deliberately change — the stand's `verifySignatures`. With no argument it only reports. It edits **only** the config the profile names as this stand's, refuses one that resolves outside `machine.stand_root`, refuses while a server is running against it, keeps the file's comments and line endings, and reads the value back out of the file afterwards |
@@ -159,7 +159,7 @@ the URI a handler that does nothing.
 
 **Signatures, and why the engine's own message sends you the wrong way.** Under
 `verifySignatures = 2` a stand refuses every client with code 118 and *"missing
-`dtain.pbo`"* — a vanilla file name, with no mention of signatures at all. The
+`dta\bin.pbo`"* — a vanilla file name, with no mention of signatures at all. The
 cause is usually the keyring: this tool launches the diagnostic executable out of
 the CLIENT install, so the engine reads `keys` beside *that* executable, while
 `dayz.bikey` — the key that signs the game's own pbos — ships with the separate
@@ -285,6 +285,14 @@ addressed to another session (or none) without executing it. A command written
 while the stand was down can therefore never fire into a freshly booted world.
 The tools stamp the session automatically — it only matters if you write the
 mailbox by hand.
+
+**Measured on a live stand, three boots.** `world_time_set(hour=3, minute=7)`
+moved the clock to `2026-09-20 03:07` and left the date where it was;
+`world_weather_set("fog", 0.9, seconds=2)` took the published fog from 0.085 to
+0.900 and held it; `world_entities(pos="7500 0 7500", radius=150, limit=5)`
+listed 5 of 171 objects with `truncated: true`. Distances came back at 320 m
+for a 150 m radius until they were made horizontal, which is what the engine's
+own radius test measures.
 
 ### Actions, and why there is no verb dictionary
 
@@ -500,14 +508,6 @@ a full disk.
 | `knowledge_overrides` | 4.2 ms |
 | `knowledge_callers`, 23 call sites out of 113 703 | 0.38 ms of query |
 | `mod_lint` on a 76-file mod | 277 ms of text checks, 7 ms of index checks |
-
-Measured on a live stand, three boots: `world_time_set(hour=3, minute=7)` moved
-the clock to `2026-09-20 03:07` and left the date where it was;
-`world_weather_set("fog", 0.9, seconds=2)` took the published fog from 0.085 to
-0.900 and held it; `world_entities(pos="7500 0 7500", radius=150, limit=5)`
-listed 5 of 171 objects with `truncated: true`. Distances came back at 320 m
-for a 150 m radius until they were made horizontal, which is what the engine's
-own radius test measures.
 | `knowledge_show`, a class with 400 members and its ancestry | 6.8 ms |
 | `knowledge_status`, all three layers measured | 41 ms (110 ms on the first call after a build) |
 

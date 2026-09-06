@@ -61,7 +61,7 @@ from ..bridge.channel import Channel
 from ..errors import Result, fail, ok
 from ..jobs import QUEUED, RUNNING
 from ..paths import GAME_PROBE
-from ..procs import is_alive, pids_of, spawn, stop, udp_port_holders
+from ..procs import adopt, is_alive, pids_of, spawn, stop, udp_port_holders
 from ..verdict import build_verdict
 from . import session
 from .lifecycle import (
@@ -120,7 +120,11 @@ BE_LAUNCHER = "DayZ_BE.exe"
 # How long the launcher gets to produce a game process. Generous: it verifies
 # its own files first, and a slow disk has been seen to take a while.
 BE_HANDOFF_SECONDS = 60.0
-BE_HANDOFF_POLL = 0.5
+# Every poll of this loop spawns `tasklist` (~230 ms measured here) to list the
+# game's processes, so at 0.5 s it spent a third of its own wall clock inside
+# process listings, up to 120 of them for one launch. The launcher takes tens
+# of seconds; two is a fine grain for an event on that scale.
+BE_HANDOFF_POLL = 2.0
 
 
 def _adopt_launched_game(image: str, before: set[int], deadline: float) -> int:
@@ -894,6 +898,12 @@ def client_start(
                         "check whether it is waiting for something",
                     )
                     return
+                # Nothing spawned this one, so nothing holds a handle on it --
+                # and every ui_* command, every client_status and this very
+                # loop ask whether it is still alive. Take a handle now, so
+                # those answers cost a syscall instead of a `tasklist`, and so
+                # the pid cannot be recycled out from under them.
+                adopt(pid, image)
 
             session.set_client_pid(pid, image)
             deadline = time.time() + timeout

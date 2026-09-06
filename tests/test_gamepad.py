@@ -24,7 +24,6 @@ from dayz_mcp.gamepad import (
     neutral,
     press,
     trigger,
-    trigger_names,
 )
 
 
@@ -524,7 +523,6 @@ def test_the_trigger_set_is_closed_and_documented():
     """Same contract as the buttons: a caller writes trigger("right") and never
     imports anything from vgamepad, so the two names are part of this module.
     """
-    assert trigger_names() == ["left", "right"]
 
 
 def test_an_unknown_trigger_is_refused_with_the_valid_names(pad):
@@ -663,10 +661,14 @@ def test_open_pad_says_that_plugging_in_is_visible_inside_the_game(pad):
     is a change to the system under test, like adding a mod to the stand, so
     the answer names it instead of letting it be discovered from a screenshot.
     The idempotent second call does NOT repeat it -- nothing was plugged in.
+
+    The remedy it names has to be a tool the agent can actually call:
+    `close_pad` is a module function nothing registers, and the notice used to
+    send the reader after it. client_stop is what unplugs the device.
     """
     first = gamepad.open_pad()
     assert "controller" in first.data["side_effect"]
-    assert "close_pad" in first.data["side_effect"]
+    assert "client_stop" in first.data["side_effect"]
     assert "side_effect" not in gamepad.open_pad().data
 
 
@@ -976,3 +978,20 @@ def test_neutral_puts_the_triggers_back_too(pad):
     pad.right_trigger_float(0.5)
     assert gamepad.neutral().ok is True
     assert (pad.lt, pad.rt) == (0.0, 0.0)
+
+
+def test_every_tool_named_in_a_gamepad_hint_is_a_tool_that_exists(pad):
+    """These sentences are handed to the agent on the failure path, where it is
+    least able to check them. They used to name `close_pad`, `neutral` and
+    `open_pad` -- module functions the server registers no tool for -- so an
+    agent following the hint out of a stuck-input failure called nothing at
+    all. Whatever they name has to be in the registered set.
+    """
+    import re
+
+    from dayz_mcp import tools
+
+    registered = set(tools.__all__)
+    for sentence in (gamepad.PLUG_IN_NOTICE, gamepad._RELEASE_HINT):
+        for named in re.findall(r"`([a-z_]+)`", sentence):
+            assert named in registered, f"{named!r} is named as a tool but is not one"

@@ -13,13 +13,6 @@ existence proves nothing. Only a tick number that MOVED between two samples
 proves anything, which is why this tool samples twice and why `ok` is true in
 exactly that one case.
 
-That 1 Hz publish is the protocol's design, and this file talks about it in
-those terms rather than as something already happening: the bridge mod shipped
-today writes a heartbeat file and nothing else -- no state document, no
-mailbox reading. Every answer below is therefore reachable, but the ones that
-describe a published state document only start occurring when the mod-side
-task lands.
-
 The bridge is built UNSIGNED, and that is a ruling, not an oversight. There is
 one output directory for the whole process, and it used to be fed by whichever
 project happened to be open: the project's private key signed our mod, its
@@ -523,11 +516,9 @@ def bridge_status(window: float = STATUS_WINDOW_DEFAULT) -> Result:
             # Not the same answer as "no server". Only the mod ever removes
             # this file, so with nothing running it can never be claimed --
             # and server_start reuses the -profiles directory, so the command
-            # does not expire, it WAITS. That the file survives a boot is
-            # measured; that the mod then runs it is not yet -- the shipped
-            # bridge reads no mailbox at all today. So the wording states the
-            # part that is true now and stays true once command reading lands,
-            # rather than asserting a behaviour the current mod does not have.
+            # does not expire, it WAITS -- and the shipped bridge does claim
+            # mailboxes (DZMCP_BridgeCore.ClaimOne), so a stand booted outside
+            # these tools runs whatever is sitting there.
             return _not_alive(
                 "stale_command",
                 base,
@@ -877,9 +868,10 @@ def bridge_clear(force: bool = False, probe_window: float = STATUS_WINDOW_DEFAUL
 
     # The state file is not the only evidence of life, and this layer holds the
     # other half. A server this session started IS running whatever its bridge
-    # publishes -- and a mod that has not written a state document yet (every
-    # mod until the state writer lands) looks exactly like a downed stand to a
-    # probe that only reads files. Checked BEFORE the probe, so a refusal costs
+    # publishes -- and a mod that has not written a state document yet (one
+    # still in mission init, or one built without the state writer) looks
+    # exactly like a downed stand to a probe that only reads files. Checked
+    # BEFORE the probe, so a refusal costs
     # nothing: the channel now retries its first sample to the window's
     # deadline, which would otherwise buy a whole window to learn nothing.
     pid = session.server_pid()

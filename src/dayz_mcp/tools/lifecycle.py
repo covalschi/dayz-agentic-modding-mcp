@@ -438,7 +438,7 @@ def signature_problem(game: Path, config: Path, client_mods: str) -> str:
     anything at all.
 
     And the engine says none of this out loud. It rejects the client with code
-    118 and "missing dta\bin.pbo" -- a vanilla FILE NAME, with no mention of
+    118 and "missing dta\\bin.pbo" -- a vanilla FILE NAME, with no mention of
     signatures. Another session lost a long session to that message, and it
     named a file that was byte-identical on both sides the whole time.
     """
@@ -514,7 +514,7 @@ def server_signatures(value: int | None = None) -> Result:
     into the config the profile names as this stand's, and reads it back.
 
     WHY THIS IS ITS OWN TOOL. `verifySignatures = 2` makes a stand refuse every
-    client with code 118 and "missing dta\bin.pbo" -- a vanilla file name that
+    client with code 118 and "missing dta\\bin.pbo" -- a vanilla file name that
     says nothing about signatures, and that has already cost one session a long
     hunt through byte-identical files. On a local stand the honest fix is
     usually to turn the check off rather than to sign a throwaway bridge mod,

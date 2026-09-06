@@ -184,7 +184,8 @@ class DZMCP_WorldSnapshot
     //   ui_cursor  1/0/-1: is the cursor visible, -1 when there is no UI
     //              manager to ask
     //   ui_dialog  1/0/-1: is a modal dialog up
-    //   ui_root    which root the last listing walked: "menu" or "screen"
+    //   ui_root    which root the last listing walked: "menu", "screen" or
+    //              "preview" (the host ui_load puts a layout under)
     //   ui_total   how many nodes that walk VISITED; the array holds at most
     //              DZMCP_Ui.NODES_MAX of them, and the two differing is how a
     //              page says it is a page

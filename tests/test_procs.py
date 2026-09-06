@@ -80,7 +80,7 @@ def test_liveness_of_a_process_we_started_never_shells_out(tmp_path, monkeypatch
         raise AssertionError(f"asked the system about a pid we hold: {args!r}")
 
     short = spawn([sys.executable, "-c", ""], tmp_path)
-    procs._spawned[short][0].wait(timeout=30)
+    procs._tracked[short][0].wait(timeout=30)
 
     monkeypatch.setattr(sp, "run", no_shelling_out)
     try:
@@ -92,6 +92,34 @@ def test_liveness_of_a_process_we_started_never_shells_out(tmp_path, monkeypatch
     finally:
         monkeypatch.undo()
         stop(pid)
+
+
+def test_an_adopted_process_answers_from_its_handle_too(tmp_path, monkeypatch):
+    """The retail client is started BY the BattlEye launcher, so nothing here
+    holds a Popen for the process every client tool keys off. A handle opened
+    by pid buys the same thing: liveness without tasklist, and a pid nothing
+    can recycle underneath the answer."""
+    import subprocess as sp
+
+    from dayz_mcp import procs
+
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    procs._tracked.pop(pid)  # as if somebody else had started it
+    image = Path(sys.executable).name
+
+    def no_shelling_out(*args, **kwargs):
+        raise AssertionError(f"asked the system about a pid we hold: {args!r}")
+
+    try:
+        procs.adopt(pid, image)
+        assert pid in procs._tracked
+        monkeypatch.setattr(sp, "run", no_shelling_out)
+        assert is_alive(pid)
+        assert is_alive(pid, image=image)
+    finally:
+        monkeypatch.undo()
+        stop(pid)
+    assert not is_alive(pid, image=image)
 
 
 def test_a_foreign_image_name_still_goes_to_the_system(tmp_path):

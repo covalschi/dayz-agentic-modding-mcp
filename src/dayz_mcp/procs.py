@@ -60,14 +60,85 @@ def run_blocking(
     return code, text[-TAIL_CHARS:]
 
 
-# Handles of what THIS process started, keyed by pid, with the image name the
-# command line asked for. Kept because a live handle answers "is it running"
-# with one syscall (`Popen.poll`), while the fallback -- spawning `tasklist` --
-# was measured at ~230 ms per call on this machine, and liveness is checked on
+# Handles of the processes THIS server is watching, keyed by pid, with the
+# image name each was started under. Kept because a live handle answers "is it
+# running" with one syscall, while the fallback -- spawning `tasklist` -- was
+# measured at ~230 ms per call on this machine, and liveness is checked on
 # every world_*/ui_* command, every lifecycle poll and twice per client_status.
 # Holding the handle also pins the pid: Windows cannot recycle it under us
 # while the handle is open, which is the very lie `is_alive` exists to avoid.
-_spawned: dict[int, tuple[subprocess.Popen, str]] = {}
+_tracked: dict[int, tuple[object, str]] = {}
+
+
+class _AdoptedProcess:
+    """A running process this server did NOT start, held by a Windows handle.
+
+    The BattlEye launcher starts the retail client as a separate process, so
+    there is no `Popen` for the thing every client tool actually keys off (see
+    `tools/client.BE_LAUNCHER`). Opening a handle by pid buys the same two
+    properties the spawned half gets for free: liveness without `tasklist`,
+    and a pid that cannot be recycled out from under the answer.
+
+    Presents `poll`/`wait` so it is interchangeable with `Popen` here. The
+    exit code is not read -- only "signalled or not" -- because nothing in
+    this project asks what a client exited WITH, and reading it would need a
+    second access right.
+    """
+
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_TIMEOUT = 0x00000102
+
+    def __init__(self, handle: int) -> None:
+        self._handle: int | None = handle
+
+    @classmethod
+    def open(cls, pid: int) -> _AdoptedProcess | None:
+        """A handle on `pid`, or None when the system will not give one (the
+        process is already gone, or this server lacks the rights)."""
+        if os.name != "nt" or pid <= 0:
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        handle = kernel32.OpenProcess(cls._SYNCHRONIZE, False, pid)
+        return cls(handle) if handle else None
+
+    def _wait_ms(self, milliseconds: int) -> bool:
+        """True once the process is gone; False while it is still running."""
+        if self._handle is None:
+            return True
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        if kernel32.WaitForSingleObject(self._handle, milliseconds) == self._WAIT_TIMEOUT:
+            return False
+        kernel32.CloseHandle(self._handle)
+        self._handle = None
+        return True
+
+    def poll(self) -> int | None:
+        return 0 if self._wait_ms(0) else None
+
+    def wait(self, timeout: float | None = None) -> int:
+        milliseconds = 0xFFFFFFFF if timeout is None else max(0, int(timeout * 1000))
+        if not self._wait_ms(milliseconds):
+            raise subprocess.TimeoutExpired("adopted process", timeout)
+        return 0
+
+
+def adopt(pid: int, image: str) -> None:
+    """Watch a process this server did not start, so its liveness costs a
+    syscall rather than a `tasklist`. A no-op when no handle can be opened --
+    every caller already works without one."""
+    handle = _AdoptedProcess.open(pid)
+    if handle is not None:
+        _tracked[pid] = (handle, image)
 
 
 def spawn(cmd: list[str], cwd: Path) -> int:
@@ -78,22 +149,22 @@ def spawn(cmd: list[str], cwd: Path) -> int:
         stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-    _spawned[proc.pid] = (proc, Path(cmd[0]).name if cmd else "")
+    _tracked[proc.pid] = (proc, Path(cmd[0]).name if cmd else "")
     return proc.pid
 
 
-def _handle(pid: int, image: str) -> subprocess.Popen | None:
-    """The handle for `pid`, or None when this process did not start it.
+def _handle(pid: int, image: str):
+    """The handle for `pid`, or None when this server is not watching it.
 
-    An `image` that disagrees with the command line we spawned means the caller
-    is asking about a different process than the one we hold; that question
-    only `tasklist` can answer, so the fast path steps aside.
+    An `image` that disagrees with the one the process was recorded under means
+    the caller is asking about a different process than the one we hold; that
+    question only `tasklist` can answer, so the fast path steps aside.
     """
-    tracked = _spawned.get(pid)
+    tracked = _tracked.get(pid)
     if tracked is None:
         return None
-    proc, spawned_image = tracked
-    if image and spawned_image and image.lower() != spawned_image.lower():
+    proc, known_image = tracked
+    if image and known_image and image.lower() != known_image.lower():
         return None
     return proc
 
@@ -228,7 +299,7 @@ def is_alive(pid: int, image: str = "") -> bool:
             return True
         # Reaped: the pid is free to be recycled from here on, so later
         # questions about it must go back to asking the operating system.
-        _spawned.pop(pid, None)
+        _tracked.pop(pid, None)
         return False
     if os.name == "nt":
         # /FO CSV, not the default table format: the default truncates the
@@ -275,7 +346,7 @@ def stop(pid: int, grace: float = 3.0) -> bool:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             return False
-        _spawned.pop(pid, None)
+        _tracked.pop(pid, None)
         return True
     deadline = time.time() + grace
     while time.time() < deadline:

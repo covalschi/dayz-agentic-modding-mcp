@@ -67,12 +67,18 @@ def build_verdict(lines: list[str], expect: ExpectCfg) -> dict:
         "errors": errors[:MAX_LIST_ITEMS],
         "errors_total": len(errors),
         "warnings": warnings[:MAX_LIST_ITEMS],
-        "warnings_total": len(warnings),
+        # How many warning LINES the log holds, which is the number
+        # expect.max_warnings is judged against. `warnings` above groups them
+        # by shape, so its length is a different, smaller number -- and this
+        # field used to be published under both names, one letter apart, so a
+        # reader picking either got a number they could not tell apart from
+        # the other.
+        "warnings_total": warn_total,
+        "warning_shapes": len(warnings),
         "noise": noise[:MAX_LIST_ITEMS],
         "noise_total": len(noise),
         "crashes": crashes[:MAX_LIST_ITEMS],
         "crashes_total": len(crashes),
-        "warning_total": warn_total,
         "reasons": reasons[:MAX_LIST_ITEMS],
         "reasons_total": len(reasons),
     }

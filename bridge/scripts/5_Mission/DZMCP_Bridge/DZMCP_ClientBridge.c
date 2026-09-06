@@ -23,10 +23,10 @@
 //   way -- which is why the tool set also offers a real cursor click, using
 //   the screen rectangle this walk reports.
 //
-// None of the above has been measured on a running client: the owner's
-// instruction for this phase was not to run the stand. Every claim here comes
-// from the game's own sources, and everything that needs a live client to
-// settle is written down as a question in the spec, not assumed here.
+// The walk, the preview host and the click paths have since been run against
+// a live client (2026-09-03/04); the claims about what Widget does and does not
+// offer come from the game's own sources, cited by file and line where they are
+// made.
 class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 {
     protected ref DZMCP_Preview m_Preview;
@@ -464,7 +464,8 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     //
     //   layout   path relative to the pbo prefix, forward slashes (required)
     //   host     "w h" in layout units, or empty for the whole screen
-    //   fixture  JSON of operations to populate it (next task)
+    //   fixture  JSON of operations that populate it before the walk
+    //            (DZMCP_Preview.ApplyFixture)
     //   depth, limit, offset  as for ui_tree
     //
     // Answers on the NEXT tick: a widget measured before its first layout
