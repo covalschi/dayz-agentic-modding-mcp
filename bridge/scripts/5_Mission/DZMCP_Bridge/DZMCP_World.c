@@ -200,24 +200,6 @@ class DZMCP_World
         }
     }
 
-    // Is this object a person the delete verb must never touch?
-    //
-    // TWO independent tests, and either one alone is enough to protect a real
-    // player -- which is the point, because the cost of being wrong here is the
-    // session the caller is measuring.
-    //
-    // An earlier version simply skipped every Man. That was safe and also too
-    // broad, and the live run showed why: a survivor created by the spawn verb
-    // is a Man, is NOT counted by GetPlayers (measured: players stayed 0 with
-    // one standing in the world), and could therefore be created by this bridge
-    // and then removed by nothing at all. A tool that can make something it
-    // cannot unmake leaves litter in every stand it touches.
-    //
-    // GetIdentity is the first test and the load-bearing one: a connected
-    // player always has an identity, an entity conjured by CreateObjectEx never
-    // does. Membership of GetPlayers is the second, so that a momentary empty
-    // player list -- mid-connection, mid-disconnect -- cannot expose a real
-    // player to a class filter that happens to match their character.
     // The date ranges the engine documents, checked here rather than passed
     // through: SetDate takes month 1-12, day 1-31, hour 0-23, minute 0-59, and
     // a value outside those is undefined behaviour in native code, which is the
@@ -238,14 +220,7 @@ class DZMCP_World
 
     static string DateToText(int year, int month, int day, int hour, int minute)
     {
-        return "" + year + "-" + Pad2(month) + "-" + Pad2(day) + " " + Pad2(hour) + ":" + Pad2(minute);
-    }
-
-    static string Pad2(int value)
-    {
-        if (value >= 0 && value < 10)
-            return "0" + value;
-        return "" + value;
+        return "" + year + "-" + DZMCP_Text.Pad2(month) + "-" + DZMCP_Text.Pad2(day) + " " + DZMCP_Text.Pad2(hour) + ":" + DZMCP_Text.Pad2(minute);
     }
 
     // The phenomenon a weather verb names, or null when the name is not one.
@@ -306,6 +281,24 @@ class DZMCP_World
         }
     }
 
+    // Is this object a person the delete verb must never touch?
+    //
+    // TWO independent tests, and either one alone is enough to protect a real
+    // player -- which is the point, because the cost of being wrong here is the
+    // session the caller is measuring.
+    //
+    // An earlier version simply skipped every Man. That was safe and also too
+    // broad, and the live run showed why: a survivor created by the spawn verb
+    // is a Man, is NOT counted by GetPlayers (measured: players stayed 0 with
+    // one standing in the world), and could therefore be created by this bridge
+    // and then removed by nothing at all. A tool that can make something it
+    // cannot unmake leaves litter in every stand it touches.
+    //
+    // GetIdentity is the first test and the load-bearing one: a connected
+    // player always has an identity, an entity conjured by CreateObjectEx never
+    // does. Membership of GetPlayers is the second, so that a momentary empty
+    // player list -- mid-connection, mid-disconnect -- cannot expose a real
+    // player to a class filter that happens to match their character.
     static bool IsProtectedPerson(Object candidate, array<Man> players)
     {
         Man asMan;

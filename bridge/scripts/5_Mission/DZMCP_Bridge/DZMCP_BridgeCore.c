@@ -550,6 +550,24 @@ class DZMCP_BridgeCore
 
     protected void StartCommand(string id, string verb)
     {
+        // The listings the PREVIOUS command produced are spent: the caller
+        // read them off the snapshot that reported that command done, and is
+        // now asking a different question. Left in place they are
+        // re-serialised into every snapshot for the rest of the session --
+        // `entities` holds up to 200 lines and `ui_nodes` up to 300, so after
+        // a single world_entities or ui_tree the 1 Hz Publish() keeps writing
+        // tens of kilobytes a second on CALL_CATEGORY_SYSTEM to repeat an
+        // answer nobody asked for again. Cleared at the moment the next
+        // command is claimed, so an answer lives exactly as long as the
+        // command that produced it, terminal dwell included.
+        m_State.world.entities.Clear();
+        m_State.world.entities_total = -1;
+        m_State.world.entities_class = "";
+        m_State.world.entities_radius = 0;
+        m_State.world.ui_nodes.Clear();
+        m_State.world.ui_total = -1;
+        m_State.world.ui_root = "";
+
         m_State.command.id = id;
         m_State.command.status = DZMCP_STATUS_RUNNING;
         m_State.command.detail = "";
@@ -1812,7 +1830,14 @@ class DZMCP_BridgeCore
     {
         RefreshClockAndSky();
 
-        int players = DZMCP_World.PlayerCount();
+        // One scan, not two. DZMCP_World.PlayerCount() and .FirstPlayer() each
+        // allocate their own array and walk the player list, and this runs
+        // every tick for the whole life of the mission -- asking the same
+        // question twice a second forever to learn two things one answer
+        // already holds.
+        array<Man> connected = new array<Man>;
+        GetGame().GetPlayers(connected);
+        int players = connected.Count();
         m_State.world.players = players;
 
         if (players == 0)
@@ -1824,7 +1849,7 @@ class DZMCP_BridgeCore
             return;
         }
 
-        Man player = DZMCP_World.FirstPlayer();
+        Man player = connected.Get(0);
         m_State.world.player_pos = DZMCP_World.PosToText(player.GetPosition());
         m_State.world.player_health = player.GetHealth("", "");
 
