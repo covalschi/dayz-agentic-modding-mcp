@@ -74,6 +74,13 @@ class FakeChannel:
     def heartbeat_detail(self, window=3.0):
         return Beat()
 
+    def moving_now(self, window=3.0):
+        # The real Channel.moving_now is heartbeat_detail with a remembered
+        # first sample; with no proof recorded it IS heartbeat_detail, which
+        # is the state every one of these tests starts in. Its own caching is
+        # covered directly in test_bridge_channel.py.
+        return self.heartbeat_detail(window)
+
     def build_command(self, verb, args):
         from dayz_mcp.errors import ok as _ok
         return _ok(Command(id=f"{verb}-1", session_id="client-1", verb=verb, args=args))

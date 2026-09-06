@@ -43,6 +43,11 @@ from ..bridge.channel import (
     HEARTBEAT_GROWING,
     HEARTBEAT_RESTARTED,
     HEARTBEAT_UNMEASURABLE,
+    # How often the protocol has the mod republish its state (spec: once a
+    # second). A protocol fact both layers must enforce -- imported rather
+    # than restated, because two constants that are only correct while they
+    # agree are one edit away from disagreeing.
+    MOD_PUBLISH_INTERVAL_SECONDS,
     STATE_FILENAME,
     Channel,
 )
@@ -93,11 +98,6 @@ STATUS_WINDOW_MAX = 10.0
 # protocol's 1 Hz publish interval on purpose: a document mangled by one in-place write
 # is repaired by the next one, so it cannot look the same across this gap,
 # while a genuinely old mod looks old however long you wait.
-# How often the protocol has the mod republish its state (spec: once a second).
-# A protocol fact, not the channel's implementation detail -- the channel
-# enforces the same rule from its own copy, and both are quoting the spec.
-MOD_PUBLISH_INTERVAL_SECONDS = 1.0
-
 SECOND_OPINION_SECONDS = MOD_PUBLISH_INTERVAL_SECONDS + 0.1
 
 # The shortest probe bridge_clear will run. The channel refuses to clear on a

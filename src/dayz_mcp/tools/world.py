@@ -173,14 +173,19 @@ def _no_server() -> Result:
 def _require_a_moving_bridge(channel: Channel) -> Result | None:
     """None when the bridge is proven to be ticking; a refusal otherwise.
 
-    Costs one probe window (about 1.2 s) per command, and buys the difference
-    between a 45-second silent timeout and an immediate sentence naming the
-    cause. The bridge is unreachable for tens of seconds after the server
-    reports ready (module docstring, rule 2), and during that window a command
-    is not rejected -- it is accepted, sat on, and completed long after the
-    caller stopped listening.
+    Buys the difference between a 45-second silent timeout and an immediate
+    sentence naming the cause. The bridge is unreachable for tens of seconds
+    after the server reports ready (module docstring, rule 2), and during that
+    window a command is not rejected -- it is accepted, sat on, and completed
+    long after the caller stopped listening.
+
+    Costs one probe window (about 1.2 s) when nothing recent is known, and one
+    file read when the previous command already proved the tick moving -- see
+    `Channel.moving_now`, which decides which of the two this is. That matters
+    most where the same tool sends several commands in a row: `ui_preview`
+    sends three, `ui_gallery` sends entries x sizes x languages.
     """
-    detail = channel.heartbeat_detail(MOVEMENT_PROBE_WINDOW)
+    detail = channel.moving_now(MOVEMENT_PROBE_WINDOW)
     if detail.status in _MOVING:
         return None
 
@@ -309,7 +314,11 @@ def world_ready(timeout: float = READY_TIMEOUT_SECONDS) -> Result:
 
     while True:
         attempts += 1
-        detail = channel.heartbeat_detail(MOVEMENT_PROBE_WINDOW)
+        # `moving_now`, not `heartbeat_detail`: the very first probe here has
+        # nothing remembered and so is the full two-sample one either way, and
+        # a success records the proof that spares the first real command its
+        # own window -- which is what world_ready is called right before.
+        detail = channel.moving_now(MOVEMENT_PROBE_WINDOW)
         last = detail.status
         if detail.status in _MOVING:
             return ok({

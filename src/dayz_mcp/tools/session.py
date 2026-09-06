@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+from ..bridge.channel import forget_movement_proofs
 from ..jobs import JobStore
 from ..knowledge.store import KnowledgeStore
 from ..procs import is_alive
@@ -20,6 +21,11 @@ _index_lock = threading.Lock()
 
 
 def reset() -> None:
+    # A proof that some server's bridge was ticking is a fact about THAT
+    # server. Once the session forgets which server it is talking to, the
+    # proof must go with it, or the next project's first command would trust
+    # a measurement taken against a world that is no longer there.
+    forget_movement_proofs()
     # The knowledge indexes hold an open SQLite connection each, so they are
     # closed rather than dropped: a connection left open keeps a handle on the
     # database file, and on Windows that is enough to stop the directory it

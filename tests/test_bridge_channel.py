@@ -12,6 +12,7 @@ import json
 import threading
 import time
 
+from dayz_mcp.bridge import channel
 from dayz_mcp.bridge.channel import (
     CMD_FILENAME,
     HEARTBEAT_GROWING,
@@ -32,6 +33,11 @@ def _write_state(profiles_dir, **overrides) -> None:
 
 def _command_payload(cmd_id, status, detail="", finished_at=None) -> dict:
     return {"id": cmd_id, "status": status, "detail": detail, "finished_at": finished_at}
+
+
+def _never_probe(window):
+    raise AssertionError(
+        f"slept out a {window}s probe window although the tick was already proven moving")
 
 
 def _cmd(cmd_id, verb="ping", args=None, session_id="s1") -> Command:
@@ -1153,3 +1159,136 @@ def test_two_channels_in_one_directory_do_not_see_each_other(tmp_path):
     assert built_client.ok, built_client.error
     assert built_client.data.session_id == "client-1", "each half reads its own session"
     assert client.send(built_client.data, is_alive=True).ok
+
+
+# --- moving_now: a proof from the previous command replaces the first sample --
+
+
+def test_moving_now_falls_back_to_the_full_probe_when_nothing_is_known(tmp_path, monkeypatch):
+    """First command after a boot: there is nothing remembered, so the answer
+    can only come from the real two-sample probe."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=5)
+    ch = Channel(tmp_path)
+    windows: list[float] = []
+
+    def probe(window):
+        windows.append(window)
+        return channel.HeartbeatSample(
+            status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window,
+        )
+
+    monkeypatch.setattr(ch, "heartbeat_detail", probe)
+    assert ch.moving_now(1.2).status == HEARTBEAT_GROWING
+    assert windows == [1.2]
+
+
+def test_a_grown_tick_since_the_proof_needs_no_second_window(tmp_path, monkeypatch):
+    """The remembered read and the fresh one are two samples of the same
+    session with the tick between them -- the very thing the probe sleeps to
+    observe. Sleeping again would only re-derive it."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=6)
+    ch = Channel(tmp_path)
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: channel.HeartbeatSample(
+        status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window))
+    ch.moving_now(1.2)
+
+    _write_state(tmp_path, tick=7)
+    monkeypatch.setattr(ch, "heartbeat_detail", _never_probe)
+    sample = ch.moving_now(1.2)
+    assert sample.status == HEARTBEAT_GROWING
+    assert sample.tick == 7
+
+
+def test_the_same_tick_within_a_publish_interval_still_rests_on_the_proof(tmp_path, monkeypatch):
+    """A burst of commands: the mod has not had a chance to publish since the
+    proof, so the unchanged tick says nothing either way -- and the proof is
+    still the most recent thing known."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=6)
+    ch = Channel(tmp_path)
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: channel.HeartbeatSample(
+        status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window))
+    ch.moving_now(1.2)
+
+    monkeypatch.setattr(ch, "heartbeat_detail", _never_probe)
+    assert ch.moving_now(1.2).status == HEARTBEAT_GROWING
+
+
+def test_a_tick_that_stops_moving_reaches_the_probe_and_is_reported(tmp_path, monkeypatch):
+    """The whole safety property: a stall beginning after a proof is caught by
+    the first command that arrives late enough for the silence to mean
+    something, exactly as the unconditional probe would have caught it."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=6)
+    ch = Channel(tmp_path)
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: channel.HeartbeatSample(
+        status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window))
+    ch.moving_now(1.2)
+
+    # Age the proof past the publish interval without sleeping for it.
+    session_id, tick, seen = channel._MOVEMENT_PROOFS[str(tmp_path / STATE_FILENAME)]
+    channel._MOVEMENT_PROOFS[str(tmp_path / STATE_FILENAME)] = (
+        session_id, tick, seen - channel.MOD_PUBLISH_INTERVAL_SECONDS - 0.1)
+
+    probed: list[float] = []
+
+    def stalled(window):
+        probed.append(window)
+        return channel.HeartbeatSample(
+            status=HEARTBEAT_STALLED, tick=6, session_id="session-1", gap=window)
+
+    monkeypatch.setattr(ch, "heartbeat_detail", stalled)
+    assert ch.moving_now(1.2).status == HEARTBEAT_STALLED
+    assert probed == [1.2]
+    # ...and a non-moving verdict erases the proof, so the next command starts
+    # from the probe again rather than from a fact that is no longer true.
+    assert str(tmp_path / STATE_FILENAME) not in channel._MOVEMENT_PROOFS
+
+
+def test_a_proof_older_than_its_ttl_is_not_reused(tmp_path, monkeypatch):
+    """An old proof plus a fresh read only says the tick moved somewhere in a
+    long span, which is not what "is it moving now" asks."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=6)
+    ch = Channel(tmp_path)
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: channel.HeartbeatSample(
+        status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window))
+    ch.moving_now(1.2)
+
+    key = str(tmp_path / STATE_FILENAME)
+    session_id, tick, seen = channel._MOVEMENT_PROOFS[key]
+    channel._MOVEMENT_PROOFS[key] = (
+        session_id, tick, seen - channel.MOVEMENT_PROOF_TTL_SECONDS - 0.1)
+
+    _write_state(tmp_path, tick=99)
+    probed: list[float] = []
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: (
+        probed.append(window),
+        channel.HeartbeatSample(status=HEARTBEAT_GROWING, tick=99,
+                                session_id="session-1", gap=window),
+    )[1])
+    ch.moving_now(1.2)
+    assert probed == [1.2]
+
+
+def test_a_new_session_is_never_answered_from_the_old_ones_proof(tmp_path, monkeypatch):
+    """A restart is exactly what the session id exists to catch: the tick of a
+    new world says nothing about progress in the old one."""
+    channel.forget_movement_proofs()
+    _write_state(tmp_path, tick=6)
+    ch = Channel(tmp_path)
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: channel.HeartbeatSample(
+        status=HEARTBEAT_GROWING, tick=6, session_id="session-1", gap=window))
+    ch.moving_now(1.2)
+
+    _write_state(tmp_path, tick=99, session_id="session-2")
+    probed: list[float] = []
+    monkeypatch.setattr(ch, "heartbeat_detail", lambda window: (
+        probed.append(window),
+        channel.HeartbeatSample(status=HEARTBEAT_RESTARTED, tick=99,
+                                session_id="session-2", gap=window),
+    )[1])
+    assert ch.moving_now(1.2).status == HEARTBEAT_RESTARTED
+    assert probed == [1.2]

@@ -80,8 +80,19 @@ _TOLERANT_READ_DELAY = 0.05
 # shorter than this cannot tell "frozen" apart from "alive, but has not had
 # a chance to tick again yet" -- both look identical (same tick, both
 # samples readable). Used by `clear_mailbox` to require `force` for a
-# "stalled" verdict a too-short window cannot actually back up.
-_MOD_PUBLISH_INTERVAL_SECONDS = 1.0
+# "stalled" verdict a too-short window cannot actually back up. Public because
+# the tool layer enforces the same protocol fact and must not keep a second
+# copy of the number: two constants that are only correct while they agree are
+# one edit away from disagreeing (`tools/bridge.py` imports this one).
+MOD_PUBLISH_INTERVAL_SECONDS = 1.0
+
+# How long a proof that the tick is moving stays usable as the "before" half of
+# the next command's check. Deliberately short: an old proof plus a fresh read
+# only says "the tick moved somewhere in this span", and the further back the
+# older sample sits, the less that says about now. Five seconds covers what it
+# is for -- the burst of commands one tool issues (ui_preview sends three,
+# ui_gallery sends entries x sizes x languages) -- and nothing beyond it.
+MOVEMENT_PROOF_TTL_SECONDS = 5.0
 
 # Once the mod reports one of these for the command we asked about, waiting
 # longer cannot produce more information -- that IS the result.
@@ -94,6 +105,21 @@ HEARTBEAT_GROWING = "growing"
 HEARTBEAT_STALLED = "stalled"
 HEARTBEAT_RESTARTED = "restarted"
 HEARTBEAT_UNMEASURABLE = "unmeasurable"
+
+#: The last observation that PROVED the tick moving, per state file:
+#: (session_id, tick, monotonic time of the read). Written only by
+#: `moving_now`, and only from an observation that was itself proof. Keyed by
+#: the state path rather than held on a `Channel`, because the tool layer
+#: builds a fresh `Channel` for every single command -- an instance attribute
+#: would be discarded before the next command could ever use it.
+_MOVEMENT_PROOFS: dict[str, tuple[str | None, int, float]] = {}
+
+
+def forget_movement_proofs() -> None:
+    """Drop every remembered proof. Called when the session is reset: the
+    server the proofs were about is no longer the server the next command will
+    talk to, and a proof about a dead world must never answer for a new one."""
+    _MOVEMENT_PROOFS.clear()
 
 
 @dataclass(frozen=True)
@@ -126,7 +152,7 @@ class HeartbeatSample:
 
     This is what lets a caller tell apart two situations that would
     otherwise both arrive as `"unmeasurable"` with an identical `tick`/
-    `session_id`: a `gap` under `_MOD_PUBLISH_INTERVAL_SECONDS` alongside a
+    `session_id`: a `gap` under `MOD_PUBLISH_INTERVAL_SECONDS` alongside a
     real `session_id` means the mod IS there, just not measured for long
     enough -- ask again with a bigger window, and that alone is likely to
     fix it. A `gap` at or above the publish interval with `status ==
@@ -525,7 +551,7 @@ class Channel:
             override_reason = (
                 f"both samples were readable, but the MEASURED gap between them "
                 f"({gap:.2f}s) is shorter than the mod's publish interval "
-                f"({_MOD_PUBLISH_INTERVAL_SECONDS}s) -- a same tick proves nothing at "
+                f"({MOD_PUBLISH_INTERVAL_SECONDS}s) -- a same tick proves nothing at "
                 f"this gap; a live bridge that simply has not ticked again yet looks "
                 f"identical to a frozen one"
             )
@@ -752,7 +778,7 @@ class Channel:
         `gap` (the MEASURED time between the two reads -- see
         `_sample_twice`'s docstring for why this must be measured, not
         assumed from the requested window) is at least
-        `_MOD_PUBLISH_INTERVAL_SECONDS`. Below that, the mod genuinely has
+        `MOD_PUBLISH_INTERVAL_SECONDS`. Below that, the mod genuinely has
         not had a fair chance to write a new tick yet, so "the same tick
         twice" is not evidence of a stall -- it is evidence of nothing, and
         reporting "stalled" there was the exact wrong-diagnosis bug this
@@ -792,7 +818,7 @@ class Channel:
             return HeartbeatSample(
                 status=HEARTBEAT_GROWING, tick=after.tick, session_id=after.session_id, gap=gap
             )
-        if gap < _MOD_PUBLISH_INTERVAL_SECONDS:
+        if gap < MOD_PUBLISH_INTERVAL_SECONDS:
             return HeartbeatSample(
                 status=HEARTBEAT_UNMEASURABLE, tick=after.tick, session_id=after.session_id, gap=gap
             )
@@ -882,3 +908,64 @@ class Channel:
         takes.
         """
         return self._classify_samples(*self._sample_twice(window))
+
+    def moving_now(self, window: float = 3.0) -> HeartbeatSample:
+        """`heartbeat_detail`, except a recent proof counts as the first
+        sample -- so a command whose predecessor just proved the tick moving
+        answers from one read instead of sleeping out another window.
+
+        The full probe is two reads a window apart, and the window is the
+        cost: every world_*/ui_* command paid it, `ui_preview` three times
+        over, `ui_gallery` once per entry per size per language. But the
+        probe's first sample is nothing more than "the tick and session at
+        some earlier moment", and right after a command has run this process
+        already holds exactly that -- measured, not assumed. Reusing it is
+        the same measurement with the sleep already spent.
+
+        Two shapes are proof, and only these two:
+
+        * the tick has GROWN since the remembered read, same session -- the
+          mod published at least once in between, which is what "moving"
+          means and precisely what the probe itself looks for;
+        * the tick is UNCHANGED and less than one publish interval has passed
+          since the remembered read -- the mod has not been given a chance to
+          publish yet, so this observation is evidence of nothing (the same
+          rule `_classify_samples` applies to a too-short gap), and the
+          earlier proof remains the most recent thing known. This is the case
+          a burst of back-to-back commands actually lands in.
+
+        Everything else falls through to the real probe: no proof, a proof
+        older than `MOVEMENT_PROOF_TTL_SECONDS`, a different session, an
+        unreadable state file, or an unchanged tick after a full publish
+        interval. The probe is also the only thing that writes a proof, and a
+        non-moving verdict erases the old one. So a stall beginning after a
+        proof is caught by the first command that arrives late enough for the
+        silence to mean something -- the same moment the unconditional probe
+        would have caught it.
+        """
+        key = str(self._state_path())
+        remembered = _MOVEMENT_PROOFS.get(key)
+        if remembered is not None:
+            session_id, tick, seen = remembered
+            age = time.monotonic() - seen
+            if age <= MOVEMENT_PROOF_TTL_SECONDS:
+                now = self._read_state_tolerant()
+                if now is not None and now.session_id == session_id:
+                    if now.tick > tick:
+                        _MOVEMENT_PROOFS[key] = (now.session_id, now.tick, time.monotonic())
+                        return HeartbeatSample(
+                            status=HEARTBEAT_GROWING, tick=now.tick,
+                            session_id=now.session_id, gap=age,
+                        )
+                    if now.tick == tick and age < MOD_PUBLISH_INTERVAL_SECONDS:
+                        return HeartbeatSample(
+                            status=HEARTBEAT_GROWING, tick=tick,
+                            session_id=session_id, gap=age,
+                        )
+
+        sample = self.heartbeat_detail(window)
+        if sample.status in (HEARTBEAT_GROWING, HEARTBEAT_RESTARTED):
+            _MOVEMENT_PROOFS[key] = (sample.session_id, sample.tick, time.monotonic())
+        else:
+            _MOVEMENT_PROOFS.pop(key, None)
+        return sample
