@@ -9,7 +9,7 @@ specs/2026-08-19-dayz-mcp-phase2-bridge.md Sec 3, hub repo):
    second. Seeing a half-written file is therefore the ordinary case, not an
    error: `protocol.parse_state` already returns None for it, and this
    module treats a single such read as unremarkable. Only a short run of
-   failures (see `_read_state_tolerant`) is treated as a real signal.
+   failures (see `read_state_tolerant`) is treated as a real signal.
 2. Python CAN write atomically, and must: `send` writes the mailbox to a
    temporary file in the same directory and `os.link`s it into place, so the
    mod never observes a half-written command. `os.link` also doubles as the
@@ -231,13 +231,13 @@ class Channel:
     def current_session_id(self) -> str | None:
         """The `session_id` from the most recent tolerant read of the state
         file, or `None` if no state has ever been read -- or every attempt
-        to read it right now failed (see `_read_state_tolerant`).
+        to read it right now failed (see `read_state_tolerant`).
 
         This is what a `Command` needs to be accepted by `send` (see
         `build_command`, the recommended way to obtain one already stamped
         with it rather than calling this directly and threading the value
         through by hand)."""
-        state = self._read_state_tolerant()
+        state = self.read_state_tolerant()
         return state.session_id if state is not None else None
 
     def build_command(self, verb: str, args: dict) -> Result:
@@ -620,7 +620,7 @@ class Channel:
     def read_state_rejection(self) -> ParseRejection | None:
         """Explain why the state file cannot be read RIGHT NOW, for the
         diagnostic case only -- not the routine polling loop, which
-        `read_state`/`_read_state_tolerant` already serve correctly on
+        `read_state`/`read_state_tolerant` already serve correctly on
         their own. Before this existed, every realistic mod-side schema
         slip during Task 5 (`session_id: ""`, `tick: "7"`, a typo'd
         `status`) was reported to the person debugging it as an ordinary
@@ -637,7 +637,7 @@ class Channel:
         fails schema validation -- the one case worth surfacing, because
         retrying will not fix it.
 
-        A SINGLE read, not tolerant like `_read_state_tolerant`: retrying a
+        A SINGLE read, not tolerant like `read_state_tolerant`: retrying a
         persistent schema failure would not change the answer (unlike a
         torn write, which `parse_rejection` already refuses to detail on
         its own), so there is nothing extra tolerance would buy a caller
@@ -649,9 +649,15 @@ class Channel:
             return None
         return parse_rejection(text)
 
-    def _read_state_tolerant(self) -> BridgeState | None:
+    def read_state_tolerant(self) -> BridgeState | None:
         """`read_state`, but absorbs a short run of torn reads instead of
-        surfacing the first one. See the module docstring's fact 1."""
+        surfacing the first one. See the module docstring's fact 1.
+
+        Public, because the tool layer wants exactly this and four places
+        there had written their own worse version of it: one retry a full
+        0.3 s later, where this makes three a beat apart and answers sooner
+        in the ordinary case.
+        """
         for attempt in range(_TOLERANT_READ_ATTEMPTS):
             state = self.read_state()
             if state is not None:
@@ -719,7 +725,7 @@ class Channel:
         `_classify_samples` does exactly that.
 
         The FIRST sample retries all the way to `window`'s own deadline,
-        not just `_read_state_tolerant`'s own short (~0.1-0.15s) budget.
+        not just `read_state_tolerant`'s own short (~0.1-0.15s) budget.
         Giving up on the first sample after that short budget regardless of
         a much longer `window` silently defeated `window` on this path
         entirely: `clear_mailbox` could still destroy an in-flight command
@@ -733,7 +739,7 @@ class Channel:
         yet, or is mid-crash-and-recover -- is the ORDINARY condition, and
         `clear_mailbox` is exactly the tool its author reaches for then.
         The SECOND sample keeps its original short budget beyond `window`'s
-        deadline (`_read_state_tolerant`'s own retries): `heartbeat`'s own
+        deadline (`read_state_tolerant`'s own retries): `heartbeat`'s own
         docstring already treats a failed second sample as its own outcome
         ("unmeasurable") rather than something worth waiting out further --
         extending `window` itself to guarantee a bigger `gap` would break
@@ -742,10 +748,10 @@ class Channel:
         also staying truthful.
         """
         deadline = time.monotonic() + window
-        before = self._read_state_tolerant()
+        before = self.read_state_tolerant()
         while before is None and time.monotonic() < deadline:
             time.sleep(_TOLERANT_READ_DELAY)
-            before = self._read_state_tolerant()
+            before = self.read_state_tolerant()
         if before is None:
             return None, None, 0.0
         before_time = time.monotonic()
@@ -754,7 +760,7 @@ class Channel:
         if remaining > 0:
             time.sleep(remaining)
 
-        after = self._read_state_tolerant()
+        after = self.read_state_tolerant()
         gap = time.monotonic() - before_time
         return before, after, gap
 
@@ -842,7 +848,7 @@ class Channel:
         samples means "a new world came up in between", not "this one
         froze".
 
-        Both samples go through `_read_state_tolerant`, so one torn read
+        Both samples go through `read_state_tolerant`, so one torn read
         landing at exactly the wrong moment is not mistaken for a dead
         bridge. But tolerance has a limit, and reaching it is itself
         information the caller needs: if the SECOND sample never comes back
@@ -900,7 +906,7 @@ class Channel:
         Several of Task 5's acceptance probes need to know the bridge's
         live session id, and until this existed nothing could tell them
         without a second, separate probe (`current_session_id` does its own
-        fresh tolerant read, which would cost another `_read_state_tolerant`
+        fresh tolerant read, which would cost another `read_state_tolerant`
         round trip for information this method already has in hand from the
         same two samples `heartbeat` itself takes). Same timing and
         tolerance as `heartbeat` -- this is not a second, independent
@@ -949,7 +955,7 @@ class Channel:
             session_id, tick, seen = remembered
             age = time.monotonic() - seen
             if age <= MOVEMENT_PROOF_TTL_SECONDS:
-                now = self._read_state_tolerant()
+                now = self.read_state_tolerant()
                 if now is not None and now.session_id == session_id:
                     if now.tick > tick:
                         _MOVEMENT_PROOFS[key] = (now.session_id, now.tick, time.monotonic())

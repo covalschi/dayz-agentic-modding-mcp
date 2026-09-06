@@ -372,12 +372,8 @@ def world_state(class_name: str = "", radius: float = 30.0, pos: str = "",
         if not answered.ok:
             return answered
 
-    state = channel.read_state()
-    if state is None:
-        # One tolerant retry through the public reader: a single torn read is
-        # the ordinary once-a-second condition, not news.
-        time.sleep(0.3)
-        state = channel.read_state()
+    # A single torn read is the ordinary once-a-second condition, not news.
+    state = channel.read_state_tolerant()
 
     if state is None:
         return fail(
@@ -614,10 +610,7 @@ def _with_world(answered: Result) -> Result:
     saying so while admitting the snapshot is missing beats either half.
     """
     channel = Channel(server_profiles_dir())
-    state = channel.read_state()
-    if state is None:
-        time.sleep(0.3)
-        state = channel.read_state()
+    state = channel.read_state_tolerant()
     if state is None:
         answered.data["world"] = {}
         answered.data["world_unavailable"] = (

@@ -867,7 +867,7 @@ def test_clear_mailbox_reports_what_it_actually_deleted_not_a_stale_read(tmp_pat
 
 
 def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_path, brief_publish_interval):
-    """_read_state_tolerant's own retry budget is only ~0.1-0.15s -- far
+    """read_state_tolerant's own retry budget is only ~0.1-0.15s -- far
     shorter than a realistic probe window. Before this fix, _sample_twice
     gave up on the FIRST sample after that short budget regardless of
     `window`, so a state file that simply had not been written yet (the
@@ -882,7 +882,7 @@ def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_pa
     ch = Channel(tmp_path)
 
     def create_late():
-        time.sleep(0.3)  # well past _read_state_tolerant's own ~0.15s budget
+        time.sleep(0.3)  # well past read_state_tolerant's own ~0.15s budget
         _write_state(tmp_path, tick=5, session_id="s1")
 
     threading.Thread(target=create_late, daemon=True).start()

@@ -103,6 +103,11 @@ class FakeChannel:
     def read_state(self):
         return self.state
 
+    def read_state_tolerant(self):
+        # The real Channel absorbs a short run of torn reads; a fake that
+        # answers from memory has none to absorb.
+        return self.read_state()
+
 
 @pytest.fixture
 def live(tmp_path, monkeypatch):

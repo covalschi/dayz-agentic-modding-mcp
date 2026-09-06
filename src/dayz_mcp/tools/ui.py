@@ -200,10 +200,7 @@ def _run(verb: str, args: dict, timeout: float, offset: int = 0) -> Result:
 
 def _with_ui(answered: Result, channel: Channel, offset: int = 0) -> Result:
     """Add the client's published UI block, and the nodes parsed out of it."""
-    state = channel.read_state()
-    if state is None:
-        time.sleep(0.3)
-        state = channel.read_state()
+    state = channel.read_state_tolerant()
     if state is None:
         answered.data["ui"] = {}
         answered.data["ui_unavailable"] = (
@@ -340,10 +337,7 @@ def ui_menu() -> Result:
         return _no_client()
 
     channel = _client_channel()
-    state = channel.read_state()
-    if state is None:
-        time.sleep(0.3)
-        state = channel.read_state()
+    state = channel.read_state_tolerant()
     if state is None:
         return _not_loaded(channel)
 
