@@ -809,6 +809,8 @@ vocabulary and the parse test are talking about one build of the game.
 
 ## Install
 
+    python -m pip install -e ".[dev]"
+
 Register in your MCP client:
 
     { "mcpServers": { "dayz": { "command": "dayz-mcp" } } }

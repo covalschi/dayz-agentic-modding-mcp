@@ -99,7 +99,8 @@ items = 12
 
 @pytest.fixture(autouse=True)
 def _no_real_ports(monkeypatch):
-    """Nothing in this file may consult the machine's actual network state.
+    """Nothing in the suite may consult the machine's actual network state --
+    `autouse=True` in this conftest reaches every test file, not just this one.
 
     server_start now checks the game port before spawning, and that check reads
     netstat. Without this, twelve tests started failing the moment ANOTHER

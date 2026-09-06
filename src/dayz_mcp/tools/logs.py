@@ -77,6 +77,13 @@ def log_verdict(source: str = "server", since: float | None = None) -> Result:
 _TAIL_BLOCK = 64 * 1024
 
 
+def _decode(block: bytes) -> str:
+    """Decode one block's raw bytes. Broken out of `_tail_lines` so a test can
+    meter how much work a block read costs -- the whole point of the fix below
+    is that this is called once per block, never on a growing buffer."""
+    return block.decode("utf-8", errors="replace")
+
+
 def _tail_lines(log: Path, n: int, pattern: str) -> list[str]:
     """The last `n` lines of `log` (matching `pattern`, if given), read from
     the END rather than from the start.
@@ -88,28 +95,36 @@ def _tail_lines(log: Path, n: int, pattern: str) -> list[str]:
     except when a `pattern` matches nothing near the end and the whole file
     genuinely has to be searched.
 
-    Blocks are ACCUMULATED and re-split rather than split one at a time and
-    concatenated: a block boundary lands mid-line, and a line split across two
-    blocks would otherwise be reported as two lines, neither of them real.
-    While the read has not reached byte 0, the first line of what has been
-    read so far is still incomplete, so it is dropped -- an earlier block owns
-    its beginning.
+    Each block is decoded and split ONCE, not accumulated with every earlier
+    block and re-decoded/re-split/re-filtered on every iteration -- that
+    earlier shape was quadratic in the number of blocks, which is exactly the
+    case a non-matching `pattern` hits (it has to walk the whole file). A
+    block boundary lands mid-line, so the block's first line is still missing
+    its beginning; it is carried forward as `carry` and glued onto the front
+    of the NEXT (earlier) block's own text before that block is split, which
+    is where its true beginning lives. Once the read reaches byte 0 there is
+    no earlier block left to complete it, so what remains is a real line, not
+    a carry.
     """
     try:
         with log.open("rb") as fh:
             end = log.stat().st_size
-            data = b""
             found: list[str] = []
+            carry = ""
             while end > 0:
                 start = max(0, end - _TAIL_BLOCK)
                 fh.seek(start)
-                data = fh.read(end - start) + data
+                block = fh.read(end - start)
                 end = start
-                found = data.decode("utf-8", errors="replace").splitlines()
+                lines = (_decode(block) + carry).splitlines()
                 if start > 0:
-                    found = found[1:]
+                    carry = lines[0] if lines else ""
+                    lines = lines[1:]
+                else:
+                    carry = ""
                 if pattern:
-                    found = [ln for ln in found if pattern in ln]
+                    lines = [ln for ln in lines if pattern in ln]
+                found = lines + found
                 if len(found) >= n:
                     break
     except OSError:

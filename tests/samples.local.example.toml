@@ -67,7 +67,7 @@ DAYZ_MCP_SAMPLE_PNG_GRADED = 'E:\your\staging\YourMod\data\textures\thing_glass_
 # --- the knowledge corpus (test_knowledge_layers/parse/store.py) -------------
 # An unpacked scripts.pbo, and the Steam workshop folder full of real mods.
 DAYZ_MCP_VANILLA_SCRIPTS = 'E:\your\corpus\scripts'
-DAYZ_MCP_MODPACK = 'E:\Programs\Steam\steamapps\common\DayZ\!Workshop'
+DAYZ_MCP_MODPACK = 'E:\your\steam\steamapps\common\DayZ\!Workshop'
 
 # --- the vanilla layout corpus (test_layoutparse.py) ------------------------
 # An unpacked gui.pbo. There is no sample until you make one -- see the

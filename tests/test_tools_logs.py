@@ -207,6 +207,52 @@ def test_the_tail_of_a_big_log_is_read_from_the_end_not_from_the_start(tmp_path)
     assert _tail_lines(log, len(lines) * 2, "") == lines
 
 
+def test_the_tail_of_a_multi_megabyte_log_decodes_each_block_once(tmp_path, monkeypatch):
+    """de40203 made `_tail_lines` read backwards in blocks so it would not pay
+    for the whole log on every call -- but it re-decoded and re-split the
+    whole ACCUMULATED buffer every iteration, which is quadratic in the
+    number of blocks. The early `break` hides that whenever the answer is
+    near the end, but a `pattern` that matches nothing has to walk the whole
+    file, which is the ordinary case (log_tail(pattern=...) on a healthy
+    boot) and was measured at 1.325 s against 0.015 s for the naive whole-file
+    read on a 10.9 MB log.
+
+    This counts bytes handed to `_decode` instead of timing anything, so it
+    cannot flake: each block's bytes must be decoded exactly once, so the
+    total can never exceed the file's own size. The quadratic code would have
+    handed it several times the file's size on a log this big.
+    """
+    from dayz_mcp.tools import logs
+    from dayz_mcp.tools.logs import _tail_lines
+
+    log = tmp_path / "script_huge.log"
+    lines = [f"line {i} " + "x" * (i % 197) for i in range(140_000)]
+    text = "\n".join(lines) + "\n"
+    log.write_text(text, encoding="utf-8")
+    size = log.stat().st_size
+    assert size > 10 * 1024 * 1024  # the same order of magnitude as the review's sample
+
+    decoded_bytes = 0
+    real_decode = logs._decode
+
+    def counting_decode(block: bytes) -> str:
+        nonlocal decoded_bytes
+        decoded_bytes += len(block)
+        return real_decode(block)
+
+    monkeypatch.setattr(logs, "_decode", counting_decode)
+
+    # A pattern matching nothing walks the whole file -- the case that used to
+    # cost 88x what the code it replaced did.
+    assert _tail_lines(log, 50, "no such needle anywhere in this log") == []
+    assert decoded_bytes <= size, "decoded more bytes than the file holds -- not linear"
+
+    decoded_bytes = 0
+    naive = [ln for ln in text.splitlines() if "line 3 " in ln][-50:]
+    assert _tail_lines(log, 50, "line 3 ") == naive
+    assert decoded_bytes <= size
+
+
 def test_the_tail_of_a_short_or_missing_log_is_answered_not_raised(tmp_path):
     from dayz_mcp.tools.logs import _tail_lines
 

@@ -104,10 +104,12 @@ def offending_tokens(text: str, *, is_python: bool = False) -> set[str]:
 # spelled out in this file's own .pyc, where a grep across the tree finds it.
 OWNER_PREFIXES = (("Open", r"Zone\w*"), ("OZ", r"_\w+"), ("oz", r"_\w+"))
 OWNER_TOKEN = re.compile("|".join(r"\b" + head + tail for head, tail in OWNER_PREFIXES))
-#: Where the owner's prefixes are swept: the server, its tests, and the one
-#: document that describes it to a stranger. Plan folders and notes are the
-#: owner's own workspace and name his projects on purpose.
-OWNER_SCOPE = ("src", "tests", "README.md")
+#: Where the owner's prefixes are swept: the server, its tests, the bridge mod
+#: this server packs and ships (Enforce Script, not Python -- see the
+#: `@DZMCP_Bridge` allow-list entry above), and the one document that
+#: describes it to a stranger. Plan folders and notes are the owner's own
+#: workspace and name his projects on purpose.
+OWNER_SCOPE = ("src", "tests", "bridge", "README.md")
 
 
 def owner_tokens(text: str) -> set[str]:
