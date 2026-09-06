@@ -16,6 +16,19 @@ def require_project() -> Result | None:
 
 
 def project_open(path: str) -> Result:
+    """Open the project at `path` and make it the one every other tool acts on.
+
+    Reads its dayz-mcp.toml (and the uncommitted dayz-mcp.local.toml beside
+    it), then finds the game install and DayZ Tools. Call this first: every
+    other tool refuses until it has. The answer names what was found and what
+    was not, so a missing game or an unset stand_root is visible here rather
+    than as a failure three tools later.
+
+    Reopening the same project is routine and keeps a server this session
+    already started; switching to a different one leaves that server running
+    but stops tracking it, since a pid tracked across a switch would be
+    stopped on behalf of a project it has nothing to do with.
+    """
     loaded = load_profile(path)
     if not loaded.ok:
         return loaded
@@ -49,6 +62,13 @@ def project_open(path: str) -> Result:
 
 
 def project_status() -> Result:
+    """What is open right now: the project, the game and tools directories
+    found for it, whether a server this session started is still running, and
+    the jobs it has produced.
+
+    The tool to call when the state of the session is in doubt -- after a
+    reconnect, or before deciding whether something needs starting.
+    """
     guard = require_project()
     if guard:
         return guard

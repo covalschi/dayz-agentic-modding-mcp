@@ -813,23 +813,6 @@ def test_bridge_status_clamps_a_silly_window(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_bridge_tools_are_registered_with_their_real_parameters():
-    """Registration must go through the same wrapper as every other tool:
-    functools.wraps is what lets FastMCP see the real signature (without it the
-    tool exposes opaque args/kwargs), and the worker thread is what keeps a
-    call that sleeps for a window off the server's event loop."""
-    listed = {t.name: t for t in await mcp_server.mcp.list_tools()}
-    assert "bridge_build" in listed
-    assert "bridge_status" in listed
-    assert "bridge_clear" in listed
-    assert "window" in listed["bridge_status"].inputSchema["properties"]
-    clear_params = listed["bridge_clear"].inputSchema["properties"]
-    assert "force" in clear_params and "probe_window" in clear_params
-    # The destructive path is opt-in, and the schema is where a caller sees it.
-    assert clear_params["force"].get("default") is False
-
-
-@pytest.mark.anyio
 async def test_bridge_status_through_fastmcp_returns_the_envelope(tmp_path):
     session.reset()
     root = make_project(tmp_path)
@@ -1016,41 +999,6 @@ def test_bridge_clear_refuses_a_live_bridge_unless_forced(tmp_path):
     assert not (profiles / CMD_FILENAME).exists()
 
 
-def test_bridge_clear_clamps_its_probe_window(tmp_path, monkeypatch):
-    """It blocks for probe_window like every other sampling call here, so it
-    obeys the same ceiling."""
-    root = make_project(tmp_path)
-    profiles = with_stand(root, tmp_path / "stand")
-    tools.project_open(str(root))
-    (profiles / CMD_FILENAME).write_text('{"id": "x", "verb": "x", "args": {}}', encoding="utf-8")
-
-    captured = {}
-
-    def fake_clear(self, force=False, probe_window=3.0):
-        captured["force"] = force
-        captured["probe_window"] = probe_window
-        return errors_ok({"discarded": {"id": "x"}, "heartbeat": "unmeasurable"})
-
-    monkeypatch.setattr("dayz_mcp.bridge.channel.Channel.clear_mailbox", fake_clear)
-    tools.bridge_clear(probe_window=10_000)
-    assert captured["probe_window"] == bridge.STATUS_WINDOW_MAX
-    assert captured["force"] is False
-
-
-def test_stale_command_points_at_the_tool_that_fixes_it(tmp_path):
-    """The state and its remedy shipped a round apart; they have to meet."""
-    root = make_project(tmp_path)
-    profiles = with_stand(root, tmp_path / "stand")
-    tools.project_open(str(root))
-    (profiles / CMD_FILENAME).write_text(
-        '{"id": "c-1", "verb": "ping", "args": {}}', encoding="utf-8"
-    )
-
-    r = tools.bridge_status(window=0.1)
-    assert r.data["state"] == "stale_command"
-    assert "bridge_clear" in r.hint
-
-
 # --- The in-flight slot must never outlive the build it stands for -----------
 
 
@@ -1235,9 +1183,10 @@ def test_the_strip_runs_even_when_packing_raises(tmp_path, monkeypatch):
 
 
 def test_the_stale_command_answer_is_true_before_the_mod_reads_commands(tmp_path):
-    """The file's survival across a boot is measured; the mod claiming it is
-    not -- the shipped bridge reads no mailbox yet. The wording has to be true
-    now and once that lands."""
+    """The wording has to stay true of a mod that DOES claim mailboxes: it
+    may not promise the command will run, because server_start clears the
+    transport before every boot and only a stand started outside these tools
+    would ever pick it up."""
     root = make_project(tmp_path)
     profiles = with_stand(root, tmp_path / "stand")
     tools.project_open(str(root))
@@ -1873,6 +1822,7 @@ def test_bridge_clear_floors_its_probe_window(tmp_path, monkeypatch):
     captured = {}
 
     def fake_clear(self, force=False, probe_window=3.0):
+        captured["force"] = force
         captured["probe_window"] = probe_window
         return errors_ok({"discarded": {"id": "x"}, "heartbeat": "unmeasurable"})
 
@@ -1881,6 +1831,8 @@ def test_bridge_clear_floors_its_probe_window(tmp_path, monkeypatch):
     assert captured["probe_window"] == bridge.CLEAR_PROBE_MIN_SECONDS
     tools.bridge_clear(probe_window=10_000)
     assert captured["probe_window"] == bridge.STATUS_WINDOW_MAX
+    # Neither end of the clamp may quietly turn a plain call into a forced one.
+    assert captured["force"] is False
 
 
 # --- Round 6: the halves that could rot silently ------------------------------

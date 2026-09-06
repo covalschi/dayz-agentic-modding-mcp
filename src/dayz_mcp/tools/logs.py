@@ -73,6 +73,14 @@ def log_verdict(source: str = "server", since: float | None = None) -> Result:
 
 
 def log_tail(source: str = "server", pattern: str = "", n: int = 50) -> Result:
+    """The last `n` lines of the newest log, optionally only the lines
+    containing `pattern`.
+
+    `source` is "server" (the stand's own script log) or "client" (the log the
+    last client_compile_check produced). Raw text, deliberately: log_verdict is
+    the tool that judges a run, and this is the one for looking at what it
+    judged -- or at a boot that has not finished yet.
+    """
     guard = require_project()
     if guard:
         return guard

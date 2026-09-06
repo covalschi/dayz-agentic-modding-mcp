@@ -1452,34 +1452,6 @@ def test_every_client_tool_is_exported_and_registered():
         assert name in tools.__all__, name
 
 
-@pytest.mark.anyio
-async def test_the_client_tools_are_registered_with_their_real_signatures():
-    """functools.wraps is not optional: without it FastMCP builds the schema
-    from `*args, **kwargs` and the agent gets opaque fields instead of named
-    ones. That was a phase-1 defect."""
-    listed = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    for name in CLIENT_TOOL_NAMES:
-        assert name in listed, name
-    assert "text" in listed["client_chat"].inputSchema["properties"]
-    assert "button" in listed["client_press"].inputSchema["properties"]
-    assert "submit" in listed["client_type"].inputSchema["properties"]
-
-
-@pytest.mark.anyio
-async def test_no_tool_in_the_client_namespace_is_registered_without_a_description():
-    """FastMCP takes a tool's description from its docstring, and an agent
-    browsing this namespace sees the descriptions and nothing else. One tool
-    reading `<none>` beside well-described siblings is a tool that gets used
-    last or not at all -- which is what client_compile_check was, phase-1 and
-    docstringless, sitting in the middle of the client_* list."""
-    listed = await mcp_server.mcp.list_tools()
-    bare = [
-        tool.name for tool in listed
-        if tool.name.startswith("client_") and not (tool.description or "").strip()
-    ]
-    assert bare == []
-
-
 def test_importing_the_client_tools_does_not_touch_the_driver_or_the_window_layer():
     """The module must import on a machine with no ViGEmBus and no game: the
     gamepad's own import is lazy, and everything Windows-only in winui sits

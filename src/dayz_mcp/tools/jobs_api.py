@@ -21,6 +21,12 @@ def _job_or_error(job_id: str):
 
 
 def job_status(job_id: str) -> Result:
+    """Where a job started by mod_build, server_start, bridge_build or an
+    asset tool has got to: queued, running, done or failed, with its summary
+    or its error and the artifacts it has collected so far.
+
+    Answers immediately -- use job_wait to block until it finishes.
+    """
     job, err = _job_or_error(job_id)
     return err or ok(job.to_dict())
 
@@ -39,5 +45,11 @@ def job_wait(job_id: str, timeout: float = 60) -> Result:
 
 
 def job_artifacts(job_id: str) -> Result:
+    """The files a job left behind, and the directory holding them.
+
+    Logs, packed pbos, exported models -- whatever the job recorded as worth
+    keeping. The directory is named too, because the useful next step is
+    usually reading one of these files rather than the list of them.
+    """
     job, err = _job_or_error(job_id)
     return err or ok({"artifacts": job.artifacts, "dir": str(session.jobs().artifacts_dir(job_id))})

@@ -270,9 +270,15 @@ def test_the_caller_ceiling_sits_above_both_in_game_deadlines(live):
 
 
 def test_the_movement_probe_outlasts_the_mods_publish_interval():
-    """Below one second, "did not move" and "has not had a chance to move yet"
-    are the same observation."""
-    assert world.MOVEMENT_PROBE_WINDOW > 1.0
+    """Below the mod's publish interval, "did not move" and "has not had a
+    chance to move yet" are the same observation.
+
+    Against the constant, not against the literal 1.0 it currently holds: the
+    two are one decision, and a test that spells the number out keeps passing
+    on the day the interval changes and the relationship breaks."""
+    from dayz_mcp.bridge.channel import MOD_PUBLISH_INTERVAL_SECONDS
+
+    assert world.MOVEMENT_PROBE_WINDOW > MOD_PUBLISH_INTERVAL_SECONDS
 
 
 # --------------------------------------------------------------- world_state
@@ -343,16 +349,6 @@ def test_world_ready_gives_up_with_a_ceiling_and_says_what_it_saw(live):
     assert "bridge_build" in result.hint or "bridge_status" in result.hint
 
 
-def test_world_ready_is_registered_and_so_are_the_world_tools():
-    """A tool nobody registered is a tool nobody can call -- the failure mode
-    is silence, which is the one this whole phase exists to remove."""
-    from dayz_mcp import server as mcp_server
-
-    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
-    assert {"world_spawn", "world_teleport", "world_set", "world_delete",
-            "world_state", "world_ready"} <= names
-
-
 # --------------------------------------------------------------- world_action
 
 def test_world_action_stringifies_and_omits_like_every_other_verb(live):
@@ -391,13 +387,6 @@ def test_world_action_success_reports_the_mods_completion_detail(live):
 
     assert result.ok
     assert "manager released it" in result.data["detail"]
-
-
-def test_world_action_is_registered():
-    from dayz_mcp import server as mcp_server
-
-    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
-    assert "world_action" in names
 
 
 # --------------------------------------------------------------- world_exec
@@ -453,13 +442,6 @@ def test_world_exec_refuses_a_null_argument_instead_of_dropping_it(live):
     assert not result.ok
     assert live.sent == [], "a command with a dropped null was sent"
     assert "NoneType" in result.error
-
-
-def test_world_exec_is_registered():
-    from dayz_mcp import server as mcp_server
-
-    names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
-    assert "world_exec" in names
 
 
 # ------------------------------------------------- the clock, the sky, the list

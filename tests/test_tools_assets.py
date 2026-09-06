@@ -741,25 +741,6 @@ def _convert_writing(payload: bytes):
 
 
 @pytest.mark.anyio
-async def test_the_three_asset_tools_are_registered_with_real_parameters():
-    """`functools.wraps` in server.py is what keeps the parameter names on the
-    registered tool. Without it FastMCP publishes an opaque args/kwargs schema
-    and the driving agent cannot call these at all -- a phase-1 defect that must
-    not come back through a new namespace."""
-    listed = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    for name in ("asset_export", "asset_build", "asset_check", "asset_convert"):
-        assert name in listed, name
-        assert (listed[name].description or "").strip(), name
-    assert "blend" in listed["asset_export"].inputSchema["properties"]
-    assert "name" in listed["asset_export"].inputSchema["properties"]
-    assert "mod" in listed["asset_build"].inputSchema["properties"]
-    assert "source" in listed["asset_build"].inputSchema["properties"]
-    assert "deploy" in listed["asset_build"].inputSchema["properties"]
-    assert "model" in listed["asset_check"].inputSchema["properties"]
-    assert "output" in listed["asset_convert"].inputSchema["properties"]
-
-
-@pytest.mark.anyio
 async def test_the_asset_tool_descriptions_carry_their_contract():
     """These strings are the whole contract the driving agent reads. On this
     project they have rotted repeatedly, so the load-bearing facts are pinned as

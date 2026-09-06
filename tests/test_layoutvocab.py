@@ -26,5 +26,10 @@ def test_the_shipped_vocabulary_knows_the_common_widgets_and_keys():
     for key in ("size", "position", "hexactsize", "exact text", "exact text size",
                 "text halign", "Size To Content V", "Scrollbar V", "style", "scriptclass"):
         assert key in vocab["keys"], key
-    assert vocab["build"] == "124708"
+    # The BUILD is data, not behaviour: pinned to its exact digits, this test
+    # failed the day the vocabulary was regenerated against the next DayZ
+    # build -- for no behavioural reason. What has to hold is that the file
+    # says WHICH build it was generated from, and that the generator parsed
+    # every layout it was given.
+    assert vocab["build"].isdigit()
     assert vocab["unparsed"] == []

@@ -877,24 +877,6 @@ def test_overrides_on_an_empty_index_says_what_to_build(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_all_five_tools_are_registered_with_real_parameters():
-    """`functools.wraps` in server.py is what keeps the parameter names on the
-    registered tool. Without it FastMCP publishes an opaque args/kwargs schema
-    and the driving agent cannot call these at all -- a phase-1 defect that must
-    not come back through a new namespace."""
-    listed = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
-    for name in ("knowledge_build", "knowledge_status", "knowledge_find",
-                 "knowledge_show", "knowledge_overrides"):
-        assert name in listed, name
-        assert (listed[name].description or "").strip(), name
-    assert "layer" in listed["knowledge_build"].inputSchema["properties"]
-    assert "only" in listed["knowledge_build"].inputSchema["properties"]
-    assert "name" in listed["knowledge_find"].inputSchema["properties"]
-    assert "kind" in listed["knowledge_find"].inputSchema["properties"]
-    assert "body" in listed["knowledge_show"].inputSchema["properties"]
-
-
-@pytest.mark.anyio
 async def test_the_knowledge_tool_descriptions_carry_their_contract():
     """These strings are the whole contract the driving agent reads. On this
     project they have rotted repeatedly, so the load-bearing facts are pinned

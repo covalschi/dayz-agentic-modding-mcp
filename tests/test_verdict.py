@@ -78,13 +78,10 @@ def test_huge_error_count_is_capped_but_the_true_total_is_reported():
 # --- Engine statements that make a run bad whatever the mod declares ---
 
 
-def test_a_mission_with_no_main_function_fails_the_verdict(tmp_path):
+def test_a_mission_with_no_main_function_fails_the_verdict():
     """The line another session's stand produced while every other signal said
     the boot was fine: the port bound, no error was logged, and the verdict
     passed -- on a server that had already decided nobody may connect."""
-    from dayz_mcp.profile import ExpectCfg
-    from dayz_mcp.verdict import build_verdict
-
     lines = [
         "SCRIPT       : Module: Mission; loaded 216x files; 450x classes;",
         "SCRIPT       : Mission script has no main function, player connect will stay disabled!",
@@ -94,14 +91,11 @@ def test_a_mission_with_no_main_function_fails_the_verdict(tmp_path):
     assert any("no main function" in r for r in got["reasons"])
 
 
-def test_the_engine_defaults_do_not_replace_what_a_profile_declares(tmp_path):
+def test_the_engine_defaults_do_not_replace_what_a_profile_declares():
     """Same shape as noise: the profile's list ADDS to the built-in one. A
     profile that declared its own forbidden string and thereby switched off the
     engine's would be a trap nobody would notice until the boot it was meant to
     catch."""
-    from dayz_mcp.profile import ExpectCfg
-    from dayz_mcp.verdict import build_verdict
-
     expect = ExpectCfg(forbid=["MyModExploded"])
     lines = ["SCRIPT       : Mission script has no main function, player connect will stay disabled!"]
     got = build_verdict(lines, expect)

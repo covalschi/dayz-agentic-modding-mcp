@@ -242,7 +242,6 @@ def test_a_config_outside_the_stand_is_refused(tmp_path):
     outside = tmp_path / "outside.cfg"
     outside.write_bytes(b"verifySignatures = 2;\r\n")
     _root, stand = make_project(tmp_path)
-    (stand / "..").resolve()
 
     import textwrap as _tw
     root = tmp_path / "project"
