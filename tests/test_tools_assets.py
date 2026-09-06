@@ -912,6 +912,7 @@ def _live_project(tmp_path: Path, monkeypatch) -> tuple[Path, str, str]:
 
 @needs_sample
 @needs_tools
+@pytest.mark.corpus
 def test_a_real_model_is_built_from_its_mlod_and_lands_in_the_mod(tmp_path, monkeypatch):
     """The live acceptance: MLOD in, ODOL out, judged, deployed. About 80 s."""
     root, mod, rel = _live_project(tmp_path, monkeypatch)
@@ -941,6 +942,7 @@ def test_a_real_model_is_built_from_its_mlod_and_lands_in_the_mod(tmp_path, monk
 
 
 @needs_sample
+@pytest.mark.corpus
 def test_asset_check_reads_a_real_mod_without_building_anything(tmp_path, monkeypatch):
     """The staging tree IS a mod-shaped tree: models beside their textures. Read
     as one, every check must answer, and nothing may be written."""
@@ -965,6 +967,7 @@ def test_asset_check_reads_a_real_mod_without_building_anything(tmp_path, monkey
     find_tools() is None or not (Path(find_tools() or ".") / IMAGETOPAA_REL).is_file(),
     reason="DayZ Tools with ImageToPAA.exe is not installed here",
 )
+@pytest.mark.corpus
 def test_a_real_png_converts_and_c7_answers_from_the_source(tmp_path, monkeypatch):
     root = open_project(tmp_path, monkeypatch, tools_root=Path(find_tools()))
     target = root / MOD / "sample_co.png"

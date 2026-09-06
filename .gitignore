@@ -8,6 +8,11 @@ dist/
 .dayz-mcp/
 dayz-mcp.local.toml
 
+# where THIS machine keeps the artifacts the corpus tests read; a path out of
+# one disk is a fact about that disk. tests/samples.local.example.toml is the
+# committed half that says what may go in it.
+tests/samples.local.toml
+
 # bridge/ is source; its packed output (pbo, signature, borrowed public key)
 # is a build artifact like any other project's @ModName, reproduced by
 # packer.pack_one from bridge/ -- never committed.

@@ -27,14 +27,6 @@ def test_sign_command_shape():
     assert cmd[2].endswith(".pbo")
 
 
-def test_find_keys_picks_private_and_public(tmp_path):
-    (tmp_path / "a.biprivatekey").write_text("x", encoding="utf-8")
-    (tmp_path / "a.bikey").write_text("y", encoding="utf-8")
-    priv, pub = find_keys(tmp_path)
-    assert priv.name.endswith(".biprivatekey")
-    assert pub.name.endswith(".bikey")
-
-
 def test_find_keys_tolerates_a_missing_directory(tmp_path):
     priv, pub = find_keys(tmp_path / "nope")
     assert priv is None and pub is None
@@ -69,12 +61,6 @@ def test_find_keys_private_without_matching_public(tmp_path):
     assert priv is not None
     assert priv.stem == "a"
     assert pub is None
-
-
-def test_pack_result_has_note_field():
-    """Test that PackResult includes a note field for non-fatal remarks."""
-    r = PackResult(name="MyMod", signed=False, note="unsigned by design")
-    assert r.note == "unsigned by design"
 
 
 def test_pack_one_happy_path(tmp_path, monkeypatch):

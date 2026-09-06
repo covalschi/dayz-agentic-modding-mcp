@@ -800,6 +800,7 @@ VANILLA = Path(os.environ.get("DAYZ_MCP_VANILLA_SCRIPTS", ""))
     not (VANILLA.name and VANILLA.is_dir()),
     reason="set DAYZ_MCP_VANILLA_SCRIPTS to an unpacked scripts.pbo to run",
 )
+@pytest.mark.corpus
 def test_real_vanilla_file_parses_with_plausible_shape():
     """The hermetic tests above prove the shapes; this one proves the shapes
     were real. Skipped anywhere the corpus is not unpacked."""

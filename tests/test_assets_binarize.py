@@ -517,6 +517,7 @@ live = pytest.mark.skipif(
 
 
 @live
+@pytest.mark.corpus
 def test_binarize_really_builds_a_working_model_from_the_declared_root(tmp_path):
     """The acceptance, on the real tool and a real model.
 
@@ -547,6 +548,7 @@ def test_binarize_really_builds_a_working_model_from_the_declared_root(tmp_path)
 
 
 @live
+@pytest.mark.corpus
 def test_the_same_model_from_a_root_one_level_too_deep_never_starts(tmp_path):
     """The counterpart, on the real layout: the mistake that produced a broken
     artifact with a success code cannot reach the tool at all."""

@@ -1,0 +1,87 @@
+# Where THIS machine keeps the real artifacts the corpus tests read.
+#
+# Copy to `tests/samples.local.toml` (git-ignored) and put your own paths in.
+# `tests/conftest.py` reads that file and exports every key below into the
+# environment before any test module is imported -- which is when the corpus
+# tests decide whether to skip -- and never overwrites a variable the
+# environment already carries, so a one-off `VAR=... pytest` still wins.
+#
+# Without the file every corpus test skips and the hermetic half of the suite
+# still runs. That is the supported state for a fresh clone; the file exists so
+# that a machine which HAS the artifacts stops silently skipping 60-odd tests
+# that are the only ones checking the readers against real data.
+#
+# Keys are the environment variable names themselves, values are TOML literal
+# strings (single quotes) so Windows backslashes need no escaping. A key whose
+# artifact you do not have: leave it out, and only the tests that need it skip.
+
+# --- the p3d/rvmat/png corpus (tests/test_assets_checks.py, _p3d.py) ---------
+# Roles describe the PROPERTY under test, never the mod they came from.
+
+# A binarized model that works in game, the prefix its references carry, and
+# the directory that prefix names.
+DAYZ_MCP_SAMPLE_ODOL = 'E:\your\mod\data\models\thing.p3d'
+DAYZ_MCP_SAMPLE_PREFIX = 'your_mod'
+DAYZ_MCP_SAMPLE_ROOT = 'E:\your\mod'
+# Its MLOD source, the model.cfg beside it, the model.cfg in the build root,
+# and a hidden selection its config declares.
+DAYZ_MCP_SAMPLE_MLOD = 'E:\your\mod\source\thing_mlod.p3d'
+DAYZ_MCP_SAMPLE_MODEL_CFG = 'E:\your\mod\data\models\model.cfg'
+DAYZ_MCP_SAMPLE_MODEL_CFG_BUILT = 'E:\your\staging\YourMod\data\models\model.cfg'
+DAYZ_MCP_SAMPLE_HIDDEN_SELECTION = 'surf_body'
+
+# A second working build from ANOTHER mod, with its own prefix and source dir.
+DAYZ_MCP_SAMPLE_ODOL_ALT = 'E:\your\staging_bin\other_thing.p3d'
+DAYZ_MCP_SAMPLE_PREFIX_ALT = 'other_mod'
+DAYZ_MCP_SAMPLE_ROOT_ALT = 'E:\your\other-mod\OtherMod'
+
+# A build made from the wrong directory (its rvmat references never resolved),
+# and the prefix that build nevertheless carries correctly.
+DAYZ_MCP_SAMPLE_ODOL_NO_RVMAT = 'E:\your\staging_wrong_bin\thing.p3d'
+DAYZ_MCP_SAMPLE_PREFIX_NO_RVMAT = 'someone_elses_prefix'
+# A build whose paths were stripped -- must come from the same mod as
+# ODOL_ALT, because two checks pair it with PREFIX_ALT.
+DAYZ_MCP_SAMPLE_ODOL_FOREIGN = 'E:\your\staging_bin\other_thing_two.p3d'
+
+# An rvmat whose texture stages stay inside its own mod.
+DAYZ_MCP_SAMPLE_RVMAT = 'E:\your\mod\data\textures\thing.rvmat'
+
+# PNG sources, each paired with the .paa sitting beside it under the same stem:
+# one opaque (converted to DXT1), one graded and kept (DXT5), one graded and
+# lost (graded source flattened into DXT1).
+DAYZ_MCP_SAMPLE_PNG_OPAQUE = 'E:\your\staging\YourMod\data\textures\thing_co.png'
+DAYZ_MCP_SAMPLE_PNG_GRADED_KEPT = 'E:\your\staging\YourMod\data\textures\thing_glass_ca.png'
+DAYZ_MCP_SAMPLE_PNG_GRADED_LOST = 'E:\your\staging\YourMod\data\textures\thing_glass_co.png'
+
+# --- binarize and the paa round trip (test_assets_binarize.py, _paa.py) ------
+# A directory whose children are prefix trees, the prefix folder inside it to
+# build, and the model directory relative to that folder. The test COPIES the
+# root before building; nothing is written where it points.
+DAYZ_MCP_SAMPLE_PROJECT_ROOT = 'E:\your\staging'
+DAYZ_MCP_SAMPLE_SOURCE_REL = 'data/models'
+# A PNG with several alpha levels and a .paa beside it. DayZ Tools must be
+# installed for these; the tests skip without it.
+DAYZ_MCP_SAMPLE_PNG_ALPHA = 'E:\your\staging\YourMod\data\textures\thing_glass_ca.png'
+DAYZ_MCP_SAMPLE_PNG_GRADED = 'E:\your\staging\YourMod\data\textures\thing_glass_ca.png'
+
+# --- the knowledge corpus (test_knowledge_layers/parse/store.py) -------------
+# An unpacked scripts.pbo, and the Steam workshop folder full of real mods.
+DAYZ_MCP_VANILLA_SCRIPTS = 'E:\your\corpus\scripts'
+DAYZ_MCP_MODPACK = 'E:\Programs\Steam\steamapps\common\DayZ\!Workshop'
+
+# --- the vanilla layout corpus (test_layoutparse.py) ------------------------
+# An unpacked gui.pbo. There is no sample until you make one -- see the
+# "corpus tests" section of the README for the one command that does it.
+# DAYZ_GUI_LAYOUTS = 'E:\your\corpus\gui\gui\layouts'
+
+# --- the Blender export corpus (test_assets_blend.py) -----------------------
+# A .blend, the root its texture paths resolve against, the prefix folder
+# inside that root, and the model directory relative to it. These launch real
+# Blender and need the Arma 3 Object Builder add-on enabled in the Blender
+# `find_blender()` picks; without the add-on they skip. Each export writes one
+# file under <BLEND_ROOT>/<BLEND_PREFIX>/<BLEND_REL> and removes it again, so
+# point BLEND_ROOT somewhere you do not mind being written to.
+DAYZ_MCP_SAMPLE_BLEND = 'E:\your\3d\src\thing.blend'
+DAYZ_MCP_SAMPLE_BLEND_ROOT = 'E:\your\staging'
+DAYZ_MCP_SAMPLE_BLEND_PREFIX = 'YourMod'
+DAYZ_MCP_SAMPLE_BLEND_REL = 'data/models'

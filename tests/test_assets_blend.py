@@ -555,6 +555,7 @@ needs_blender = pytest.mark.skipif(
 
 
 @needs_blender
+@pytest.mark.corpus
 def test_a_real_export_produces_an_mlod_the_checks_call_clean(tmp_path):
     target = Path(BLEND_ROOT) / BLEND_PREFIX / BLEND_REL / "corpus-export-check.p3d"
     try:
@@ -573,6 +574,7 @@ def test_a_real_export_produces_an_mlod_the_checks_call_clean(tmp_path):
 
 
 @needs_blender
+@pytest.mark.corpus
 def test_two_real_exports_differ_in_bytes_and_agree_in_structure(tmp_path):
     """The confirmation the fingerprint was built for, on real data rather than
     on a synthetic reordering.
@@ -612,6 +614,7 @@ def test_two_real_exports_differ_in_bytes_and_agree_in_structure(tmp_path):
 
 
 @needs_blender
+@pytest.mark.corpus
 def test_a_real_run_keeps_the_owners_blender_preferences_byte_identical(tmp_path):
     """Nothing this server does may outlive its own run. The driver turns off
     preference saving before it touches the project root, and this is the
@@ -634,6 +637,7 @@ def test_a_real_run_keeps_the_owners_blender_preferences_byte_identical(tmp_path
 
 
 @needs_blender
+@pytest.mark.corpus
 def test_a_real_run_finds_the_addon_and_names_what_it_had_stored(tmp_path):
     """`dir(bpy.ops.a3ob)` answering for real, through the shipped path."""
     target = Path(BLEND_ROOT) / BLEND_PREFIX / BLEND_REL / "corpus-export-addon.p3d"
@@ -652,6 +656,7 @@ def test_a_real_run_finds_the_addon_and_names_what_it_had_stored(tmp_path):
 
 
 @needs_blender
+@pytest.mark.corpus
 def test_the_real_log_is_almost_entirely_boilerplate(tmp_path):
     target = Path(BLEND_ROOT) / BLEND_PREFIX / BLEND_REL / "corpus-export-log.p3d"
     try:

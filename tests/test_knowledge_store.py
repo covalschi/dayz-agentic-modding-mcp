@@ -892,6 +892,7 @@ VANILLA = Path(os.environ.get("DAYZ_MCP_VANILLA_SCRIPTS", ""))
     not (VANILLA.name and VANILLA.is_dir()),
     reason="set DAYZ_MCP_VANILLA_SCRIPTS to an unpacked scripts.pbo to run",
 )
+@pytest.mark.corpus
 def test_the_real_corpus_stores_and_answers(tmp_path):
     """The shape that matters: 2810 files, tens of thousands of declarations,
     and the names this project actually looked up by hand in earlier sessions."""
@@ -948,6 +949,7 @@ def test_the_real_corpus_stores_and_answers(tmp_path):
     not (VANILLA.name and VANILLA.is_dir()),
     reason="set DAYZ_MCP_VANILLA_SCRIPTS to an unpacked scripts.pbo to run",
 )
+@pytest.mark.corpus
 def test_the_real_corpus_has_no_key_collisions(tmp_path):
     """Measured, not assumed: if two distinct declarations ever shared the
     record key, one of them would be lost on write. Across the whole corpus

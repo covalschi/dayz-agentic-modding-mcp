@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from dayz_mcp.bridge.protocol import (
     STATUSES,
     BridgeState,
@@ -125,31 +127,36 @@ def test_parse_state_preserves_session_id_exactly():
     assert state.session_id == "boot-restart-42"
 
 
-def test_parse_state_with_null_session_id_returns_none():
-    # A required KEY is not a required VALUE: null is present, but it is
-    # not a session id -- str(None) == "None" would otherwise silently
-    # "work" and compare equal to itself across every future boot too.
-    assert parse_state(_state_json(session_id=None)) is None
-
-
-def test_parse_state_with_empty_string_session_id_returns_none():
-    # The single most plausible Enforce-side mistake: an unset `string`
-    # field serialises as "", not as an absent key -- the missing-KEY guard
-    # above does not catch this, only a value check does. An empty string
-    # that stays constant across every boot would silently defeat restart
-    # detection (heartbeat would never see it change), which is the entire
-    # point of this field.
-    assert parse_state(_state_json(session_id="")) is None
-
-
-def test_parse_state_with_numeric_session_id_returns_none():
-    # 0 is falsy but not "missing" to a careless `if raw["session_id"]:`
-    # check, and str(0) == "0" would "work" as a constant, wrong session id.
-    assert parse_state(_state_json(session_id=0)) is None
-
-
-def test_parse_state_with_boolean_session_id_returns_none():
-    assert parse_state(_state_json(session_id=False)) is None
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param("session_id", None,
+                 id="null is present but is not a session id: str(None) would be 'None', "
+                    "equal to itself across every future boot"),
+    pytest.param("session_id", "",
+                 id="an unset Enforce `string` serialises as '' rather than an absent key, "
+                    "so only a value check catches it -- and a constant '' defeats restart "
+                    "detection exactly as a constant id would"),
+    pytest.param("session_id", 0,
+                 id="0 is falsy but not missing to a careless `if raw[...]`, and str(0) "
+                    "would 'work' as a constant, wrong session id"),
+    pytest.param("session_id", False, id="a bool is not a session id either"),
+    pytest.param("tick", "42", id="int('42') would silently accept a numeric string"),
+    pytest.param("tick", True,
+                 id="bool is a subtype of int, so int(True) == 1 would accept true as a tick"),
+    pytest.param("tick", 7.9,
+                 id="int(7.9) truncates to 7 instead of rejecting a value that was never a "
+                    "whole tick count"),
+])
+def test_a_state_field_of_the_wrong_type_is_refused_and_the_refusal_names_it(field, value):
+    """Both halves in one place: `parse_state` must return None, and
+    `parse_rejection` must be able to say which field was wrong. Written as
+    seven one-line tests each of these said only half of that, and the other
+    half was already being re-checked by the parse_rejection loops below."""
+    doc = _state_json(**{field: value})
+    assert parse_state(doc) is None
+    rejection = parse_rejection(doc)
+    assert rejection is not None
+    assert rejection.field == field
+    assert rejection.value == value
 
 
 def test_parse_state_with_non_empty_string_session_id_still_parses():
@@ -162,23 +169,6 @@ def test_parse_state_with_non_empty_string_session_id_still_parses():
 
 
 # --- tick: required, and must be a genuine JSON integer ---------------------
-
-
-def test_parse_state_with_string_tick_returns_none():
-    # int("42") would otherwise silently accept a numeric string.
-    assert parse_state(_state_json(tick="42")) is None
-
-
-def test_parse_state_with_boolean_tick_returns_none():
-    # bool is a subtype of int in Python -- int(True) == 1 would otherwise
-    # silently accept true/false as a tick.
-    assert parse_state(_state_json(tick=True)) is None
-
-
-def test_parse_state_with_float_tick_returns_none():
-    # int(7.9) truncates to 7 instead of rejecting a value that was never a
-    # whole tick count to begin with.
-    assert parse_state(_state_json(tick=7.9)) is None
 
 
 # --- correlation: a state can be reporting on someone else's command ----

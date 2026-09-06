@@ -309,12 +309,14 @@ needs_tool = pytest.mark.skipif(
 
 
 @needs_source
+@pytest.mark.corpus
 def test_a_real_source_texture_has_more_than_one_bit_of_alpha():
     assert alpha_levels(SOURCE) > 2
 
 
 @needs_source
 @needs_tool
+@pytest.mark.corpus
 def test_the_co_suffix_quantises_a_real_gradient_to_one_bit(tmp_path):
     """The measured law, on the real tool: alpha is not "cut", it is quantised
     to 1 bit by DXT1 -- and the suffix on the SOURCE name is what chooses DXT1.
@@ -343,6 +345,7 @@ def test_the_co_suffix_quantises_a_real_gradient_to_one_bit(tmp_path):
 
 @needs_source
 @needs_tool
+@pytest.mark.corpus
 def test_the_conversion_verifies_the_artifact_not_the_exit_code(tmp_path):
     """A conversion that reports success and wrote nothing is a failure here.
     The tool exits 1 and writes no file on a source it cannot load."""

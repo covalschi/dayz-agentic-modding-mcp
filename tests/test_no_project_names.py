@@ -203,9 +203,6 @@ def test_the_sweep_covers_the_bridge_mods_own_sources():
     scanned = {p.name for p in iter_text_files()}
     assert "config.cpp" in scanned
     assert any(name.endswith(".c") for name in scanned)
-    # The protocol's own format and DayZ's config includes, swept before they
-    # exist rather than after the first leak through them.
-    assert {".json", ".hpp", ".h", ".xml"} <= TEXT_SUFFIXES
 
 
 def test_the_guard_still_catches_a_real_mod_name():

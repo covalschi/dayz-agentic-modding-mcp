@@ -259,7 +259,7 @@ def test_silence_is_reported_as_silence_not_as_a_failed_command(live):
 
     assert not result.ok
     assert "never reported" in result.error
-    assert result.data is None or result.data == {} or True
+    assert result.data is None
 
 
 def test_the_caller_ceiling_sits_above_both_in_game_deadlines(live):

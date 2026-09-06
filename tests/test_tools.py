@@ -298,6 +298,8 @@ def test_server_start_finishes_promptly_when_no_ready_line_is_declared(tmp_path,
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
     # The port signal is watched for on this path now, bounded by its own
     # constant rather than by  -- squeezed here so the test still
     # asserts what it was written to assert: this configuration answers
@@ -332,6 +334,8 @@ def test_server_start_without_a_ready_line_still_reports_a_server_that_died(tmp_
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4321)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": False)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
 
     job_id = tools.server_start(timeout=300).data["job_id"]
     waited = tools.job_wait(job_id, timeout=20)
@@ -378,8 +382,11 @@ def test_server_start_ignores_a_stale_log_that_already_contains_the_marker(tmp_p
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 999)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)  # keeps "running"
+    # The fact under test is that a log older than this run cannot answer for
+    # it; the ceiling only has to be long enough to look more than once.
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
 
-    job_id = tools.server_start(timeout=3).data["job_id"]
+    job_id = tools.server_start(timeout=0.2).data["job_id"]
     waited = tools.job_wait(job_id, timeout=8)
     assert waited.data["status"] == "failed"
     assert "ready line" in waited.data["error"]
@@ -1476,6 +1483,8 @@ def test_a_transport_file_that_cannot_be_removed_does_not_fail_the_boot(tmp_path
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", lambda cmd, cwd: 4242)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
 
     started = tools.server_start(timeout=5)
     assert started.ok, started.error
@@ -1662,6 +1671,8 @@ def test_the_port_and_the_mission_module_are_the_readiness_signal(tmp_path, monk
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
 
     started = tools.server_start(timeout=30)
     assert started.ok, started.error
@@ -1728,8 +1739,9 @@ def test_a_missing_ready_line_over_a_listening_server_says_which_half_failed(tmp
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", spawn_that_binds)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: holders["pids"])
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
 
-    started = tools.server_start(timeout=3)
+    started = tools.server_start(timeout=0.2)
     waited = tools.job_wait(started.data["job_id"], timeout=20)
     assert waited.data["status"] == "failed"
     assert "holds udp/2302" in waited.data["error"]
@@ -2049,7 +2061,13 @@ def _bootable(tmp_path, monkeypatch, log_text: str, port_bound: bool = True):
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 6.0)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
+    # What these tests are about is which branch the worker takes, never how
+    # long it waited: at the real 2 s poll step against a 6 s ceiling each of
+    # them spent 6.1 s of the suite proving nothing about time.
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
     # Empty until the process exists: the same function answers the pre-flight
     # "is this port already held by somebody else" check, and a port that looks
     # held before the spawn refuses the boot outright.
@@ -2120,7 +2138,8 @@ def test_a_previous_boots_log_does_not_answer_for_this_one(tmp_path, monkeypatch
                         lambda cmd, cwd: (running.append(4321), 4321)[1])
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.is_alive", lambda pid, image="": True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.NO_READY_LINE_SETTLE_SECONDS", 0.05)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 5.0)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.PORT_READY_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.BOOT_POLL_SECONDS", 0.02)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.udp_port_holders", lambda port: list(running))
 
     started = tools.server_start(timeout=300)

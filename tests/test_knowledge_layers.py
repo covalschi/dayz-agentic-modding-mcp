@@ -390,26 +390,43 @@ def test_a_file_rewritten_to_the_same_size_at_the_same_time_is_still_caught(tmp_
     assert store.find("Omega", layer=PROJECT)
 
 
-def test_the_incremental_path_is_actually_faster(tmp_path, store):
-    """Incrementality that is written but not measured is a claim. Two hundred
-    files is small next to the real corpus and already enough for the
-    difference to be an order of magnitude."""
+def test_the_incremental_path_parses_only_what_changed(tmp_path, store, monkeypatch):
+    """Incrementality that is written but not measured is a claim -- so this
+    counts the work instead of timing it.
+
+    It used to time it: two warm SQLite runs a few milliseconds apart, with
+    `incremental * 5 < full` asserted between them. That is a ratio of two
+    numbers a GC pause or a busy machine moves by more than the ratio itself,
+    and it did fail that way. What incrementality actually promises is not a
+    duration, it is that an unchanged file is not parsed again -- one call for
+    the one file that changed, two hundred for the full rebuild that has to
+    look at everything. Counted, that claim cannot flake and says more.
+    """
     root = tmp_path / "mod"
     for i in range(200):
         write(root, f"s{i}.c", f"class C{i} extends Base {{ void M{i}(); }}\n")
     build_project(store, root, full=True)
 
-    started = time.perf_counter()
-    build_project(store, root, full=True)
-    full = time.perf_counter() - started
+    parsed: list[str] = []
+    real = layers_mod._parse_text
 
+    def counting(text, source_name, label):
+        parsed.append(source_name)
+        return real(text, source_name, label)
+
+    monkeypatch.setattr(layers_mod, "_parse_text", counting)
+
+    build_project(store, root, full=True)
+    full = list(parsed)
+
+    parsed.clear()
     touch(root / "s7.c", "class C7 extends Base { void M7(); void Extra(); }\n")
-    started = time.perf_counter()
     report = build_project(store, root)
-    incremental = time.perf_counter() - started
 
     assert report.indexed == 1
-    assert incremental * 5 < full, f"incremental {incremental:.4f}s vs full {full:.4f}s"
+    assert len(full) == 200
+    assert parsed == [name for name in parsed if name.endswith("s7.c")]
+    assert len(parsed) == 1, parsed
 
 
 def test_staleness_is_measured_without_a_second_pass_over_the_disk(tmp_path, store, monkeypatch):
@@ -804,6 +821,7 @@ MODPACK = Path(os.environ.get("DAYZ_MCP_MODPACK", ""))
     not (VANILLA.name and VANILLA.is_dir()),
     reason="set DAYZ_MCP_VANILLA_SCRIPTS to an unpacked scripts.pbo to run",
 )
+@pytest.mark.corpus
 def test_the_core_layer_on_the_real_corpus(tmp_path):
     with KnowledgeStore(tmp_path / "knowledge.db") as store:
         started = time.perf_counter()
@@ -830,6 +848,7 @@ def test_the_core_layer_on_the_real_corpus(tmp_path):
     not (MODPACK.name and MODPACK.is_dir()),
     reason="set DAYZ_MCP_MODPACK to a folder of installed mods to run",
 )
+@pytest.mark.corpus
 def test_the_deps_layer_on_a_real_modpack(tmp_path):
     """The first time this code meets somebody else's archives: obfuscated
     names, decoy entries, binarised configs, and whatever else three dozen

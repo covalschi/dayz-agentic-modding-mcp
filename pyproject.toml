@@ -30,6 +30,19 @@ dayz_mcp = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # A test that runs a real external tool (DayZ Tools, Blender) or indexes a
+    # whole real corpus (the unpacked vanilla scripts, a folder of installed
+    # mods). These are the tests that prove the readers against reality rather
+    # than against fixtures, and they are also the only ones that take
+    # minutes: the whole set is about twelve on this machine, against about
+    # two for everything else. So they are OUT of the default run and are one
+    # command away -- `pytest -m corpus` -- rather than being left to skip
+    # silently forever. See the README's "corpus tests" section, and
+    # tests/samples.local.example.toml for what they need pointed at.
+    "corpus: runs a real external tool or indexes a real corpus (minutes)",
+]
+addopts = "-m 'not corpus'"
 filterwarnings = [
     # Raised by mcp==1.29.0's own internal Settings model the moment FastMCP()
     # is constructed (pydantic_settings/sources/utils.py, unrelated to any of

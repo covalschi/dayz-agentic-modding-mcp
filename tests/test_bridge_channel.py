@@ -12,6 +12,8 @@ import json
 import threading
 import time
 
+import pytest
+
 from dayz_mcp.bridge import channel
 from dayz_mcp.bridge.channel import (
     CMD_FILENAME,
@@ -33,6 +35,22 @@ def _write_state(profiles_dir, **overrides) -> None:
 
 def _command_payload(cmd_id, status, detail="", finished_at=None) -> dict:
     return {"id": cmd_id, "status": status, "detail": detail, "finished_at": finished_at}
+
+
+@pytest.fixture
+def brief_publish_interval(monkeypatch):
+    """Shrink the protocol's 1 Hz publish interval for this test.
+
+    A dozen tests here needed a window LONGER than that interval, purely so
+    that "the tick did not move" would be a verdict the classifier is allowed
+    to trust -- and each paid a real second of the suite to say something about
+    a RULE, not about a duration. The rule reads the interval out of the module
+    at classification time, so shrinking it shrinks every window that exists
+    only to clear it. Tests that are about a gap being SHORTER than the
+    interval keep the real one: for them the number is the subject.
+    """
+    monkeypatch.setattr(channel, "MOD_PUBLISH_INTERVAL_SECONDS", 0.05)
+    return 0.05
 
 
 def _never_probe(window):
@@ -447,7 +465,7 @@ def test_heartbeat_detects_a_growing_tick(tmp_path):
     assert tick == 11
 
 
-def test_heartbeat_detects_a_stalled_tick(tmp_path):
+def test_heartbeat_detects_a_stalled_tick(tmp_path, brief_publish_interval):
     """window must be AT LEAST the mod's publish interval for a "stalled"
     verdict to be trustworthy -- the MEASURED gap between the two samples
     (here, essentially the whole window, since the file already exists
@@ -458,7 +476,7 @@ def test_heartbeat_detects_a_stalled_tick(tmp_path):
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=42, session_id="s1")
 
-    status, tick = ch.heartbeat(window=1.05)
+    status, tick = ch.heartbeat(window=brief_publish_interval * 2.4)
 
     assert status == HEARTBEAT_STALLED
     assert tick == 42
@@ -471,7 +489,7 @@ def test_heartbeat_with_no_state_file_is_unmeasurable(tmp_path):
     assert tick == 0
 
 
-def test_heartbeat_tolerates_a_single_torn_read(tmp_path):
+def test_heartbeat_tolerates_a_single_torn_read(tmp_path, brief_publish_interval):
     """A read that fails once (file not there yet -- the same symptom a torn
     write leaves) and recovers shortly after must not be mistaken for a dead
     bridge, only a genuine run of failures should be.
@@ -487,7 +505,7 @@ def test_heartbeat_tolerates_a_single_torn_read(tmp_path):
         _write_state(tmp_path, tick=3, session_id="s1")
 
     threading.Thread(target=create_soon, daemon=True).start()
-    status, tick = ch.heartbeat(window=1.1)
+    status, tick = ch.heartbeat(window=brief_publish_interval * 4)
 
     assert tick == 3
     assert status == HEARTBEAT_STALLED  # recovered to the same tick both times, not growth
@@ -537,7 +555,8 @@ def test_heartbeat_reports_restart_even_when_the_new_tick_is_higher(tmp_path):
     assert tick == 500
 
 
-def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(tmp_path):
+def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(
+        tmp_path, brief_publish_interval):
     """Only an INCREASE counts as growth: a same-session tick that moves
     backwards (should never happen for a well-behaved mod, but is not this
     module's job to assume away) reads as "stalled", not "growing" and not
@@ -551,7 +570,7 @@ def test_heartbeat_reports_stalled_for_a_backwards_tick_in_the_same_session(tmp_
         _write_state(tmp_path, tick=10, session_id="s1")
 
     threading.Thread(target=regress_soon, daemon=True).start()
-    status, tick = ch.heartbeat(window=1.05)
+    status, tick = ch.heartbeat(window=brief_publish_interval * 4)
 
     assert status == HEARTBEAT_STALLED
     assert tick == 10
@@ -614,7 +633,7 @@ def test_clear_mailbox_discards_a_wedged_command_when_bridge_is_not_alive(tmp_pa
     assert ch.send(_cmd("ping-2-1"), is_alive=True).ok
 
 
-def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
+def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path, brief_publish_interval):
     """A state file that exists but is frozen (same tick, same session,
     across the probe window) is the OTHER shape a genuinely down or
     not-yet-wired bridge can take -- e.g. a stale file left over from a
@@ -630,7 +649,7 @@ def test_clear_mailbox_proceeds_without_force_when_stalled(tmp_path):
     _write_state(tmp_path, tick=99, session_id="stale-session")
     assert ch.send(_cmd("ping-1-1"), is_alive=True).ok
 
-    result = ch.clear_mailbox(probe_window=1.05)
+    result = ch.clear_mailbox(probe_window=brief_publish_interval * 2.4)
 
     assert result.ok, result.error
     assert result.data["heartbeat"] == HEARTBEAT_STALLED
@@ -808,11 +827,11 @@ def test_clear_mailbox_does_not_destroy_a_late_appearing_live_bridges_command(tm
     assert ch.send(_cmd("in-flight"), is_alive=True).ok
 
     def appear_late():
-        time.sleep(0.8)
+        time.sleep(0.25)
         _write_state(tmp_path, tick=0, session_id="world-new")
 
     threading.Thread(target=appear_late, daemon=True).start()
-    result = ch.clear_mailbox(probe_window=1.0)
+    result = ch.clear_mailbox(probe_window=0.5)
 
     assert not result.ok
     assert (tmp_path / CMD_FILENAME).exists()  # NOT destroyed
@@ -847,7 +866,7 @@ def test_clear_mailbox_reports_what_it_actually_deleted_not_a_stale_read(tmp_pat
 # --- _sample_twice honours window on the FIRST sample too -------------------
 
 
-def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_path):
+def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_path, brief_publish_interval):
     """_read_state_tolerant's own retry budget is only ~0.1-0.15s -- far
     shorter than a realistic probe window. Before this fix, _sample_twice
     gave up on the FIRST sample after that short budget regardless of
@@ -867,7 +886,7 @@ def test_heartbeat_honours_window_when_the_first_sample_is_slow_to_appear(tmp_pa
         _write_state(tmp_path, tick=5, session_id="s1")
 
     threading.Thread(target=create_late, daemon=True).start()
-    status, tick = ch.heartbeat(window=1.8)
+    status, tick = ch.heartbeat(window=0.6)
 
     # Found the file (tick=5, not the "never found it" tick=0 fallback) --
     # and, since the window left a comfortable gap after catching it, a
@@ -892,11 +911,11 @@ def test_heartbeat_does_not_call_a_late_appearing_bridge_frozen(tmp_path):
     ch = Channel(tmp_path)
 
     def appear_late():
-        time.sleep(0.8)
+        time.sleep(0.25)
         _write_state(tmp_path, tick=0, session_id="world-new")
 
     threading.Thread(target=appear_late, daemon=True).start()
-    status, tick = ch.heartbeat(window=1.0)
+    status, tick = ch.heartbeat(window=0.5)
 
     assert status != HEARTBEAT_STALLED
     assert tick == 0  # found the file -- not the "never found it" fallback either
@@ -916,13 +935,13 @@ def test_clear_mailbox_honours_probe_window_when_the_bridge_is_slow_to_become_re
     assert ch.send(cmd, is_alive=True).ok
 
     def go_live_late():
-        time.sleep(0.3)
+        time.sleep(0.2)
         _write_state(tmp_path, tick=5, session_id="s1")
-        time.sleep(0.3)
+        time.sleep(0.2)
         _write_state(tmp_path, tick=6, session_id="s1")
 
     threading.Thread(target=go_live_late, daemon=True).start()
-    result = ch.clear_mailbox(probe_window=1.0)
+    result = ch.clear_mailbox(probe_window=0.6)
 
     assert not result.ok
     assert (tmp_path / CMD_FILENAME).exists()  # NOT destroyed
@@ -988,17 +1007,18 @@ def test_heartbeat_detail_exposes_the_session_id_when_growing(tmp_path):
     assert sample.previous_session_id is None
 
 
-def test_heartbeat_detail_exposes_the_session_id_when_stalled(tmp_path):
+def test_heartbeat_detail_exposes_the_session_id_when_stalled(tmp_path, brief_publish_interval):
     # window >= the publish interval -- see test_heartbeat_detects_a_stalled_tick's note.
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=42, session_id="s1")
 
-    sample = ch.heartbeat_detail(window=1.05)
+    sample = ch.heartbeat_detail(window=brief_publish_interval * 2.4)
 
     assert sample.status == HEARTBEAT_STALLED
     assert sample.session_id == "s1"
     assert sample.gap is not None
-    assert sample.gap >= 1.0  # "stalled" only fires once gap has cleared the publish interval
+    # "stalled" only fires once the gap has cleared the publish interval.
+    assert sample.gap >= brief_publish_interval
     assert sample.previous_session_id is None
 
 
@@ -1053,7 +1073,7 @@ def test_heartbeat_detail_session_id_reflects_the_readable_first_sample_on_lost_
 # --- HeartbeatSample.gap: tells "gap too short" apart from "sample lost" ----
 
 
-def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_path):
+def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_path, brief_publish_interval):
     """The exact distinction this field exists for. Both scenarios below
     report status == "unmeasurable" with an identical shape everywhere
     except gap -- collapsing them (as the pre-fix HeartbeatSample did) would
@@ -1068,7 +1088,7 @@ def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_pa
     a_dir.mkdir()
     ch_a = Channel(a_dir)
     _write_state(a_dir, tick=10, session_id="s1")
-    short_gap_sample = ch_a.heartbeat_detail(window=0.1)
+    short_gap_sample = ch_a.heartbeat_detail(window=brief_publish_interval / 2.5)
 
     # Scenario B: the first sample succeeds, but the file is deleted before
     # the second read -- "unmeasurable" because a read genuinely failed,
@@ -1083,7 +1103,7 @@ def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_pa
         (b_dir / STATE_FILENAME).unlink()
 
     threading.Thread(target=delete_soon, daemon=True).start()
-    lost_sample_sample = ch_b.heartbeat_detail(window=1.5)
+    lost_sample_sample = ch_b.heartbeat_detail(window=0.4)
 
     assert short_gap_sample.status == HEARTBEAT_UNMEASURABLE
     assert lost_sample_sample.status == HEARTBEAT_UNMEASURABLE
@@ -1096,10 +1116,11 @@ def test_heartbeat_detail_distinguishes_short_gap_from_lost_second_sample(tmp_pa
     assert short_gap_sample.gap < 1.0  # too short to trust -- ask again with a bigger window
 
     assert lost_sample_sample.gap is not None
-    assert lost_sample_sample.gap >= 1.0  # waited at least a full publish interval, still lost
+    # waited at least a full publish interval, and still lost the sample
+    assert lost_sample_sample.gap >= brief_publish_interval
 
 
-def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
+def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path, brief_publish_interval):
     """heartbeat()'s own public contract must stay exactly (status, tick) --
     unpacking into more than two variables must fail, the same way it would
     have before heartbeat_detail/HeartbeatSample existed. Nothing already
@@ -1110,7 +1131,7 @@ def test_heartbeat_still_returns_a_plain_two_tuple(tmp_path):
     ch = Channel(tmp_path)
     _write_state(tmp_path, tick=1, session_id="s1")
 
-    result = ch.heartbeat(window=1.05)
+    result = ch.heartbeat(window=brief_publish_interval * 2.4)
 
     assert isinstance(result, tuple)
     assert len(result) == 2

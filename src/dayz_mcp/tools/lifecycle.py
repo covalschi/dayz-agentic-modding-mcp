@@ -62,6 +62,13 @@ PORT_READY_WAIT_SECONDS = 90.0
 # difference -- which is exactly what the job summary then says.
 NO_READY_LINE_SETTLE_SECONDS = 3.0
 
+# How often the boot watcher looks again. Two seconds against a boot measured
+# in tens of them: often enough that the answer is prompt, rare enough that the
+# looking (a window enumeration, a liveness check, a log tail) costs nothing
+# next to the boot itself. Named rather than written into the loops so a test
+# about which branch the worker takes need not spend real seconds proving it.
+BOOT_POLL_SECONDS = 2.0
+
 
 def _stand() -> Path:
     prof = session.profile()
@@ -980,7 +987,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                     if not is_alive(pid, image=srv_image):
                         store.fail(job.id, "the server process died before it bound its port")
                         return
-                    time.sleep(2)
+                    time.sleep(BOOT_POLL_SECONDS)
 
                 # Listening but with no mission scripts is the one shape that
                 # must NOT be called ready: the engine answers queries and
@@ -1045,7 +1052,7 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
                                     f"{transport_note}{extras_note}",
                         )
                         return
-                time.sleep(2)
+                time.sleep(BOOT_POLL_SECONDS)
             if port_bound or pid in udp_port_holders(port):
                 store.fail(
                     job.id,
