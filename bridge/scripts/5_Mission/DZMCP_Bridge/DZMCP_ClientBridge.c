@@ -172,11 +172,13 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
     // ---- the verbs ---------------------------------------------------------
 
-    protected bool RootNameOk(string which)
-    {
-        return which == "menu" || which == "screen" || which == "preview";
-    }
-
+    // The root a verb was pointed at. Four reserved words -- menu, screen,
+    // workspace, preview -- and past them a WIDGET NAME, which DZMCP_Ui.Root
+    // looks up under the workspace. There is deliberately no "is this one of
+    // the allowed words" test any more: a window a mod creates under the
+    // workspace root is not a menu and has no reserved word of its own, and
+    // rejecting its name before looking would be this bridge deciding that
+    // only the UI it already knows about exists.
     protected Widget ResolveRoot(string which, out string why)
     {
         why = "";
@@ -194,6 +196,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     {
         m_State.world.ui_root = which;
         m_State.world.ui_total = walk.total;
+        m_State.world.ui_matched = walk.MatchedOrNone();
         m_State.world.ui_nodes.Clear();
         for (int i = 0; i < walk.lines.Count(); i++)
             m_State.world.ui_nodes.Insert(walk.lines.Get(i));
@@ -201,7 +204,8 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
     // ui_tree: the widget tree, as a page.
     //
-    //   root   "menu" (the open scripted menu, the default) or "screen"
+    //   root   "menu" (the open scripted menu, the default), "screen" or
+    //          "workspace", "preview", or the NAME of a widget
     //   depth  how deep to go; the root is depth 0
     //   limit  how many nodes to RECORD. The number VISITED is reported whole
     //          either way, so a page never reads as the whole interface.
@@ -213,12 +217,6 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (!RootNameOk(which))
-        {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_tree: root must be menu, screen or preview, not " + Excerpt(which));
-            return;
-        }
-
         string why;
         Widget root = ResolveRoot(which, why);
         if (!root)
@@ -245,6 +243,15 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
     // to receive the whole tree to filter it -- and the whole tree is exactly
     // what the page limit exists to avoid sending.
     //
+    // Filtered DURING the walk rather than over what the walk recorded. The
+    // old order applied the filter to the first 300 nodes kept, so a widget
+    // deeper in the tree than that could not be found at all without the
+    // caller already knowing its offset -- which is the very thing a search
+    // exists to find out (measured on the stand 2026-09-06: a window at node
+    // 2300 of the workspace needed offset=2300 to be seen). `total` still
+    // counts every node VISITED, the same number ui_tree reports; `matched`
+    // is the new one, and it is what the page is measured against.
+    //
     // Exact, case-sensitive matching on name and class; `text` is a substring,
     // because a label's text is the one field nobody knows exactly in advance.
     protected void VerbUiFind(map<string, string> args)
@@ -253,12 +260,6 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (!RootNameOk(which))
-        {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_find: root must be menu, screen or preview, not " + Excerpt(which));
-            return;
-        }
-
         string wantName = ArgOr(args, "name", "");
         string wantClass = ArgOr(args, "class", "");
         string wantText = ArgOr(args, "text", "");
@@ -278,31 +279,16 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
         DZMCP_UiWalk walk = new DZMCP_UiWalk();
         walk.maxDepth = ReadBoundedInt(args, "depth", DZMCP_Ui.DEPTH_MAX, 1, DZMCP_Ui.DEPTH_MAX);
-        // The walk itself is unfiltered and bounded by the node ceiling; the
-        // filter runs over its lines. Filtering inside the walk would make the
-        // "visited" count mean something different from ui_tree's, and two
-        // counts with one name is how a number stops being comparable.
-        walk.limit = DZMCP_Ui.NODES_MAX;
+        walk.limit = ReadBoundedInt(args, "limit", DZMCP_Ui.NODES_MAX, 1, DZMCP_Ui.NODES_MAX);
         walk.offset = ReadBoundedInt(args, "offset", 0, 0, 100000);
+        walk.wantName = wantName;
+        walk.wantClass = wantClass;
+        walk.wantText = wantText;
         DZMCP_Ui.Walk(root, "", 0, walk);
 
-        int limit = ReadBoundedInt(args, "limit", DZMCP_Ui.NODES_MAX, 1, DZMCP_Ui.NODES_MAX);
-        m_State.world.ui_root = which;
-        m_State.world.ui_total = walk.total;
-        m_State.world.ui_nodes.Clear();
+        PublishWalk(which, walk);
 
-        int kept = 0;
-        for (int i = 0; i < walk.lines.Count(); i++)
-        {
-            string line = walk.lines.Get(i);
-            if (!LineMatches(line, wantName, wantClass, wantText))
-                continue;
-            kept++;
-            if (m_State.world.ui_nodes.Count() < limit)
-                m_State.world.ui_nodes.Insert(line);
-        }
-
-        FinishCommand(DZMCP_STATUS_DONE, "matched " + kept + " widget(s) of " + walk.total + " walked under the " + which + " root; listed " + m_State.world.ui_nodes.Count());
+        FinishCommand(DZMCP_STATUS_DONE, "matched " + walk.matched + " widget(s) of " + walk.total + " walked under the " + which + " root; listed " + walk.lines.Count());
     }
 
     // ui_click: press a widget through the open menu's own handler.
@@ -324,12 +310,6 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (!RootNameOk(which))
-        {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_click: root must be menu, screen or preview, not " + Excerpt(which));
-            return;
-        }
-
         if (!HasArg(args, "path"))
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_click needs a path argument -- take one from ui_tree or ui_find");
@@ -372,6 +352,10 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             // reworded.
             m_State.world.ui_root = which;
             m_State.world.ui_total = 1;
+            // Nothing was filtered here, and the field is part of a document
+            // that survives between commands: left alone it would still carry
+            // the count from whatever ui_find ran last.
+            m_State.world.ui_matched = -1;
             m_State.world.ui_nodes.Clear();
             m_State.world.ui_nodes.Insert(DZMCP_Ui.Describe(node, path, 0));
             FinishCommand(DZMCP_STATUS_DONE, "found " + node.ClassName() + " '" + node.GetName() + "' at " + path + "; centre " + DZMCP_Ui.CentreOf(node) + "; nothing was pressed");
@@ -432,6 +416,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             menu = "(none)";
 
         m_State.world.ui_root = "cursor";
+        m_State.world.ui_matched = -1;
         m_State.world.ui_nodes.Clear();
 
         Widget under = DZMCP_Ui.UnderCursor();
@@ -473,11 +458,6 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
 
         string which = ArgOr(args, "root", "menu");
-        if (which != "menu" && which != "screen")
-        {
-            FinishCommand(DZMCP_STATUS_FAILED, "ui_text: root must be menu or screen, not " + Excerpt(which));
-            return;
-        }
         if (!HasArg(args, "path"))
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_text needs a path argument -- take one from ui_tree or ui_find");
@@ -489,8 +469,11 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return;
         }
 
+        // The same root vocabulary every other verb takes, resolved in the
+        // same place: a field inside a window that is not a menu is still a
+        // field, and refusing to look for it here bought nothing.
         string why;
-        Widget root = DZMCP_Ui.Root(which, why);
+        Widget root = ResolveRoot(which, why);
         if (!root)
         {
             FinishCommand(DZMCP_STATUS_FAILED, "ui_text: " + why);
@@ -618,41 +601,18 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         return value;
     }
 
-    // Does one described node match the filter? Split on the same separator
-    // the description was built with, so there is one definition of the shape
-    // and not two.
+    // ui_find used to match by re-splitting each DESCRIBED LINE here, which
+    // cost this verb two bugs worth remembering, both of them silent:
     //
-    // Fields: path | class | name | visibility | rect | depth | text | text size
+    // * it demanded seven fields where a widget with no text of its own --
+    //   most of them, the label is a child TextWidget -- produces six, and
+    //   answered "matched 0" to every question ever asked of it (measured on
+    //   a live client 2026-08-31: 505 nodes walked, 0 matched, for a name
+    //   ui_tree had just printed);
+    // * it saw only the lines the walk had already RECORDED, so nothing past
+    //   the 300-node ceiling could be found (measured 2026-09-06).
     //
-    // SIX FIELDS IS A WHOLE LINE, not a truncated one, and demanding seven
-    // made this verb answer "matched 0" to every question ever asked of it.
-    // The description ends with the text field, most widgets have no text of
-    // their own -- the label is a child TextWidget -- so most lines end in a
-    // trailing separator with nothing after it, and Split gives back six
-    // parts. Measured on a live client 2026-08-31: 505 nodes walked, 0
-    // matched, for a name ui_tree had just printed.
-    //
-    // It failed in the worst possible direction: not an error, an empty
-    // result. "That widget is not on screen" and "I dropped every line before
-    // looking" read identically to the caller.
-    protected bool LineMatches(string line, string wantName, string wantClass, string wantText)
-    {
-        array<string> parts = new array<string>();
-        line.Split("|", parts);
-        if (parts.Count() < 6)
-            return false;
-
-        // Absent because the widget has none -- the same thing as empty.
-        string text = "";
-        if (parts.Count() >= 7)
-            text = parts.Get(6);
-
-        if (wantClass != "" && parts.Get(1) != wantClass)
-            return false;
-        if (wantName != "" && parts.Get(2) != wantName)
-            return false;
-        if (wantText != "" && text.IndexOf(wantText) < 0)
-            return false;
-        return true;
-    }
+    // Both were the same mistake: filtering a rendering of the tree instead
+    // of the tree. The filter now lives in DZMCP_Ui.Wanted and runs against
+    // the widget, during the walk.
 }

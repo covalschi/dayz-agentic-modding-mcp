@@ -185,10 +185,15 @@ class DZMCP_WorldSnapshot
     //              manager to ask
     //   ui_dialog  1/0/-1: is a modal dialog up
     //   ui_root    which root the last listing walked: "menu", "screen" or
-    //              "preview" (the host ui_load puts a layout under)
+    //              "workspace", "preview" (the host ui_load puts a layout
+    //              under), or the name of a widget
     //   ui_total   how many nodes that walk VISITED; the array holds at most
     //              DZMCP_Ui.NODES_MAX of them, and the two differing is how a
     //              page says it is a page
+    //   ui_matched how many of those passed the walk's filter, -1 when there
+    //              was none. A filtered walk has two counts and they mean
+    //              different things: a page of MATCHES is measured against
+    //              this one, never against the visit count
     //   ui_windows how many widgets hang directly off the workspace root, -1
     //              when there is no workspace. The one number that witnesses a
     //              window which is not a scripted menu: a mod's panel created
@@ -199,6 +204,7 @@ class DZMCP_WorldSnapshot
     int ui_dialog;
     string ui_root;
     int ui_total;
+    int ui_matched;
     int ui_windows;
     ref array<string> ui_nodes;
 
@@ -243,6 +249,7 @@ class DZMCP_WorldSnapshot
         ui_dialog = -1;
         ui_root = "";
         ui_total = -1;
+        ui_matched = -1;
         ui_windows = -1;
         ui_nodes = new array<string>();
         ui_host = "";

@@ -270,6 +270,56 @@ def test_find_omits_the_filters_it_was_not_given(live):
     assert "class" not in live.sent[-1].args
 
 
+def test_find_reports_how_many_matched_not_how_many_were_walked(live):
+    """The two are different numbers and were being reported as one. A filter
+    that ran over the whole tree matched 2 of 3629 walked nodes; `total` said
+    3629, so `truncated` said there was more of the ANSWER to fetch when there
+    was not."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_total": 3629, "ui_matched": 2,
+        "ui_nodes": [node_line(path="45"), node_line(path="45.6")],
+    })
+    result = ui.ui_find(name="ok_button", root="workspace")
+    assert result.ok, result.error
+    assert result.data["matched"] == 2
+    assert result.data["total"] == 3629
+    assert result.data["truncated"] is False
+
+
+def test_a_page_of_matches_says_there_are_more(live):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_total": 3629, "ui_matched": 5,
+        "ui_nodes": [node_line(path="45"), node_line(path="45.6")],
+    })
+    result = ui.ui_find(name="Row", root="workspace")
+    assert result.data["truncated"] is True
+
+
+# ------------------------------------------------------------------- roots
+#
+# Measured 2026-09-06 (task-57c): the admin panel a mod hangs off VPP's own
+# toolbar is
+# created under the WORKSPACE root, not under the open menu. `root="menu"`
+# could not see it at all, and `root="screen"` needed offset=2300 to page
+# past the 300-node cut -- because the filter ran over the recorded page
+# rather than over the walk.
+
+
+def test_the_workspace_root_travels_as_written(live):
+    ui.ui_tree(root="workspace")
+    assert live.sent[-1].args["root"] == "workspace"
+
+
+def test_a_root_may_be_a_widget_name(live):
+    """A window that is not a menu has no reserved word of its own. Its NAME
+    is the only handle a caller has, and the client resolves it -- nothing is
+    refused here for not being one of the four reserved words."""
+    ui.ui_tree(root="MyModWindow")
+    assert live.sent[-1].args["root"] == "MyModWindow"
+    ui.ui_find(name="Row", root="MyModWindow")
+    assert live.sent[-1].args["root"] == "MyModWindow"
+
+
 # --------------------------------------------------------------------- click
 
 
@@ -735,7 +785,36 @@ def test_ui_preview_live_reads_the_open_menu_instead_of_loading(live, monkeypatc
     # ui_unload first, so a leftover preview backdrop from an earlier
     # ui_load never sits on top of the menu this call is meant to shoot.
     assert [c.verb for c in live.sent] == ["ui_unload", "ui_tree"]
+    assert live.sent[-1].args["root"] == "menu"
     assert shots == [(0, 0, 3840, 1600)]
+
+
+def test_ui_preview_live_shoots_a_window_named_by_root(live, monkeypatch):
+    """A window created under the workspace root is not the open menu, and
+    `live=True` could only ever look at the open menu -- so the one panel the
+    stand most needed to photograph was the one it could not."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "MyModWindow", "ui_total": 1, "ui_host": "",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="MyModWindow", rect="922 224 1481 919")],
+    })
+    shots = []
+    monkeypatch.setattr(winui, "shot", fake_shot_factory(shots))
+    result = ui.ui_preview(live=True, root="MyModWindow", name="admin")
+    assert result.ok, result.error
+    assert live.sent[-1].args["root"] == "MyModWindow"
+    assert shots == [(922, 224, 1481, 919)]
+
+
+def test_ui_preview_live_can_walk_the_whole_workspace(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_root": "workspace", "ui_total": 2, "ui_host": "",
+        "ui_nodes": [node_line(path="", cls="FrameWidget", name="", rect="0 0 3840 1600"),
+                     node_line(path="45", cls="FrameWidget", name="MyModWindow", rect="922 224 1481 919")],
+    })
+    monkeypatch.setattr(winui, "shot", fake_shot_factory([]))
+    result = ui.ui_preview(live=True, root="workspace", name="screen")
+    assert result.ok, result.error
+    assert live.sent[-1].args["root"] == "workspace"
 
 
 def test_ui_preview_live_reads_the_projects_layouts_so_a_flagged_label_is_not_overflow(live, monkeypatch):
@@ -951,12 +1030,14 @@ def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_
     ]}), encoding="utf-8")
     seen = []
 
-    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+    project = root
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", root="", timeout=45.0):
         from dayz_mcp.errors import fail as _fail, ok as _ok
         seen.append((layout, host, name))
         if not layout:
             return _fail("ui_preview needs a layout")
-        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out = project / ".dayz-mcp" / "shots" / f"preview-{name}-1"
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.html").write_text("r", encoding="utf-8")
         return _ok({"dir": str(out), "shot": str(out / "shot.png"), "report": str(out / "report.html"),
@@ -971,6 +1052,32 @@ def test_ui_gallery_runs_every_entry_and_writes_an_index(live, monkeypatch, tmp_
     assert index.exists() and "tab" in index.read_text(encoding="utf-8")
 
 
+def test_ui_gallery_passes_a_live_entrys_root_through(live, monkeypatch):
+    """An entry is ui_preview's own arguments. Without `root` a live entry
+    could only ever be the open menu -- and the window this whole root
+    vocabulary exists for is not one."""
+    project = Path(session.profile().root)
+    (project / "preview").mkdir(exist_ok=True)
+    (project / "preview" / "index.json").write_text(json.dumps({"entries": [
+        {"name": "admin", "live": True, "root": "MyModWindow"},
+    ]}), encoding="utf-8")
+    seen = {}
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", root="", timeout=45.0):
+        from dayz_mcp.errors import ok as _ok
+        seen["root"] = root
+        out = project / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text("r", encoding="utf-8")
+        return _ok({"dir": str(out), "shot": None, "report": str(out / "report.html"),
+                    "count": 1, "total": 1, "issues": {"error": 0, "warn": 0}, "notes": [],
+                    "host": (0, 0, 10, 10), "emulated": False})
+
+    monkeypatch.setattr(ui, "ui_preview", fake_preview)
+    assert ui.ui_gallery().ok
+    assert seen["root"] == "MyModWindow"
+
+
 def test_ui_gallery_strict_fails_on_any_error(live, monkeypatch, tmp_path):
     root = Path(session.profile().root)
     (root / "preview").mkdir(exist_ok=True)
@@ -978,9 +1085,11 @@ def test_ui_gallery_strict_fails_on_any_error(live, monkeypatch, tmp_path):
         {"name": "good", "layout": "MyMod/gui/layouts/a.layout"},
         {"name": "bad", "layout": "MyMod/gui/layouts/b.layout"}]}), encoding="utf-8")
 
-    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+    project = root
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", root="", timeout=45.0):
         from dayz_mcp.errors import ok as _ok
-        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out = project / ".dayz-mcp" / "shots" / f"preview-{name}-1"
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.html").write_text("r", encoding="utf-8")
         errors = 1 if name == "bad" else 0
@@ -1186,9 +1295,11 @@ def test_ui_gallery_strict_names_entries_with_language_when_langs_given(live, mo
         {"name": "good", "layout": "MyMod/gui/layouts/a.layout"},
         {"name": "bad", "layout": "MyMod/gui/layouts/b.layout"}]}), encoding="utf-8")
 
-    def fake_preview(layout="", fixture=None, host="", live=False, name="", timeout=45.0):
+    project = root
+
+    def fake_preview(layout="", fixture=None, host="", live=False, name="", root="", timeout=45.0):
         from dayz_mcp.errors import ok as _ok
-        out = root / ".dayz-mcp" / "shots" / f"preview-{name}-1"
+        out = project / ".dayz-mcp" / "shots" / f"preview-{name}-1"
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.html").write_text("r", encoding="utf-8")
         errors = 1 if name == "bad" else 0

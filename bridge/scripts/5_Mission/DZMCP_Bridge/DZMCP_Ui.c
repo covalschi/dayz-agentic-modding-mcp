@@ -37,18 +37,47 @@
 class DZMCP_UiWalk
 {
     int total;      // how many nodes were VISITED, whatever was recorded
+    int matched;    // how many of those passed the filter; == total with no filter
     int limit;      // how many may be recorded
     int maxDepth;   // how deep to go; the root is depth 0
-    int offset;     // how many visited nodes to skip before recording -- a page after the first
+    int offset;     // how many MATCHED nodes to skip before recording -- a page after the first
     ref array<string> lines;
+
+    // The filter, applied DURING the walk rather than to what it recorded.
+    // Empty means "do not filter on this field". Name and class are exact,
+    // text is a substring -- a label's exact string is the one thing a caller
+    // rarely knows in advance.
+    string wantName;
+    string wantClass;
+    string wantText;
 
     void DZMCP_UiWalk()
     {
         total = 0;
+        matched = 0;
         limit = 0;
         maxDepth = 0;
         offset = 0;
         lines = new array<string>();
+        wantName = "";
+        wantClass = "";
+        wantText = "";
+    }
+
+    bool HasFilter()
+    {
+        return wantName != "" || wantClass != "" || wantText != "";
+    }
+
+    // How many matched, or -1 when nothing was filtered. -1 rather than the
+    // visit count: with no filter the two numbers ARE the same, and
+    // publishing it twice would invite a reader to compare them for a meaning
+    // that is not there.
+    int MatchedOrNone()
+    {
+        if (!HasFilter())
+            return -1;
+        return matched;
     }
 }
 
@@ -69,9 +98,21 @@ class DZMCP_Ui
     // short enough that one text box cannot fill the document.
     static const int TEXT_LEN = 200;
 
-    // The root a caller asked for, or null with `why` saying which one was
-    // missing. "menu" is the open scripted menu's layout root; "screen" is the
-    // whole workspace.
+    // The root a caller asked for, or null with `why` saying what was not
+    // there.
+    //
+    //   "menu"       the open scripted menu's layout root
+    //   "screen"     the whole workspace
+    //   "workspace"  the same widget, under the name that says what it IS --
+    //                the parent of every top-level window, menus and
+    //                non-menus alike
+    //   anything else: a WIDGET NAME, looked up under the workspace.
+    //
+    // The last one is why this is not a closed list. A mod may create a window
+    // under the workspace root rather than as a UIScriptedMenu -- VPP's admin
+    // tools do -- and then "menu" cannot see it at all while "screen" sees it
+    // only as node 2300 of a walk. Its own name is the only handle a caller
+    // has for it.
     static Widget Root(string which, out string why)
     {
         why = "";
@@ -81,13 +122,16 @@ class DZMCP_Ui
             return null;
         }
 
-        if (which == "screen")
+        if (which == "screen" || which == "workspace")
         {
             Widget workspace = GetGame().GetWorkspace();
             if (!workspace)
                 why = "this client has no workspace -- there is no UI to walk";
             return workspace;
         }
+
+        if (which != "menu")
+            return Named(which, why);
 
         UIManager manager = GetGame().GetUIManager();
         if (!manager)
@@ -105,6 +149,29 @@ class DZMCP_Ui
         if (!layout)
             why = "the open menu has no layout root";
         return layout;
+    }
+
+    // A root addressed by the widget's own name, searched from the workspace
+    // root. The first one with that name, in the walk's own order.
+    static Widget Named(string name, out string why)
+    {
+        if (name == "")
+        {
+            why = "no root was named -- root is menu, screen, workspace, preview, or the name of a widget";
+            return null;
+        }
+
+        Widget workspace = GetGame().GetWorkspace();
+        if (!workspace)
+        {
+            why = "this client has no workspace, so a widget cannot be looked up by name";
+            return null;
+        }
+
+        Widget found = FindNth(workspace, name, 1);
+        if (!found)
+            why = "no widget is named '" + name + "' anywhere under the workspace -- root is menu, screen, workspace, preview, or the name of a widget";
+        return found;
     }
 
     // What the REAL mouse is over, from the engine's own hit test rather than
@@ -198,8 +265,36 @@ class DZMCP_Ui
         return menu.ClassName();
     }
 
-    // Walk depth-first from `node`, recording at most `walk.limit` nodes and
-    // counting every one it visits.
+    // Does this node pass the walk's filter? True when there is no filter, so
+    // an unfiltered walk records everything it visits exactly as before.
+    //
+    // The test is on the WIDGET, not on the line describing it. An earlier
+    // version filtered the recorded lines, which meant the filter only ever
+    // saw the first 300 nodes the walk kept -- a window 2300 nodes into the
+    // workspace was invisible unless the caller already knew to ask for
+    // offset=2300, which is knowledge the search was supposed to produce
+    // (measured on the stand 2026-09-06).
+    static bool Wanted(Widget node, DZMCP_UiWalk walk)
+    {
+        if (!walk.HasFilter())
+            return true;
+        if (walk.wantName != "" && node.GetName() != walk.wantName)
+            return false;
+        if (walk.wantClass != "" && node.ClassName() != walk.wantClass)
+            return false;
+        if (walk.wantText != "" && TextOf(node).IndexOf(walk.wantText) < 0)
+            return false;
+        return true;
+    }
+
+    // Walk depth-first from `node`, recording at most `walk.limit` MATCHING
+    // nodes and counting every one it visits.
+    //
+    // Two counts, deliberately: `total` is what was visited and `matched` is
+    // what passed the filter. They are the same number for an unfiltered walk,
+    // and reporting one for the other is how a page said there was more of the
+    // answer to fetch when there was not. `offset` and `limit` page over the
+    // matches -- with no filter that is every visited node, exactly as before.
     //
     // Depth-first, in the order GetChildren/GetSibling hand the siblings back:
     // ascending `priority`, stable for equal values (measured 2026-09-04, skill
@@ -215,8 +310,12 @@ class DZMCP_Ui
             return;
 
         walk.total++;
-        if (walk.total > walk.offset && walk.lines.Count() < walk.limit)
-            walk.lines.Insert(Describe(node, path, depth));
+        if (Wanted(node, walk))
+        {
+            walk.matched++;
+            if (walk.matched > walk.offset && walk.lines.Count() < walk.limit)
+                walk.lines.Insert(Describe(node, path, depth));
+        }
 
         Widget child = node.GetChildren();
         int index = 0;

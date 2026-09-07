@@ -215,10 +215,19 @@ def _with_ui(answered: Result, channel: Channel, offset: int = 0) -> Result:
     answered.data["nodes"] = nodes
     answered.data["count"] = len(nodes)
     answered.data["total"] = block.get("ui_total", -1)
+    # How many nodes PASSED THE FILTER, when there was one. A filtered walk
+    # has two counts -- visited and matched -- and reporting the first as if
+    # it were the second made `truncated` claim there was more of the answer
+    # to fetch after every ui_find that walked more nodes than it matched.
+    # -1 (or absent, from a bridge on disk that predates the field) means
+    # "nothing filtered", and the page is measured against the visit count as
+    # it always was.
+    matched = block.get("ui_matched", -1)
+    answered.data["matched"] = matched
+    countable = matched if isinstance(matched, int) and matched >= 0 else answered.data["total"]
     answered.data["offset"] = offset
     answered.data["truncated"] = (
-        isinstance(answered.data["total"], int)
-        and answered.data["total"] > offset + len(nodes)
+        isinstance(countable, int) and countable > offset + len(nodes)
     )
     answered.data["host"] = _rect(block.get("ui_host", ""))
     return answered
@@ -352,14 +361,34 @@ def ui_menu() -> Result:
     })
 
 
+#: What a `root` argument may say, in one place because five tools take it.
+#:
+#:   "menu"       the open scripted menu's layout root (the default)
+#:   "screen"     the workspace root -- everything on screen
+#:   "workspace"  the same widget, under the name that says what it IS: the
+#:                parent of every top-level window, menus and non-menus alike
+#:   "preview"    the host ui_load puts a layout under
+#:   anything else: a WIDGET NAME, resolved by the client against the whole
+#:                workspace tree. A window a mod hangs off the workspace root
+#:                is not a menu and has no reserved word of its own; its name
+#:                is the only handle a caller has.
+ROOTS = ("menu", "screen", "workspace", "preview")
+
+
 def ui_tree(root: str = "menu", depth: int = DEPTH_MAX, limit: int = NODES_MAX,
             offset: int = 0, timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """The client's widget tree: what is on screen, as the engine holds it.
 
-    `root` is `"menu"` (the open scripted menu, the default) or `"screen"` (the
-    whole workspace). Each node comes back with its path, class, name,
-    visibility, screen rectangle, depth, text and -- for widgets that derive
-    from `TextWidget` -- the rendered text size in engine pixels.
+    `root` is `"menu"` (the open scripted menu, the default), `"screen"` or
+    `"workspace"` (the whole workspace -- the same widget under two names,
+    the second saying what it is: the parent of every top-level window,
+    menus and non-menus alike), `"preview"` (the host `ui_load` uses), or
+    THE NAME OF A WIDGET, which the client resolves against the whole
+    workspace tree. That last one is how a window a mod hangs off the
+    workspace root -- not a menu, no reserved word of its own -- is addressed
+    at all. Each node comes back with its path, class, name, visibility,
+    screen rectangle, depth, text and -- for widgets that derive from
+    `TextWidget` -- the rendered text size in engine pixels.
 
     The answer is A PAGE: `total` is how many nodes the walk visited, `count`
     is how many this page listed, and `offset` is how many were skipped before
@@ -384,6 +413,15 @@ def ui_find(name: str = "", class_name: str = "", text: str = "",
 
     Filtering happens in the client, not here: sending the whole tree back so it
     could be filtered locally is exactly what the page limit exists to avoid.
+    It also happens DURING the walk, before the 300-node ceiling, so a name
+    is found wherever it is in the tree rather than only in the first page
+    (a window 2300 nodes into the workspace needed `offset=2300` to be seen
+    at all -- measured 2026-09-06). `total` is how many nodes were walked and
+    `matched` how many passed the filter; `limit` and `offset` page over the
+    MATCHES, and `truncated` is measured against them.
+
+    `root` takes the whole vocabulary `ui_tree` documents, including a
+    widget's own name -- so a search can be narrowed to one window.
     """
     if not (name or class_name or text):
         return fail(
@@ -761,16 +799,21 @@ def _live_sources(prof) -> tuple[list, list[str]]:
 
 
 def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = "",
-               live: bool = False, name: str = "",
+               live: bool = False, name: str = "", root: str = "",
                timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """A layout as the engine draws it: screenshot, every widget's rectangle,
     and the checks over those rectangles, written to one folder with an HTML
     report.
 
     `live=False` loads `layout` through ui_load (with `fixture` and `host` as
-    there) and shoots the preview host. `live=True` loads nothing: it walks the
-    OPEN scripted menu and shoots its root -- the way to look at the real PDA
-    with real data. A host of its own size is an emulation of a screen that
+    there) and shoots the preview host. `live=True` loads nothing: it walks a
+    root that is already on screen and shoots its rectangle -- the way to look
+    at the real PDA with real data. `root` chooses which: empty (the open
+    scripted menu, as before), `"workspace"` for every top-level widget at
+    once, or A WINDOW'S NAME, which is the only way to reach a panel a mod
+    created under the workspace root rather than as a menu. It is ignored
+    with `live=False`, where the loaded preview host is the root by
+    definition. A host of its own size is an emulation of a screen that
     size and the report says so; the real check is the real window size.
     `live=True` still gives the checks something to judge a self-sized label
     against: `sources` is built from every `.layout` the open project
@@ -824,8 +867,12 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         # in for it instead (_live_sources), so a self-sized label is still
         # recognised even though nothing here loaded any single page.
         extra_sources, extra_notes = _live_sources(prof)
-        first = ui_tree(root="menu", timeout=timeout)
-        root = "menu"
+        # The open menu unless the caller named something else -- a window a
+        # mod hung off the workspace root has no menu to be found under, and
+        # was unreachable here until `root` could name it.
+        walked = root.strip() or "menu"
+        first = ui_tree(root=walked, timeout=timeout)
+        root = walked
     else:
         if not layout:
             return fail("ui_preview needs a layout, or live=True to look at the open menu")
@@ -858,7 +905,8 @@ def ui_preview(layout: str = "", fixture: dict | str | None = None, host: str = 
         rect = first.data.get("host")
     if rect is None:
         return fail("the tree came back without a rectangle to shoot",
-                    hint="for live=True a scripted menu must be open; for a layout the bridge reports ui_host")
+                    hint="for live=True a scripted menu must be open (or name a window with "
+                         "root=, or root='workspace'); for a layout the bridge reports ui_host")
 
     label = name or (Path(layout).stem if layout else "live")
     out_dir = Path(prof.root) / ".dayz-mcp" / "shots" / f"preview-{label}-{int(time.time() * 1000)}"
@@ -997,6 +1045,10 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
     """Every entry of the project's preview index through ui_preview, and one
     index.html with all the pictures and counts -- the look before a push.
 
+    An entry is `ui_preview`'s own arguments as a dict: `name`, `layout`,
+    `fixture`, `host`, or `live: true` with an optional `root` (a window's
+    name, or "workspace") for a live entry that is not the open menu.
+
     `sizes` restarts the client at each [width, height] in turn (the owner's
     3840x1600 and the players' 1920x1080); without it the client is used as
     it is.
@@ -1098,7 +1150,7 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
             name = str(entry.get("name") or Path(str(entry.get("layout", ""))).stem or "entry")
             preview_args = dict(layout=str(entry.get("layout", "")), fixture=entry.get("fixture"),
                                 host=str(entry.get("host", "") or ""), live=bool(entry.get("live", False)),
-                                name=name, timeout=timeout)
+                                name=name, root=str(entry.get("root", "") or ""), timeout=timeout)
             result = ui_preview(**preview_args)
             retried = False
             if not result.ok and "not ticking" in result.error:
