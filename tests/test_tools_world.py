@@ -132,6 +132,9 @@ def test_every_argument_value_crosses_the_wire_as_a_string(live):
     world.world_delete("Apple", radius=30)
     world.world_set("quantity", 2.5)
     world.world_spawn("Apple", quantity=7)
+    world.world_attach("Battery9V", slot="BatteryD")
+    world.world_detach("BatteryD")
+    world.world_power(True, energy=100)
 
     assert live.sent, "nothing was sent"
     for cmd in live.sent:
@@ -447,6 +450,90 @@ def test_world_exec_refuses_a_null_argument_instead_of_dropping_it(live):
     assert not result.ok
     assert live.sent == [], "a command with a dropped null was sent"
     assert "NoneType" in result.error
+
+
+# ------------------------------------------- attachments, and switching a device
+#
+# Measured on the stand 2026-09-06 (task-57c): a device that is WORN could not
+# be reached at all. A flat battery could not be taken out, a fresh one could
+# not be put in, and nothing could switch a device on -- `world_set` knows
+# health and quantity, `world_spawn(where="attachment")` hangs a NEW item on
+# whatever is in hands, and `world_action` needs the item in hands too. A
+# whole family of mods is untestable while that is true.
+
+
+def test_attach_sends_the_item_the_host_and_the_slot(live):
+    world.world_attach("Battery9V", host="MyMod_Device", slot="BatteryD")
+    args = live.sent[-1].args
+    assert live.sent[-1].verb == "attach"
+    assert args["class"] == "Battery9V"
+    assert args["host"] == "MyMod_Device"
+    assert args["slot"] == "BatteryD"
+
+
+def test_attach_omits_the_slot_it_was_not_given(live):
+    """An empty slot is not "the slot named nothing" -- the mod names every
+    key it does not expect, and letting the engine pick the first slot that
+    fits is a different request from naming one."""
+    world.world_attach("Battery9V")
+    assert "slot" not in live.sent[-1].args
+    assert live.sent[-1].args["host"] == "hands"
+
+
+def test_attach_refuses_an_empty_class_before_anything_is_sent(live):
+    result = world.world_attach("")
+    assert not result.ok
+    assert live.sent == []
+
+
+def test_detach_sends_the_slot_the_host_and_where_it_goes(live):
+    world.world_detach("BatteryD", host="MyMod_Device", to="ground")
+    args = live.sent[-1].args
+    assert live.sent[-1].verb == "detach"
+    assert args["slot"] == "BatteryD"
+    assert args["host"] == "MyMod_Device"
+    assert args["to"] == "ground"
+
+
+def test_detach_refuses_an_empty_slot_before_anything_is_sent(live):
+    """Without a slot there is no "the attachment" to take off: a device can
+    have several, and picking one here would be this tool inventing an
+    answer."""
+    result = world.world_detach("")
+    assert not result.ok
+    assert "slot" in result.error
+    assert live.sent == []
+
+
+def test_power_sends_a_lowercase_boolean_and_the_target(live):
+    world.world_power(True, target="MyMod_Device")
+    assert live.sent[-1].verb == "power"
+    assert live.sent[-1].args["on"] == "true"
+    assert live.sent[-1].args["target"] == "MyMod_Device"
+    assert "energy" not in live.sent[-1].args
+
+    world.world_power(False)
+    assert live.sent[-1].args["on"] == "false"
+    assert live.sent[-1].args["target"] == "hands"
+
+
+def test_power_carries_an_energy_charge_when_it_is_given(live):
+    """A device switched on with a flat battery reports switched-on and NOT
+    working, which is true and useless when the battery is flat because
+    nothing here could fill it."""
+    world.world_power(True, target="Battery9V", energy=100)
+    assert live.sent[-1].args["energy"] == "100"
+
+
+def test_the_mods_refusal_about_a_slot_reaches_the_caller_verbatim(live):
+    live.answer = CommandState(
+        id="", status="failed",
+        detail="detach: nothing is attached in slot 'BatteryD' on MyMod_Device",
+        finished_at=1.0,
+    )
+    result = world.world_detach("BatteryD")
+    assert not result.ok
+    assert "nothing is attached in slot" in result.error
 
 
 # ------------------------------------------------- the clock, the sky, the list

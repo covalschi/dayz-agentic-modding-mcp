@@ -660,6 +660,91 @@ def world_action(action_class: str, target_class: str = "", subject: str = "",
     ), timeout)
 
 
+#: How a host or a target item is named to `attach`, `detach` and `power`.
+#: The same three tools repeat it in their own words because a docstring is
+#: what an agent reads before calling, and a cross-reference is not.
+#:
+#:   "hands"  the item in the player's hands
+#:   "player" the character itself, i.e. its own worn slots
+#:   anything else: a config class looked up on the player -- hands first,
+#:   then worn attachments and cargo, recursively, first match by IsKindOf
+
+
+def world_attach(class_name: str, host: str = "hands", slot: str = "",
+                 timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Attach an item the player ALREADY HAS to another of their items.
+
+    `class_name` is the item to attach -- found on the player, not created;
+    `world_spawn(class_name, where="inventory")` is how one comes into
+    existence, and keeping the two apart means a failed lookup says "you do
+    not have one" instead of silently conjuring a second.
+
+    `host` is what it goes on: "hands" (the held item, the default), "player"
+    (the character's own worn slots), or a config class looked up on the
+    player -- hands first, then worn attachments and cargo, recursively.
+    `slot` names the CfgSlots slot (e.g. "BatteryD") when the host has more
+    than one that would take the item; left empty the engine picks the first
+    that fits.
+
+    The mod checks afterwards that the item really is in that slot and says
+    so -- `TakeEntityAsAttachment` answers a bool, and a bool from an engine
+    call is not the same fact as the attachment being there.
+    """
+    if not class_name.strip():
+        return fail("world_attach needs the class of the item to attach",
+                    hint="the item must already be on the player -- spawn one with "
+                         "world_spawn(class_name, where='inventory') first")
+    return _run("attach", _args(**{"class": class_name, "host": host,
+                                   "slot": slot or None}), timeout)
+
+
+def world_detach(slot: str, host: str = "hands", to: str = "inventory",
+                 timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Take the attachment out of one slot.
+
+    `slot` is the CfgSlots slot name, and it is required: a device can have
+    several, and choosing one here would be this tool inventing the answer.
+    `host` is what to take it off: "hands" (the default), "player" (the
+    character's own worn slots), or a config class looked up on the player.
+    `to` is where it goes -- "inventory" (the player's cargo, the default),
+    "hands", or "ground".
+
+    In game this is a drag inside the inventory screen, which is not
+    something a caller can ask for; that is the whole reason it exists. The
+    mod reports what came off, from which slot, and where it ended up, and
+    checks the slot is empty afterwards rather than trusting the engine call's
+    own bool.
+    """
+    if not slot.strip():
+        return fail("world_detach needs the slot to empty",
+                    hint="the CfgSlots slot name, like BatteryD -- a device can have "
+                         "several, so there is no 'the' attachment to guess at")
+    return _run("detach", _args(slot=slot, host=host, to=to), timeout)
+
+
+def world_power(on: bool = True, target: str = "hands", energy: float | None = None,
+                timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Switch a device on or off, wherever it is on the player.
+
+    `target` is the device: "hands" (the default), "player", or a config class
+    looked up on the player -- hands first, then worn attachments and cargo,
+    recursively. So a device that is WORN, or in a pocket, can be switched
+    without first being taken into the hands (which is what `world_action`
+    needs, and what a headless stand cannot arrange).
+
+    `energy` optionally fills the item's own energy store first, in the
+    engine's units (`SetEnergy`). A device switched on with a flat battery
+    reports switched-on and NOT working -- true, and useless when nothing can
+    charge the battery.
+
+    The answer is read back out of the energy manager after the switch:
+    switched-on and working are two different facts (`IsSwitchedOn` /
+    `IsWorking`), and a device with no energy source has the first without the
+    second. An item with no energy manager at all is refused by name.
+    """
+    return _run("power", _args(on=bool(on), target=target, energy=energy), timeout)
+
+
 def world_delete(class_name: str, radius: float = 30.0, pos: str = "",
                  timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
     """Delete every object of `class_name` within `radius` of `pos` (or of the

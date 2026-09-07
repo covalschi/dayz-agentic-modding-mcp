@@ -27,8 +27,9 @@ from .logs import log_tail, log_verdict
 from .project import project_open, project_status
 from .scope import knowledge_scope, server_mods
 from .world import (
-    world_action, world_delete, world_entities, world_exec, world_ready, world_set,
-    world_spawn, world_state, world_teleport, world_time_set, world_weather_set,
+    world_action, world_attach, world_delete, world_detach, world_entities, world_exec,
+    world_power, world_ready, world_set, world_spawn, world_state, world_teleport,
+    world_time_set, world_weather_set,
 )
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "bridge_build", "bridge_status", "bridge_clear",
     "world_ready", "world_state", "world_spawn", "world_teleport",
     "world_set", "world_delete", "world_action", "world_exec",
+    "world_attach", "world_detach", "world_power",
     "world_entities", "world_time_set", "world_weather_set",
     "client_start", "client_stop", "client_status", "client_shot",
     "client_move", "client_look", "client_press", "client_trigger",

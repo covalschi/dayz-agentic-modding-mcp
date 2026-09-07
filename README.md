@@ -96,6 +96,9 @@ in its notes.
 | `world_spawn(class_name, where, pos, quantity, slot)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, in their inventory, or attached to the item they are holding (`where="attachment"`, optional `slot` naming the CfgSlots slot) |
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
+| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up |
+| `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for |
+| `world_power(on, target, energy)` | switch a device on or off wherever it is on the player — worn, in a pocket, in hands — through its energy manager. `energy` optionally fills its own store first. The answer reads both facts back: **switched on and working are different**, and a device switched on with a flat battery has the first without the second |
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
 | `world_entities(class_name, radius, pos, limit)` | **which** objects are nearby, not how many: class, position, distance and health for each. A page, and it says so — the true total comes back beside the list |
 | `world_time_set(hour, minute, day, month, year)` | move the world clock. Every field left at -1 keeps its current value, read back from the engine first, because the engine sets a date as five numbers at once |
@@ -294,6 +297,33 @@ moved the clock to `2026-09-20 03:07` and left the date where it was;
 listed 5 of 171 objects with `truncated: true`. Distances came back at 320 m
 for a 150 m radius until they were made horizontal, which is what the engine's
 own radius test measures.
+
+### Attachments and power are engine operations, not mod behaviour
+
+`world_attach`, `world_detach` and `world_power` ship in this bridge rather
+than in a project's own copy of the dispatcher, and the line is worth stating:
+taking an item off a slot, putting one on, and throwing an energy manager's
+switch are the same calls whatever mod drew the device (`FindAttachment`,
+`ServerTakeEntityAsAttachmentEx`, `ServerTakeEntityToInventory`,
+`GetCompEM().SwitchOn`). The rule under `world_exec` is about behaviour a mod
+*defines*; none of this is.
+
+They exist because a **worn** device could not be reached at all: `world_spawn`
+attaches a NEW item to whatever is in HANDS, `world_set` knows health and
+quantity, and `world_action` needs the item in hands too — so on a live stand a
+flat battery could not come out, a fresh one could not go in, and nothing could
+switch a device on, which left every action whose condition reads `IsWorking()`
+untestable from outside the game. All three name the item the only way a tool
+that has never seen it can: `"hands"`, `"player"` (the character's own worn
+slots), or a config class looked up on the player — hands first, then worn
+attachments and cargo, recursively, first match by `IsKindOf`.
+
+Each one reads the result back out of the engine rather than reporting the
+call's own bool: whether the slot is empty now, whether the item's hierarchy
+parent is the host, whether the manager says switched-on **and** working. That
+is the same rule as `ui_text` reading its field back, and for the same reason —
+`SwitchOn()` does nothing at all when the device cannot switch on, and says
+nothing about it.
 
 ### Actions, and why there is no verb dictionary
 

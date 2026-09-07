@@ -61,6 +61,10 @@ for _fn in (
     tools.world_ready, tools.world_state,
     tools.world_spawn, tools.world_teleport, tools.world_set, tools.world_delete,
     tools.world_action, tools.world_exec,
+    # Attachments and power stand together, after the verbs that make an item
+    # exist: attach takes something the player already has, and switching a
+    # device on is the step that makes a mod's own action applicable at all.
+    tools.world_attach, tools.world_detach, tools.world_power,
     # The client: its lifecycle, then its eyes, then its hands. client_type is
     # last of the input tools and stands apart on purpose -- it is the ONLY
     # tool in this whole set that takes the foreground away from whoever is at

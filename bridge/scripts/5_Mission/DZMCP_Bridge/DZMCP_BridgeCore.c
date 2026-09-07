@@ -641,7 +641,7 @@ class DZMCP_BridgeCore
     // failure -- see DZMCP_Log.
     protected string KnownVerbs()
     {
-        return "ping, spawn, teleport, set, delete, query, entities, time, weather, action, chat, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, attach, detach, power, teleport, set, delete, query, entities, time, weather, action, chat, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
@@ -653,6 +653,9 @@ class DZMCP_BridgeCore
             return true;
 
         if (verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query")
+            return true;
+
+        if (verb == "attach" || verb == "detach" || verb == "power")
             return true;
 
         if (verb == "action")
@@ -697,6 +700,21 @@ class DZMCP_BridgeCore
         if (verb == "spawn")
         {
             VerbSpawn(args);
+            return;
+        }
+        if (verb == "attach")
+        {
+            VerbAttach(args);
+            return;
+        }
+        if (verb == "detach")
+        {
+            VerbDetach(args);
+            return;
+        }
+        if (verb == "power")
+        {
+            VerbPower(args);
             return;
         }
         if (verb == "teleport")
@@ -1016,6 +1034,248 @@ class DZMCP_BridgeCore
 
         string raw = args.Get("quantity");
         item.SetQuantity(raw.ToFloat());
+    }
+
+    // ---- attachments and power --------------------------------------------
+    //
+    // These three are engine operations, not mod behaviour: taking an item off
+    // a slot, putting one on, and throwing an energy manager's switch are the
+    // same calls whatever mod drew the device. The verb-in-your-own-copy rule
+    // above is about behaviour a mod defines; nothing here is.
+    //
+    // They exist because a WORN device could not be reached at all (measured
+    // 2026-09-06): spawn's attachment path hangs a NEW item on the one in
+    // HANDS, set knows health and quantity, and an action needs the item in
+    // hands too -- so a flat battery could not come out, a fresh one could not
+    // go in, and nothing could switch a device on. Every one of them reads the
+    // result back out of the engine instead of trusting the call's own bool:
+    // "the call returned true" and "the item is in that slot" are different
+    // facts, and the caller asked for the second.
+
+    protected string YesNo(bool value)
+    {
+        if (value)
+            return "true";
+        return "false";
+    }
+
+    // attach: class (required), host = hands|player|<class>, slot.
+    //
+    // The item must ALREADY be on the player. Creating one is spawn's job, and
+    // keeping the two apart is what lets "you do not have one" be said out
+    // loud instead of a second one quietly appearing.
+    protected void VerbAttach(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|host|slot|", "class, host, slot"))
+            return;
+
+        string className = ArgOr(args, "class", "");
+        if (className == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "attach needs a class argument naming the item to attach -- it must already be on the player, so spawn one with where=inventory first");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        string why;
+        string hostSpec = ArgOr(args, "host", "hands");
+        EntityAI host = DZMCP_World.FindOnPlayer(player, hostSpec, why);
+        if (!host)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "attach: no host '" + hostSpec + "' -- " + why);
+            return;
+        }
+
+        EntityAI item = DZMCP_World.FindOnPlayer(player, className, why);
+        if (!item)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "attach: " + why + " -- spawn one with where=inventory first");
+            return;
+        }
+        if (item == host)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "attach: the item and the host both resolved to the same " + host.GetType() + " -- name the host as hands, player, or a different class");
+            return;
+        }
+
+        string slotName = ArgOr(args, "slot", "");
+        int slotId = InventorySlots.INVALID;
+        if (slotName != "")
+        {
+            slotId = InventorySlots.GetSlotIdFromString(slotName);
+            if (slotId == InventorySlots.INVALID)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "no slot is named '" + slotName + "' -- the name must be the one from CfgSlots, like BatteryD, not the display name");
+                return;
+            }
+        }
+
+        bool taken;
+        if (slotName == "")
+            taken = host.ServerTakeEntityAsAttachment(item);
+        else
+            taken = host.ServerTakeEntityAsAttachmentEx(item, slotId);
+
+        EntityAI parent = item.GetHierarchyParent();
+        if (parent != host)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + item.GetType() + " to " + host.GetType() + " (the call answered " + YesNo(taken) + ") -- the host may have no slot that fits it, or that slot may already be taken");
+            return;
+        }
+
+        string detail = "attached " + item.GetType() + " to " + host.GetType();
+        if (slotName != "")
+            detail += " in slot " + slotName;
+        FinishCommand(DZMCP_STATUS_DONE, detail);
+    }
+
+    // detach: slot (required), host = hands|player|<class>, to = inventory|hands|ground.
+    //
+    // The slot is required because a device can have several and choosing one
+    // here would be this bridge inventing the caller's intent. In game this is
+    // a drag inside the inventory screen, which is not something a tool can
+    // ask for -- which is the whole reason the verb exists.
+    protected void VerbDetach(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|slot|host|to|", "slot, host, to"))
+            return;
+
+        string slotName = ArgOr(args, "slot", "");
+        if (slotName == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "detach needs a slot argument -- the CfgSlots name, like BatteryD; a device can have several, so there is no 'the' attachment to guess at");
+            return;
+        }
+
+        string to = ArgOr(args, "to", "inventory");
+        if (to != "inventory" && to != "hands" && to != "ground")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "detach: to must be inventory, hands or ground, not '" + to + "'");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        string why;
+        string hostSpec = ArgOr(args, "host", "hands");
+        EntityAI host = DZMCP_World.FindOnPlayer(player, hostSpec, why);
+        if (!host)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "detach: no host '" + hostSpec + "' -- " + why);
+            return;
+        }
+        if (!host.GetInventory())
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "detach: " + host.GetType() + " has no inventory, so it has no attachment slots");
+            return;
+        }
+
+        int slotId = InventorySlots.GetSlotIdFromString(slotName);
+        if (slotId == InventorySlots.INVALID)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "no slot is named '" + slotName + "' -- the name must be the one from CfgSlots, like BatteryD, not the display name");
+            return;
+        }
+
+        EntityAI item = host.GetInventory().FindAttachment(slotId);
+        if (!item)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "nothing is attached in slot '" + slotName + "' on " + host.GetType());
+            return;
+        }
+
+        string what = item.GetType();
+        bool moved;
+        if (to == "ground")
+            moved = player.ServerDropEntity(item);
+        else if (to == "hands")
+            moved = player.ServerTakeEntityToInventory(FindInventoryLocationType.HANDS, item);
+        else
+            moved = player.ServerTakeEntityToInventory(FindInventoryLocationType.CARGO, item);
+
+        if (host.GetInventory().FindAttachment(slotId))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, what + " is still in slot '" + slotName + "' on " + host.GetType() + " (the call answered " + YesNo(moved) + ") -- there may be no room in the player's " + to);
+            return;
+        }
+
+        FinishCommand(DZMCP_STATUS_DONE, "detached " + what + " from " + host.GetType() + " slot " + slotName + ", to the player's " + to);
+    }
+
+    // power: on (required, true|false), target = hands|player|<class>, energy.
+    //
+    // Switching a WORN device on is the step that makes a mod's own action
+    // applicable at all -- an action whose condition reads IsWorking() can
+    // never be tested from outside without it.
+    protected void VerbPower(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|on|target|energy|", "on, target, energy"))
+            return;
+
+        if (!HasArg(args, "on"))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "power needs an on argument -- true to switch the device on, false to switch it off");
+            return;
+        }
+        string onText = args.Get("on");
+        if (onText != "true" && onText != "false")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "power: on must be true or false, not '" + onText + "'");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        string why;
+        string targetSpec = ArgOr(args, "target", "hands");
+        EntityAI item = DZMCP_World.FindOnPlayer(player, targetSpec, why);
+        if (!item)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "power: no target '" + targetSpec + "' -- " + why);
+            return;
+        }
+
+        if (!item.HasEnergyManager())
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "power: " + item.GetType() + " has no energy manager -- its config declares no class EnergyManager, so there is no switch on it to throw");
+            return;
+        }
+        ComponentEnergyManager em = item.GetCompEM();
+        if (!em)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "power: " + item.GetType() + " declares an energy manager and the component is not there -- nothing here can fix that");
+            return;
+        }
+
+        string before = DZMCP_World.PowerText(em);
+
+        if (HasArg(args, "energy"))
+        {
+            string energyText = args.Get("energy");
+            if (!DZMCP_World.IsNumeric(energyText))
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "power: energy must be a number, not '" + energyText + "'");
+                return;
+            }
+            em.SetEnergy(energyText.ToFloat());
+        }
+
+        if (onText == "true")
+            em.SwitchOn();
+        else
+            em.SwitchOff();
+
+        // Read back, both times. SwitchOn does nothing at all when the device
+        // cannot switch on, and says nothing about it -- so the only honest
+        // answer is what the manager reports afterwards.
+        FinishCommand(DZMCP_STATUS_DONE, item.GetType() + " was " + before + "; it is now " + DZMCP_World.PowerText(em));
     }
 
     // teleport: pos (required).

@@ -23,6 +23,16 @@
 //   WeatherPhenomenon.Set(forecast, time, minDur)  3_game/weather.c:22
 //   WeatherPhenomenon.GetActual()                  3_game/weather.c:11
 //   Weather.SetWindSpeed(speed) / GetWindSpeed()   3_game/weather.c:243, 251
+//   GameInventory.EnumerateInventory(tt, out arr)  .../inventory.c:127
+//   GameInventory.FindAttachment(slotId)           .../inventory.c:224
+//   InventorySlots.GetSlotIdFromString/GetSlotName .../inventoryslots.c:42 / 48
+//   EntityAI.ServerTakeEntityAsAttachmentEx(i, s)  3_game/entities/entityai.c:2016
+//   Man.ServerTakeEntityToInventory(flags, item)   3_game/entities/man.c:391
+//   Man.ServerDropEntity(item)                     3_game/entities/man.c:145
+//   EntityAI.HasEnergyManager() / GetCompEM()      3_game/entities/entityai.c:3426 / 3415
+//   ComponentEnergyManager.SwitchOn/SwitchOff      .../componentenergymanager.c:384 / 415
+//   .IsSwitchedOn / .IsWorking / .GetEnergy        :897 / :938 / :1259
+//   .SetEnergy(v) / .GetEnergyMax()                :534 / :1297
 //
 // FORMATTING RULE, the same one the dispatcher carries: an Enforce statement
 // ends at the end of its line. One statement, one line, however long.
@@ -162,6 +172,97 @@ class DZMCP_World
             return null;
 
         return inventory.CreateInInventory(className);
+    }
+
+    // How many items one lookup will walk before giving up. A player's own
+    // inventory is tens of entries, not thousands; this is here so a corrupt
+    // tree cannot turn a lookup into an endless one inside the tick.
+    static const int CARRIED_MAX = 500;
+
+    // The item a verb was pointed at, found ON THE PLAYER -- or null, with
+    // `why` saying what was looked for and where it was not.
+    //
+    // Two reserved words and then a config class:
+    //   "hands"   the item the player is holding
+    //   "player"  the character itself, whose OWN attachment slots are where a
+    //             worn device hangs -- the case that had no verb at all
+    //   anything else: a config class, looked up on the player. Hands first,
+    //             then the whole inventory tree (attachments and cargo,
+    //             recursively) in the engine's own preorder. IsKindOf, so a
+    //             base class name matches the variant that inherits it.
+    //
+    // Naming the item by class rather than by a handle is what makes these
+    // verbs usable from outside the game at all: there is no other way to say
+    // "the PDA I am wearing" from a tool that has never seen it.
+    static EntityAI FindOnPlayer(Man player, string spec, out string why)
+    {
+        why = "";
+        if (!player)
+        {
+            why = "there is no player to look on";
+            return null;
+        }
+
+        EntityAI hands = player.GetEntityInHands();
+        if (spec == "hands")
+        {
+            if (!hands)
+                why = "the player's hands are empty";
+            return hands;
+        }
+        if (spec == "player")
+            return player;
+        if (spec == "")
+        {
+            why = "no item was named";
+            return null;
+        }
+
+        if (hands && hands.IsKindOf(spec))
+            return hands;
+
+        array<EntityAI> carried = new array<EntityAI>;
+        GameInventory inventory = player.GetInventory();
+        if (inventory)
+            inventory.EnumerateInventory(InventoryTraversalType.PREORDER, carried);
+
+        int limit = carried.Count();
+        if (limit > CARRIED_MAX)
+            limit = CARRIED_MAX;
+
+        for (int i = 0; i < limit; i++)
+        {
+            EntityAI item = carried.Get(i);
+            if (!item)
+                continue;
+            if (item.IsKindOf(spec))
+                return item;
+        }
+
+        why = "the player has no '" + spec + "': not in hands, not worn, not in cargo (" + carried.Count() + " item(s) searched)";
+        return null;
+    }
+
+    // What an energy manager says about itself, as one readable clause.
+    //
+    // SWITCHED ON AND WORKING ARE TWO DIFFERENT FACTS, and the difference is
+    // the whole reason a caller asks: a device switched on with a flat battery
+    // is switched on and not working, and a verb that reported only the switch
+    // would call that a success.
+    static string PowerText(ComponentEnergyManager em)
+    {
+        if (!em)
+            return "no energy manager";
+
+        string state = "off";
+        if (em.IsSwitchedOn())
+            state = "on";
+
+        string working = "not working";
+        if (em.IsWorking())
+            working = "working";
+
+        return "switched " + state + ", " + working + ", energy " + em.GetEnergy() + "/" + em.GetEnergyMax();
     }
 
     // Everything of `className` within `radius` of `pos`, capped.
