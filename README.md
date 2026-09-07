@@ -96,8 +96,8 @@ in its notes.
 | `world_spawn(class_name, where, pos, quantity, slot)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, in their inventory, or attached to the item they are holding (`where="attachment"`, optional `slot` naming the CfgSlots slot) |
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
-| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up |
-| `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for |
+| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up — **one tick later**, because the move lands after the frame that asked for it, and names the slot the item actually landed in |
+| `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for. Checks the slot is empty **one tick later**, for the same reason as `world_attach` |
 | `world_power(on, target, energy)` | switch a device on or off wherever it is on the player — worn, in a pocket, in hands — through its energy manager. `energy` optionally fills its own store first. The answer reads both facts back: **switched on and working are different**, and a device switched on with a flat battery has the first without the second |
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
 | `world_entities(class_name, radius, pos, limit)` | **which** objects are nearby, not how many: class, position, distance and health for each. A page, and it says so — the true total comes back beside the list |
@@ -324,6 +324,18 @@ parent is the host, whether the manager says switched-on **and** working. That
 is the same rule as `ui_text` reading its field back, and for the same reason —
 `SwitchOn()` does nothing at all when the device cannot switch on, and says
 nothing about it.
+
+**An inventory move lands one tick after the frame that asked for it**
+(measured 2026-09-07): `ServerTakeEntityToInventory` answered true and the slot
+still held the battery in that same frame, and the very next command found the
+slot empty and the battery in cargo — so a read-back taken where the call
+returns reports a failure for a move that worked. `attach` and `detach` defer
+their own verdict by one tick, the same `DeferCompletion(1)` `ui_load` uses to
+let a widget reach its first layout pass, and cost about a second more than the
+other world verbs for it. `attach` spends that tick on more than a yes: it
+names the slot the item **landed** in, read off the item's own inventory
+location, so a call that named no slot still comes back with the name
+`world_detach` will want.
 
 ### Actions, and why there is no verb dictionary
 

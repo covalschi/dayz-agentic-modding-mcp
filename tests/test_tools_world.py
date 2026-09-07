@@ -536,6 +536,50 @@ def test_the_mods_refusal_about_a_slot_reaches_the_caller_verbatim(live):
     assert "nothing is attached in slot" in result.error
 
 
+# ------------------------------------------- a move lands a tick after the ask
+#
+# Measured on the stand 2026-09-07: `ServerTakeEntityToInventory` answered true
+# and the slot STILL HELD the battery in that same frame; the very next command
+# found the slot empty and the battery in cargo. So the mod defers its own
+# verdict by one tick (`DeferCompletion(1)`) and looks then. These two pin what
+# that costs this side: a command that reports itself RUNNING for a while is
+# normal for these two verbs, and one still running at the deadline is not a
+# success.
+
+
+def test_attach_reports_the_slot_the_mod_says_it_landed_in(live):
+    """The mod names the LANDED slot, not the requested one -- reading the
+    item's inventory location on that deferred tick is the whole reason it is
+    knowable. So a call that named NO slot still comes back with the name
+    `world_detach` will want, and nothing here may summarise that away."""
+    live.answer = CommandState(
+        id="", status="done",
+        detail="attached Battery9V to MyMod_Device in slot BatteryD",
+        finished_at=1.0,
+    )
+    result = world.world_attach("Battery9V")
+
+    assert result.ok
+    assert "slot" not in live.sent[-1].args, "no slot was asked for"
+    assert result.data["detail"] == "attached Battery9V to MyMod_Device in slot BatteryD"
+
+
+def test_a_deferred_move_still_running_at_the_deadline_is_not_a_success(live):
+    """A deferred verb publishes itself RUNNING until its tick comes, so a
+    snapshot still saying so when the wait ends means the tick never came.
+    That is the shape where an optimistic read would do the most damage: the
+    caller would be told the battery went in, and every later assertion about
+    a device that is not powered would blame the wrong thing."""
+    live.answer = CommandState(id="", status="running", detail="deferring a tick",
+                               finished_at=0.0)
+
+    result = world.world_detach("BatteryD")
+
+    assert not result.ok
+    assert "running" in result.error
+    assert result.data["status"] == "running"
+
+
 # ------------------------------------------------- the clock, the sky, the list
 
 

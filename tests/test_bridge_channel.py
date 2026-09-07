@@ -406,6 +406,35 @@ def test_await_result_returns_as_soon_as_the_result_appears(tmp_path):
     assert elapsed < 2.0, "must return promptly once the result lands, not wait out the full timeout"
 
 
+def test_await_result_keeps_waiting_while_our_own_command_says_running(tmp_path):
+    """The contract every DEFERRED verb leans on.
+
+    `attach` and `detach` publish themselves as RUNNING for a tick on purpose:
+    the engine applies an inventory move after the frame that asked for it, so
+    the mod looks a tick later (`DeferCompletion(1)`) instead of reading the
+    slot where the call returned. That only works if a wait which SEES the
+    running snapshot for its own id keeps going -- returning it would turn
+    every deferred verb into "still running" for a move that landed a second
+    in. The early-return test above starts from `command: None` and so never
+    puts a running snapshot for our own id in front of the wait at all.
+    """
+    ch = Channel(tmp_path)
+    cmd_id = "attach-9-1"
+    _write_state(tmp_path, tick=1, command=_command_payload(cmd_id, "running", "deferring a tick"))
+
+    def finish_later():
+        time.sleep(0.15)
+        _write_state(tmp_path, tick=2,
+                     command=_command_payload(cmd_id, "done", "attached Battery9V", 123.0))
+
+    threading.Thread(target=finish_later, daemon=True).start()
+    result = ch.await_result(cmd_id, timeout=5.0, poll=0.05)
+
+    assert result is not None
+    assert result.status == "done", "the running snapshot was handed back as the answer"
+    assert result.detail == "attached Battery9V"
+
+
 def test_await_result_ignores_a_different_commands_id(tmp_path):
     ch = Channel(tmp_path)
     our_id = "ping-2-1"

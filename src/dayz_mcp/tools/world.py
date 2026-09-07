@@ -688,7 +688,17 @@ def world_attach(class_name: str, host: str = "hands", slot: str = "",
 
     The mod checks afterwards that the item really is in that slot and says
     so -- `TakeEntityAsAttachment` answers a bool, and a bool from an engine
-    call is not the same fact as the attachment being there.
+    call is not the same fact as the attachment being there. That check runs
+    ONE TICK LATER, because the engine applies the move after the frame that
+    asked for it (measured on the stand 2026-09-07: the slot still held the
+    old item in the frame where the call had just answered true, and was
+    empty by the next command), so this answer takes about a second longer
+    than the other world verbs.
+
+    That tick buys more than a yes: the answer names the slot the item
+    LANDED in, read off the item's own inventory location rather than echoed
+    back from the request -- so a call that named no slot still comes back
+    with the name `world_detach` will want.
     """
     if not class_name.strip():
         return fail("world_attach needs the class of the item to attach",
@@ -713,7 +723,9 @@ def world_detach(slot: str, host: str = "hands", to: str = "inventory",
     something a caller can ask for; that is the whole reason it exists. The
     mod reports what came off, from which slot, and where it ended up, and
     checks the slot is empty afterwards rather than trusting the engine call's
-    own bool.
+    own bool -- one tick later, because the engine applies the move after the
+    frame that asked for it (measured; see `world_attach`), so this answer
+    takes about a second longer than the other world verbs.
     """
     if not slot.strip():
         return fail("world_detach needs the slot to empty",
@@ -735,7 +747,12 @@ def world_power(on: bool = True, target: str = "hands", energy: float | None = N
     `energy` optionally fills the item's own energy store first, in the
     engine's units (`SetEnergy`). A device switched on with a flat battery
     reports switched-on and NOT working -- true, and useless when nothing can
-    charge the battery.
+    charge the battery. The engine does not clamp the value to the item's
+    maximum (measured: a 50-unit battery set to 55 reports `55/50`) and
+    neither does this, so the answer shows what was actually stored. A device
+    that stores nothing of its own -- one that lives off an attached battery
+    -- reports `0/0` whatever is passed; charge the BATTERY instead, by
+    naming it as the target.
 
     The answer is read back out of the energy manager after the switch:
     switched-on and working are two different facts (`IsSwitchedOn` /

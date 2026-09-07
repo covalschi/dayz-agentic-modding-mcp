@@ -169,6 +169,26 @@ class DZMCP_BridgeCore
     // command is running.
     protected ActionManagerServer m_ActionManager;
 
+    // What a deferred attach or detach has to look at when its tick comes.
+    //
+    // MEASURED ON THE STAND 2026-09-07: an inventory move lands AFTER the
+    // frame that asked for it. `ServerTakeEntityToInventory` answered true and
+    // the slot still held the battery in the same frame; the very next command
+    // found the slot empty and the battery in cargo. A check run in the
+    // requesting frame therefore reports a failure for a move that worked --
+    // the same shape as reading a widget's rectangle before its first layout
+    // pass, and answered the same way: DeferCompletion(1), then look.
+    //
+    // Weak pointers on purpose, like m_ActionManager: if the item or the host
+    // is destroyed inside that tick these read null, which is a fact the
+    // answer can state, rather than keeping a dead entity alive.
+    protected EntityAI m_MoveHost;
+    protected EntityAI m_MoveItem;
+    protected int      m_MoveSlot;
+    protected string   m_MoveWhat;
+    protected string   m_MoveTo;
+    protected bool     m_MoveCall;
+
     // Consecutive-failure counters, one per retryable file operation. Each is
     // reset by its own success, so they measure a RUN of failures rather than a
     // total -- see FAULT_STREAK_LIMIT.
@@ -204,6 +224,12 @@ class DZMCP_BridgeCore
         m_MailboxDeleteFails = 0;
         m_StateWriteFails = 0;
         m_ActionManager = null;
+        m_MoveHost = null;
+        m_MoveItem = null;
+        m_MoveSlot = InventorySlots.INVALID;
+        m_MoveWhat = "";
+        m_MoveTo = "";
+        m_MoveCall = false;
     }
 
     // -----------------------------------------------------------------------
@@ -620,10 +646,21 @@ class DZMCP_BridgeCore
         m_CmdProgressAt = GetGame().GetTickTime();
     }
 
-    // The base has no deferred verbs. A subclass that calls DeferCompletion
-    // overrides this and MUST reach FinishCommand on every path.
+    // attach and detach both wait one tick before judging themselves, because
+    // the engine applies the move after the frame that asked for it. Anything
+    // else that defers without completing itself is a bridge bug and says so.
     protected void CompleteDeferred()
     {
+        if (m_CmdVerb == "attach")
+        {
+            FinishAttach();
+            return;
+        }
+        if (m_CmdVerb == "detach")
+        {
+            FinishDetach();
+            return;
+        }
         FinishCommand(DZMCP_STATUS_FAILED, "verb '" + m_CmdVerb + "' deferred its completion and nothing completed it -- a bridge bug");
     }
 
@@ -1120,16 +1157,45 @@ class DZMCP_BridgeCore
         else
             taken = host.ServerTakeEntityAsAttachmentEx(item, slotId);
 
-        EntityAI parent = item.GetHierarchyParent();
-        if (parent != host)
+        // Judged a tick from now, not here: the engine applies the move after
+        // this frame (measured -- see m_MoveHost).
+        m_MoveHost = host;
+        m_MoveItem = item;
+        m_MoveSlot = slotId;
+        m_MoveWhat = item.GetType();
+        m_MoveTo = "";
+        m_MoveCall = taken;
+        DeferCompletion(1);
+    }
+
+    protected void FinishAttach()
+    {
+        if (!m_MoveHost || !m_MoveItem)
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + item.GetType() + " to " + host.GetType() + " (the call answered " + YesNo(taken) + ") -- the host may have no slot that fits it, or that slot may already be taken");
+            FinishCommand(DZMCP_STATUS_FAILED, "attach: the item or the host is gone a tick later, so where " + m_MoveWhat + " ended up cannot be read");
             return;
         }
 
-        string detail = "attached " + item.GetType() + " to " + host.GetType();
-        if (slotName != "")
-            detail += " in slot " + slotName;
+        if (m_MoveItem.GetHierarchyParent() != m_MoveHost)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + m_MoveWhat + " to " + m_MoveHost.GetType() + " (the call answered " + YesNo(m_MoveCall) + ") -- the host may have no slot that fits it, or that slot may already be taken");
+            return;
+        }
+
+        // Which slot it LANDED in, not which one was asked for. With no slot
+        // named the engine picks one, and the whole point of looking a tick
+        // late is that its choice is readable by then -- so the answer names
+        // it, and the caller has the name `detach` will want. GetSlot() is
+        // -1 (== InventorySlots.INVALID) for any location that is not an
+        // attachment, so one comparison covers "not read" and "not a slot".
+        int landed = m_MoveSlot;
+        InventoryLocation where = new InventoryLocation();
+        if (m_MoveItem.GetInventory() && m_MoveItem.GetInventory().GetCurrentInventoryLocation(where))
+            landed = where.GetSlot();
+
+        string detail = "attached " + m_MoveWhat + " to " + m_MoveHost.GetType();
+        if (landed != InventorySlots.INVALID)
+            detail += " in slot " + InventorySlots.GetSlotName(landed);
         FinishCommand(DZMCP_STATUS_DONE, detail);
     }
 
@@ -1190,7 +1256,6 @@ class DZMCP_BridgeCore
             return;
         }
 
-        string what = item.GetType();
         bool moved;
         if (to == "ground")
             moved = player.ServerDropEntity(item);
@@ -1199,13 +1264,36 @@ class DZMCP_BridgeCore
         else
             moved = player.ServerTakeEntityToInventory(FindInventoryLocationType.CARGO, item);
 
-        if (host.GetInventory().FindAttachment(slotId))
+        m_MoveHost = host;
+        m_MoveItem = item;
+        m_MoveSlot = slotId;
+        m_MoveWhat = item.GetType();
+        m_MoveTo = to;
+        m_MoveCall = moved;
+        DeferCompletion(1);
+    }
+
+    protected void FinishDetach()
+    {
+        if (!m_MoveHost)
         {
-            FinishCommand(DZMCP_STATUS_FAILED, what + " is still in slot '" + slotName + "' on " + host.GetType() + " (the call answered " + YesNo(moved) + ") -- there may be no room in the player's " + to);
+            FinishCommand(DZMCP_STATUS_FAILED, "detach: the host is gone a tick later, so where " + m_MoveWhat + " ended up cannot be read");
+            return;
+        }
+        if (!m_MoveHost.GetInventory())
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "detach: " + m_MoveHost.GetType() + " has no inventory a tick later, so the slot cannot be read");
             return;
         }
 
-        FinishCommand(DZMCP_STATUS_DONE, "detached " + what + " from " + host.GetType() + " slot " + slotName + ", to the player's " + to);
+        string slotName = InventorySlots.GetSlotName(m_MoveSlot);
+        if (m_MoveHost.GetInventory().FindAttachment(m_MoveSlot))
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " is still in slot '" + slotName + "' on " + m_MoveHost.GetType() + " a tick after the move (the call answered " + YesNo(m_MoveCall) + ") -- there may be no room in the player's " + m_MoveTo);
+            return;
+        }
+
+        FinishCommand(DZMCP_STATUS_DONE, "detached " + m_MoveWhat + " from " + m_MoveHost.GetType() + " slot " + slotName + ", to the player's " + m_MoveTo);
     }
 
     // power: on (required, true|false), target = hands|player|<class>, energy.
