@@ -189,11 +189,17 @@ class DZMCP_WorldSnapshot
     //   ui_total   how many nodes that walk VISITED; the array holds at most
     //              DZMCP_Ui.NODES_MAX of them, and the two differing is how a
     //              page says it is a page
+    //   ui_windows how many widgets hang directly off the workspace root, -1
+    //              when there is no workspace. The one number that witnesses a
+    //              window which is not a scripted menu: a mod's panel created
+    //              under the workspace root leaves ui_menu unchanged and moves
+    //              this
     string ui_menu;
     int ui_cursor;
     int ui_dialog;
     string ui_root;
     int ui_total;
+    int ui_windows;
     ref array<string> ui_nodes;
 
     // screen rectangle "x y w h" of the preview host while a preview is loaded, "" otherwise
@@ -237,6 +243,7 @@ class DZMCP_WorldSnapshot
         ui_dialog = -1;
         ui_root = "";
         ui_total = -1;
+        ui_windows = -1;
         ui_nodes = new array<string>();
         ui_host = "";
     }

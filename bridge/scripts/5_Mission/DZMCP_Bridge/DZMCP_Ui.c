@@ -17,6 +17,7 @@
 //   UIScriptedMenu.GetLayoutRoot()          3_game/tools/uiscriptedmenu.c:75
 //   UIManager.GetMenu()                     3_game/tools/uimanager.c:59
 //   Game.GetWorkspace()                     3_game/global/game.c:84
+//   GetWidgetUnderCursor()                  1_core/proto/enwidgets.c:184 (global)
 //
 // THE ONE ENGINE LIMIT THAT SHAPES ALL OF THIS: a plain TextWidget has NO
 // GetText. In the whole of enwidgets.c the method is declared exactly three
@@ -104,6 +105,84 @@ class DZMCP_Ui
         if (!layout)
             why = "the open menu has no layout root";
         return layout;
+    }
+
+    // What the REAL mouse is over, from the engine's own hit test rather than
+    // from a rectangle compared here. Null when the cursor is over nothing, or
+    // when there is no game to ask.
+    //
+    // This is what lets a cursor click answer for itself. A click delivered by
+    // the mouse leaves no trace in any script the bridge can reach: the widget
+    // under the cursor afterwards, the open menu and the number of top-level
+    // widgets are the three observations that CAN be made, and none of them is
+    // this mod's opinion about what should have happened.
+    static Widget UnderCursor()
+    {
+        if (!GetGame())
+            return null;
+        return GetWidgetUnderCursor();
+    }
+
+    // How many widgets hang directly off the workspace root, or -1 when there
+    // is no workspace to count.
+    //
+    // The one number that witnesses a window which is NOT a scripted menu. A
+    // mod may create a panel under the workspace root (VPP's admin tools do),
+    // and then OpenMenuClass() reads identically before and after the click
+    // that opened it -- while this count goes up by one.
+    //
+    // Bounded by the same ceiling as a listing: a sibling chain that loops
+    // would otherwise spin here forever, inside the once-a-second tick.
+    static int TopLevelCount()
+    {
+        if (!GetGame())
+            return -1;
+        Widget workspace = GetGame().GetWorkspace();
+        if (!workspace)
+            return -1;
+        int count = 0;
+        Widget child = workspace.GetChildren();
+        while (child)
+        {
+            count++;
+            if (count > NODES_MAX)
+                break;
+            child = child.GetSibling();
+        }
+        return count;
+    }
+
+    // The index path of `wanted` under `node`, in the SAME child/sibling order
+    // Walk uses -- so a path answered here means the same node a path from a
+    // listing does. False when it is not under this root at all.
+    //
+    // An out parameter rather than a returned string because the root's own
+    // path is "", which is indistinguishable from "not found" as a return
+    // value -- and the widget under the cursor really can be the root.
+    static bool PathOf(Widget node, Widget wanted, string path, out string found)
+    {
+        if (!node)
+            return false;
+        if (node == wanted)
+        {
+            found = path;
+            return true;
+        }
+        Widget child = node.GetChildren();
+        int index = 0;
+        while (child)
+        {
+            string childPath = "" + index;
+            if (path != "")
+                childPath = path + "." + index;
+            if (PathOf(child, wanted, childPath, found))
+                return true;
+            child = child.GetSibling();
+            index++;
+            if (index > NODES_MAX)
+                break;
+        }
+        return false;
     }
 
     // The class of the open menu, or "" when none is open. Its own name, taken

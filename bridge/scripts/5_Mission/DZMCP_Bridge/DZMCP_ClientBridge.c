@@ -67,7 +67,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
 
     override protected string KnownVerbs()
     {
-        return "ping, ui_tree, ui_find, ui_click, ui_text, ui_load, ui_unload";
+        return "ping, ui_tree, ui_find, ui_click, ui_cursor, ui_text, ui_load, ui_unload";
     }
 
     // Deliberately NOT "everything the server knows, plus UI". A client asked
@@ -80,6 +80,8 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             return true;
         if (verb == "ui_tree" || verb == "ui_find" || verb == "ui_click" || verb == "ui_text")
             return true;
+        if (verb == "ui_cursor")
+            return true;
         return verb == "ui_load" || verb == "ui_unload";
     }
 
@@ -89,7 +91,7 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         // refusal, the two-stage parse and `ping`. The verb check there calls
         // IsKnownVerb, which is the override above -- so a server verb sent to
         // a client is refused by name rather than half-executed.
-        if (verb != "ui_tree" && verb != "ui_find" && verb != "ui_click" && verb != "ui_text" && verb != "ui_load" && verb != "ui_unload")
+        if (verb != "ui_tree" && verb != "ui_find" && verb != "ui_click" && verb != "ui_cursor" && verb != "ui_text" && verb != "ui_load" && verb != "ui_unload")
         {
             super.Dispatch(verb, raw);
             return;
@@ -120,6 +122,11 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
             VerbUiClick(args);
             return;
         }
+        if (verb == "ui_cursor")
+        {
+            VerbUiCursor(args);
+            return;
+        }
         if (verb == "ui_text")
         {
             VerbUiText(args);
@@ -142,6 +149,11 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         m_State.world.ui_host = m_Preview.HostRect();
         m_State.world.ui_cursor = -1;
         m_State.world.ui_dialog = -1;
+        // Published every tick rather than asked for, because it is the BEFORE
+        // half of "did that click do anything": a caller cannot ask for it
+        // after the fact. One sibling chain of a few dozen entries, once a
+        // second.
+        m_State.world.ui_windows = DZMCP_Ui.TopLevelCount();
 
         if (!GetGame() || !GetGame().GetUIManager())
             return;
@@ -398,6 +410,54 @@ class DZMCP_ClientBridgeCore extends DZMCP_BridgeCore
         // means the menu did not act on the click -- which is a real answer
         // about the mod, and the caller decides whether to try the cursor.
         FinishCommand(DZMCP_STATUS_DONE, "delivered a click to " + node.ClassName() + " '" + node.GetName() + "' at " + path + ", and the menu's handler did NOT take it (OnClick returned false) -- the widget may handle a different event, or none: try the real cursor at " + DZMCP_Ui.CentreOf(node));
+    }
+
+    // ui_cursor: what the REAL mouse is over, and what the screen holds.
+    //
+    // Exists because a cursor click had no way to answer for itself. The
+    // mouse is moved from outside the game; nothing in script sees the event,
+    // and the path-resolving probe that precedes the click is written BEFORE
+    // it -- so its "nothing was pressed" was being handed on as the click's
+    // own verdict (measured on the stand 2026-09-06). These three are what
+    // the engine will actually tell us afterwards: the hit test under the
+    // cursor, the open menu, and how many top-level widgets there are.
+    protected void VerbUiCursor(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|", "(none)"))
+            return;
+
+        int windows = DZMCP_Ui.TopLevelCount();
+        string menu = DZMCP_Ui.OpenMenuClass();
+        if (menu == "")
+            menu = "(none)";
+
+        m_State.world.ui_root = "cursor";
+        m_State.world.ui_nodes.Clear();
+
+        Widget under = DZMCP_Ui.UnderCursor();
+        if (!under)
+        {
+            m_State.world.ui_total = 0;
+            FinishCommand(DZMCP_STATUS_DONE, "nothing is under the cursor; the open menu is " + menu + "; " + windows + " top-level widget(s)");
+            return;
+        }
+
+        // The path is the one a listing would give it -- same child/sibling
+        // order -- so a caller can click it again by path. "" when the widget
+        // is not under the workspace root at all, which the sentence says
+        // rather than passing off an empty path as the root's.
+        string path = "";
+        bool placed = false;
+        if (GetGame() && GetGame().GetWorkspace())
+            placed = DZMCP_Ui.PathOf(GetGame().GetWorkspace(), under, "", path);
+
+        m_State.world.ui_total = 1;
+        m_State.world.ui_nodes.Insert(DZMCP_Ui.Describe(under, path, 0));
+
+        string where = "at screen path " + path;
+        if (!placed)
+            where = "at no path under the workspace root";
+        FinishCommand(DZMCP_STATUS_DONE, "the cursor is over " + under.ClassName() + " '" + under.GetName() + "' " + where + "; the open menu is " + menu + "; " + windows + " top-level widget(s)");
     }
 
     // ui_text: write into an edit box.

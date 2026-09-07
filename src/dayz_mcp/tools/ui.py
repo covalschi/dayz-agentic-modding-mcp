@@ -426,6 +426,15 @@ def ui_click(path: str, expect_name: str = "", expect_class: str = "",
     delivered and the menu did not act on it. That is a fact about the mod, not
     a failure of this tool, and the answer says so rather than inventing a
     verdict.
+
+    THE CURSOR TRACT ANSWERS FOR ITS OWN CLICK. It asks the client what
+    happened AFTER the mouse moved (`ui_cursor`): `under_cursor` and `hit` say
+    what the cursor ended up on, `menu_before`/`menu_after` and
+    `windows_before`/`windows_after` say what the screen did, and `changed`
+    says whether anything did. The path-resolving probe's own sentence stays,
+    under `resolve_detail`, but it no longer speaks for the click -- it was
+    written before the mouse moved, and passing it on is how a click that
+    opened an admin window came back saying "nothing was pressed".
     """
     if via not in ("script", "cursor"):
         return fail(
@@ -475,6 +484,15 @@ def ui_click(path: str, expect_name: str = "", expect_class: str = "",
             hint="this is a bug in the bridge's own listing, not in the caller's arguments",
         )
 
+    target = nodes[0]
+    before = found.data.get("ui") or {}
+    # Kept, not thrown away: it is the PROBE's own true sentence ("nothing was
+    # pressed" -- nothing had been, at that point), and it stops being the
+    # whole call's verdict below rather than stopping being said.
+    found.data["resolve_detail"] = found.data.get("detail", "")
+    found.data["menu_before"] = before.get("ui_menu", "")
+    found.data["windows_before"] = before.get("ui_windows", -1)
+
     pid, _alive = _live_client()
     clicked = winui.click(pid, centre[0], centre[1])
     found.data["via"] = "cursor"
@@ -482,7 +500,96 @@ def ui_click(path: str, expect_name: str = "", expect_class: str = "",
     found.data["click"] = clicked.data
     if not clicked.ok:
         return Result(False, found.data, clicked.error, clicked.hint)
+    return _with_click_verdict(found, target, timeout)
+
+
+def _with_click_verdict(found: Result, target: dict, timeout: float) -> Result:
+    """What the real click actually did, asked AFTER it happened.
+
+    The probe that resolved the path answered before the mouse moved, so its
+    sentence cannot speak for the click -- and it was being handed on as if it
+    could, which is how a click that opened a whole admin window came back as
+    "nothing was pressed" (measured 2026-09-06, task-57c). Three observations
+    replace that claim, and every one of them is the client's, not this
+    module's: what the cursor is over now, what menu is open now, and how many
+    top-level widgets the workspace holds now.
+
+    The last one is the load-bearing one for a window that is NOT a scripted
+    menu -- VPP's admin panel is created under the workspace root, so the open
+    menu class is identical before and after a click that plainly opened it.
+    """
+    probe = _run("ui_cursor", {}, timeout)
+    at = found.data["clicked_at"]
+    pressed = (f"clicked {target.get('class', '?')} '{target.get('name', '')}' at "
+               f"{found.data['args'].get('path', '')} with the real mouse at "
+               f"({at['x']}, {at['y']})")
+    if not probe.ok:
+        found.data["under_cursor"] = None
+        found.data["hit"] = None
+        found.data["menu_after"] = ""
+        found.data["windows_after"] = -1
+        found.data["changed"] = None
+        found.data["check_unavailable"] = probe.error
+        found.data["detail"] = (
+            f"{pressed}; what it did could not be checked afterwards: {probe.error}"
+        )
+        return found
+
+    after = probe.data.get("ui") or {}
+    under = (probe.data.get("nodes") or [None])[0]
+    found.data["cursor_detail"] = probe.data.get("detail", "")
+    found.data["under_cursor"] = under
+    found.data["hit"] = bool(under) and all(
+        under.get(field) == target.get(field) for field in ("class", "name", "rect")
+    )
+    found.data["menu_after"] = after.get("ui_menu", "")
+    found.data["windows_after"] = after.get("ui_windows", -1)
+    found.data["changed"] = (
+        found.data["menu_after"] != found.data["menu_before"]
+        or found.data["windows_after"] != found.data["windows_before"]
+    )
+
+    said = [pressed]
+    if under:
+        said.append(f"the cursor is now over {under.get('class', '?')} '{under.get('name', '')}'")
+    else:
+        said.append("nothing is under the cursor now")
+    if found.data["menu_after"] != found.data["menu_before"]:
+        said.append(f"the open menu went from {found.data['menu_before'] or '(none)'} "
+                    f"to {found.data['menu_after'] or '(none)'}")
+    else:
+        said.append(f"the open menu is still {found.data['menu_before'] or '(none)'}")
+    if found.data["windows_after"] != found.data["windows_before"]:
+        said.append(f"top-level widgets {found.data['windows_before']} -> "
+                    f"{found.data['windows_after']}")
+    else:
+        said.append(f"top-level widgets unchanged at {found.data['windows_before']}")
+    if not found.data["changed"]:
+        said.append("so nothing changed that this can see -- the widget may act on a "
+                    "different event, or on release")
+    found.data["detail"] = "; ".join(said)
     return found
+
+
+def ui_cursor(timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """What the real mouse is over right now, and what the screen holds.
+
+    The widget under the cursor comes from the engine's own
+    `GetWidgetUnderCursor`, so it is a hit test rather than a rectangle
+    compared here -- which is what makes it worth a round trip. Beside it:
+    the open menu's class and how many top-level widgets the workspace has,
+    the pair `ui_click(via="cursor")` uses to say whether its click did
+    anything. A window that is not a scripted menu (a mod hanging a panel off
+    the workspace root) moves the second number and not the first.
+    """
+    answered = _run("ui_cursor", {}, timeout)
+    if not answered.ok:
+        return answered
+    block = answered.data.get("ui") or {}
+    answered.data["under_cursor"] = (answered.data.get("nodes") or [None])[0]
+    answered.data["menu"] = block.get("ui_menu", "")
+    answered.data["windows"] = block.get("ui_windows", -1)
+    return answered
 
 
 def ui_text(path: str, text: str, expect_name: str = "", expect_class: str = "",

@@ -307,7 +307,7 @@ def test_the_cursor_tract_asks_the_client_where_the_widget_is_and_clicks_there(l
 
     result = ui.ui_click("0.1", via="cursor", expect_name="ok_button")
     assert result.ok, result.error
-    assert live.sent[-1].args["deliver"] == "none"
+    assert live.sent[0].args["deliver"] == "none"
     assert clicks == [(9876, 330, 420)]
     assert result.data["via"] == "cursor"
     assert result.data["clicked_at"] == {"x": 330, "y": 420}
@@ -341,6 +341,146 @@ def test_the_cursor_tract_says_so_when_there_is_no_rectangle(live, monkeypatch):
     result = ui.ui_click("0.1", via="cursor")
     assert not result.ok
     assert "rectangle" in result.error
+
+
+# -------------------------------------------------- what a cursor click did
+#
+# Measured on the stand 2026-09-06 (task-57c): a real cursor click on a
+# toolbar button plainly opened an admin window, and the tool's own answer
+# said "nothing was pressed" -- the sentence belongs to the `deliver=none`
+# PROBE that resolves the path, and it was being handed on as the whole
+# call's verdict. The click had no verdict of its own at all.
+
+
+def _after_the_click(live, *, menu="", windows=-1, under=None, detail="probed"):
+    """Make the fake client answer the post-click probe differently from the
+    resolve that preceded it -- the state a real click changes."""
+    def fake_click(pid, x, y):
+        from dayz_mcp.errors import ok as _ok
+        live.state = BridgeState(tick=10, session_id="client-1", world={
+            "ui_menu": menu, "ui_windows": windows, "ui_total": 1,
+            "ui_nodes": [under] if under else [],
+        })
+        live.answer = CommandState(id="", status="done", detail=detail, finished_at=2.0)
+        return _ok({"x": x, "y": y, "foreground": True})
+    return fake_click
+
+
+def test_the_cursor_tract_never_reports_that_nothing_was_pressed(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VanillaHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image", rect="300 400 60 40")],
+    })
+    live.answer = CommandState(
+        id="", status="done",
+        detail="found ImageWidget 'Image' at 0.1; centre 330 420; nothing was pressed",
+        finished_at=1.0,
+    )
+    monkeypatch.setattr("dayz_mcp.tools.ui.winui.click", _after_the_click(
+        live, menu="MyModAdminMenu", windows=47,
+        under=node_line(cls="ImageWidget", name="Image", rect="300 400 60 40"),
+    ))
+
+    result = ui.ui_click("0.1", via="cursor", expect_name="Image")
+    assert result.ok, result.error
+    assert "nothing was pressed" not in result.data["detail"]
+    assert "ImageWidget 'Image'" in result.data["detail"]
+    assert "330" in result.data["detail"] and "420" in result.data["detail"]
+    # The probe's own words are kept, just not passed off as the verdict.
+    assert "nothing was pressed" in result.data["resolve_detail"]
+
+
+def test_the_cursor_tract_asks_what_is_under_the_cursor_after_the_click(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VanillaHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image", rect="300 400 60 40")],
+    })
+    monkeypatch.setattr("dayz_mcp.tools.ui.winui.click", _after_the_click(
+        live, menu="MyModAdminMenu", windows=47,
+        under=node_line(cls="ImageWidget", name="Image", rect="300 400 60 40"),
+    ))
+
+    result = ui.ui_click("0.1", via="cursor", expect_name="Image")
+    assert result.ok, result.error
+    assert [c.verb for c in live.sent] == ["ui_click", "ui_cursor"]
+    assert result.data["under_cursor"]["name"] == "Image"
+    assert result.data["hit"] is True
+
+
+def test_the_cursor_tract_reports_what_changed_after_the_click(live, monkeypatch):
+    """A workspace-orphan window (VPP's admin panel is one) never changes the
+    open MENU, so the menu class alone cannot witness a click. The count of
+    top-level widgets can, and both travel."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VppLikeHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image", rect="300 400 60 40")],
+    })
+    monkeypatch.setattr("dayz_mcp.tools.ui.winui.click", _after_the_click(
+        live, menu="VppLikeHud", windows=47,
+        under=node_line(cls="FrameWidget", name="AdminRoot", rect="0 0 1000 600"),
+    ))
+
+    result = ui.ui_click("0.1", via="cursor", expect_name="Image")
+    assert result.ok, result.error
+    assert result.data["menu_before"] == "VppLikeHud"
+    assert result.data["menu_after"] == "VppLikeHud"
+    assert result.data["windows_before"] == 46
+    assert result.data["windows_after"] == 47
+    assert result.data["changed"] is True
+    assert "46" in result.data["detail"] and "47" in result.data["detail"]
+    # The cursor ended up over something else -- said, not silently ignored.
+    assert result.data["hit"] is False
+
+
+def test_the_cursor_tract_says_when_nothing_changed_at_all(live, monkeypatch):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VanillaHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image", rect="300 400 60 40")],
+    })
+    monkeypatch.setattr("dayz_mcp.tools.ui.winui.click", _after_the_click(
+        live, menu="VanillaHud", windows=46,
+        under=node_line(cls="ImageWidget", name="Image", rect="300 400 60 40"),
+    ))
+
+    result = ui.ui_click("0.1", via="cursor", expect_name="Image")
+    assert result.ok, result.error
+    assert result.data["changed"] is False
+    assert "nothing changed" in result.data["detail"]
+
+
+def test_the_cursor_tract_admits_when_the_check_could_not_be_made(live, monkeypatch):
+    """The click DID go out; only the look afterwards failed. Both facts,
+    rather than one standing in for the other."""
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VanillaHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image", rect="300 400 60 40")],
+    })
+
+    def fake_click(pid, x, y):
+        from dayz_mcp.errors import ok as _ok
+        live.answer = CommandState(id="", status="failed",
+                                   detail="ui_cursor: this client has no workspace",
+                                   finished_at=2.0)
+        return _ok({"x": x, "y": y})
+
+    monkeypatch.setattr("dayz_mcp.tools.ui.winui.click", fake_click)
+    result = ui.ui_click("0.1", via="cursor", expect_name="Image")
+    assert result.ok, result.error
+    assert result.data["hit"] is None
+    assert "no workspace" in result.data["check_unavailable"]
+    assert "could not be checked" in result.data["detail"]
+
+
+def test_the_cursor_answer_names_what_the_mouse_is_over(live):
+    live.state = BridgeState(tick=9, session_id="client-1", world={
+        "ui_menu": "VanillaHud", "ui_windows": 46, "ui_total": 1,
+        "ui_nodes": [node_line(cls="ImageWidget", name="Image")],
+    })
+    result = ui.ui_cursor()
+    assert result.ok, result.error
+    assert live.sent[-1].verb == "ui_cursor"
+    assert result.data["under_cursor"]["class"] == "ImageWidget"
+    assert result.data["windows"] == 46
 
 
 # ---------------------------------------------------------------------- text
