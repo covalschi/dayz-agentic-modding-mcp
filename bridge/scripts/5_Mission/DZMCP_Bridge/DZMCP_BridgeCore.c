@@ -566,6 +566,7 @@ class DZMCP_BridgeCore
         m_State.world.entities_radius = 0;
         m_State.world.ui_nodes.Clear();
         m_State.world.ui_total = -1;
+        m_State.world.ui_matched = -1;
         m_State.world.ui_root = "";
 
         m_State.command.id = id;
