@@ -406,6 +406,10 @@ def world_spawn(class_name: str, where: str = "ground", pos: str = "",
     position when it is omitted; with neither a position nor a player, the mod
     says so in words rather than doing nothing.
 
+    `where="inventory"` may land in the hands or a worn slot instead of cargo
+    when nothing else fits -- the answer says where -- and
+    `world_move(class_name, to="inventory")` is how to insist afterwards.
+
     "attachment" hangs the new item on whatever is IN HANDS, which is the only
     way from here to reach a battery slot, an optic, a module bay or a data
     carrier -- in game those are a drag inside the inventory screen. `slot`

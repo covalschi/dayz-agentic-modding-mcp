@@ -1048,7 +1048,47 @@ class DZMCP_BridgeCore
         }
 
         ApplyQuantity(created, args);
-        FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " in " + where);
+
+        if (where == "hands")
+        {
+            FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " in hands");
+            return;
+        }
+
+        // where == "inventory": CreateInInventory does not mean CARGO.
+        // HumanInventory.CreateInInventory calls GameInventory.CreateInInventory
+        // (3_game/systems/inventory/humaninventory.c:65 ->
+        // 3_game/systems/inventory/inventory.c:876), which looks for a free
+        // CARGO or ATTACHMENT location first -- so a helmet can land WORN --
+        // and falls back to CreateInHands only when neither is free. Measured
+        // 2026-09-08: a Rag and a helmet both landed in HANDS, three for
+        // three. "in inventory" was the ask, not the fact; read the item's
+        // own InventoryLocation and say which of the three it actually is.
+        int at = InventoryLocationType.UNKNOWN;
+        EntityAI holder = null;
+        int slotId = InventorySlots.INVALID;
+        InventoryLocation loc = new InventoryLocation();
+        if (created.GetInventory() && created.GetInventory().GetCurrentInventoryLocation(loc))
+        {
+            at = loc.GetType();
+            holder = loc.GetParent();
+            slotId = loc.GetSlot();
+        }
+
+        string landedWhere;
+        if (at == InventoryLocationType.ATTACHMENT)
+            landedWhere = "worn in slot " + InventorySlots.GetSlotName(slotId);
+        else if (at == InventoryLocationType.CARGO)
+        {
+            string container = "something";
+            if (holder)
+                container = holder.GetType();
+            landedWhere = "in the cargo of " + container;
+        }
+        else
+            landedWhere = "in the player's hands (no room in cargo or worn slots)";
+
+        FinishCommand(DZMCP_STATUS_DONE, "created " + created.GetType() + " " + landedWhere);
     }
 
     // The host is whatever is in hands. That is the one item a caller can name
