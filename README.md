@@ -96,8 +96,9 @@ in its notes.
 | `world_spawn(class_name, where, pos, quantity, slot)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, in their inventory, or attached to the item they are holding (`where="attachment"`, optional `slot` naming the CfgSlots slot) |
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
-| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up — **one tick later**, because the move lands after the frame that asked for it, and names the slot the item actually landed in |
-| `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for. Checks the slot is empty **one tick later**, for the same reason as `world_attach` |
+| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up — **a tick later**, because the move lands after the frame that asked for it, and names the slot the item actually landed in |
+| `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for. Checks the slot is empty **a tick later**, for the same reason as `world_attach`. `to="hands"` while the hands hold something else is refused by name — the engine's own answer there is a bare false |
+| `world_move(class_name, to)` | move an item the player already has between `hands`, `inventory` (default) and `ground` — the drag inside the inventory screen a headless stand cannot make. `class_name` is `"hands"` for whatever is held, or a config class looked up on the player. **Carry it, do not hold it** is where every test of a worn or pocketed device starts, and `world_spawn` cannot get there. An ask that is already true comes back done, not failed; asking for the hands while they hold something else is refused by name |
 | `world_power(on, target, energy)` | switch a device on or off wherever it is on the player — worn, in a pocket, in hands — through its energy manager. `energy` optionally fills its own store first. The answer reads both facts back: **switched on and working are different**, and a device switched on with a flat battery has the first without the second |
 | `world_delete(class_name, radius, pos)` | delete objects of one class nearby. Requires the class; never deletes a real player |
 | `world_entities(class_name, radius, pos, limit)` | **which** objects are nearby, not how many: class, position, distance and health for each. A page, and it says so — the true total comes back beside the list |
@@ -298,15 +299,16 @@ listed 5 of 171 objects with `truncated: true`. Distances came back at 320 m
 for a 150 m radius until they were made horizontal, which is what the engine's
 own radius test measures.
 
-### Attachments and power are engine operations, not mod behaviour
+### Attachments, carrying and power are engine operations, not mod behaviour
 
-`world_attach`, `world_detach` and `world_power` ship in this bridge rather
-than in a project's own copy of the dispatcher, and the line is worth stating:
-taking an item off a slot, putting one on, and throwing an energy manager's
-switch are the same calls whatever mod drew the device (`FindAttachment`,
+`world_attach`, `world_detach`, `world_move` and `world_power` ship in this
+bridge rather than in a project's own copy of the dispatcher, and the line is
+worth stating: taking an item off a slot, putting one on, carrying one in a
+pocket instead of a hand, and throwing an energy manager's switch are the same
+calls whatever mod drew the device (`FindAttachment`,
 `ServerTakeEntityAsAttachmentEx`, `ServerTakeEntityToInventory`,
-`GetCompEM().SwitchOn`). The rule under `world_exec` is about behaviour a mod
-*defines*; none of this is.
+`ServerDropEntity`, `GetCompEM().SwitchOn`). The rule under `world_exec` is
+about behaviour a mod *defines*; none of this is.
 
 They exist because a **worn** device could not be reached at all: `world_spawn`
 attaches a NEW item to whatever is in HANDS, `world_set` knows health and
@@ -316,7 +318,11 @@ switch a device on, which left every action whose condition reads `IsWorking()`
 untestable from outside the game. All three name the item the only way a tool
 that has never seen it can: `"hands"`, `"player"` (the character's own worn
 slots), or a config class looked up on the player — hands first, then worn
-attachments and cargo, recursively, first match by `IsKindOf`.
+attachments and cargo, recursively, first match by `IsKindOf`. `world_move`
+covers the other half of the same gap: **carry it, do not hold it** is where a
+test of a worn or pocketed device starts, `world_spawn` puts an item in one
+place and leaves it, and the move between hands, inventory and ground is a drag
+inside the inventory screen — a gesture no tool can make.
 
 Each one reads the result back out of the engine rather than reporting the
 call's own bool: whether the slot is empty now, whether the item's hierarchy
@@ -329,13 +335,24 @@ nothing about it.
 (measured 2026-09-07): `ServerTakeEntityToInventory` answered true and the slot
 still held the battery in that same frame, and the very next command found the
 slot empty and the battery in cargo — so a read-back taken where the call
-returns reports a failure for a move that worked. `attach` and `detach` defer
-their own verdict by one tick, the same `DeferCompletion(1)` `ui_load` uses to
-let a widget reach its first layout pass, and cost about a second more than the
-other world verbs for it. `attach` spends that tick on more than a yes: it
+returns reports a failure for a move that worked. `attach`, `detach` and `move`
+defer their own verdict by a tick, the same `DeferCompletion(1)` `ui_load` uses
+to let a widget reach its first layout pass, and cost about a second more than
+the other world verbs for it. `attach` spends that tick on more than a yes: it
 names the slot the item **landed** in, read off the item's own inventory
 location, so a call that named no slot still comes back with the name
 `world_detach` will want.
+
+**One tick is not always enough** (measured 2026-09-08). A move whose *source*
+is the hands does not go straight into the inventory: `HumanInventory` turns it
+into a `HandEventMoveTo` and posts it to the hand state machine, which applies
+it on the player's next command-handler frame — later than the bridge's next
+tick when the player is busy. Attaching the item held in hands to a player slot
+answered failed once for a move that had in fact worked. So the three verbs
+look again, up to five ticks (still inside the mod's own 30 s hard limit and
+well inside this side's 45 s wait), and the answer names the wait it spent:
+`... after 2 tick(s)`. A move that never lands is still refused by the mod in
+its own words, with the tick count, rather than by a timeout.
 
 ### Actions, and why there is no verb dictionary
 
