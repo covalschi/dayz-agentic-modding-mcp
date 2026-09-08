@@ -71,6 +71,25 @@ class DZMCP_BridgeCore
     // phantom timeout away.
     static const int TERMINAL_DWELL_PUBLISHES = 2;
 
+    // How many ticks a deferred inventory move may wait for the item to land
+    // before the bridge calls it a failure.
+    //
+    // ONE TICK IS NOT ALWAYS ENOUGH, and the engine says why: HumanInventory
+    // routes any move whose SOURCE is the hands through the hand state
+    // machine. TakeEntityToInventory calls RedirectToHandEvent, and
+    // TakeEntityAsAttachmentEx / TakeEntityToCargoEx build a HandEventMoveTo,
+    // post it and return true at once (3_game/systems/inventory/
+    // humaninventory.c ~253-330). The event is applied on the player's next
+    // COMMAND-HANDLER frame, which is not the bridge's next tick when the
+    // player is busy -- measured 2026-09-08: attaching the item held in hands
+    // to a player slot answered FAILED once while the item was in the slot by
+    // the next command.
+    //
+    // Five ticks is about five seconds -- inside HARD_LIMIT_SECONDS and well
+    // inside the Python side's 45 s wait, so a move that never lands is still
+    // answered by this bridge in its own words rather than by a timeout.
+    static const int MOVE_WAIT_TICKS = 5;
+
     // Upper bound on the deliberate padding the probe_bloat verb can request.
     static const int PAD_MAX = 16384;
 
@@ -189,6 +208,12 @@ class DZMCP_BridgeCore
     protected string   m_MoveTo;
     protected bool     m_MoveCall;
 
+    // How many ticks the running move has already waited. One look is the
+    // usual case; a move out of the HANDS can need several, because the hand
+    // state machine applies it on the player's next command-handler frame --
+    // see MOVE_WAIT_TICKS for the measurement and the corpus reference.
+    protected int      m_MoveWaited;
+
     // Consecutive-failure counters, one per retryable file operation. Each is
     // reset by its own success, so they measure a RUN of failures rather than a
     // total -- see FAULT_STREAK_LIMIT.
@@ -230,6 +255,7 @@ class DZMCP_BridgeCore
         m_MoveWhat = "";
         m_MoveTo = "";
         m_MoveCall = false;
+        m_MoveWaited = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -603,6 +629,7 @@ class DZMCP_BridgeCore
         m_CmdVerb = verb;
         m_CmdInstant = true;
         m_CmdDeferTicks = 0;
+        m_MoveWaited = 0;
         m_CmdStartedAt = GetGame().GetTickTime();
         m_CmdProgressAt = m_CmdStartedAt;
         m_TerminalPublishes = 0;
@@ -646,9 +673,40 @@ class DZMCP_BridgeCore
         m_CmdProgressAt = GetGame().GetTickTime();
     }
 
-    // attach and detach both wait one tick before judging themselves, because
-    // the engine applies the move after the frame that asked for it. Anything
-    // else that defers without completing itself is a bridge bug and says so.
+    // Ask for one more look at a move that has not landed yet. True when a
+    // tick was bought and the caller must return without answering; false when
+    // the budget is spent and the caller must say so.
+    //
+    // The verb itself calls this for its FIRST look, so m_MoveWaited is always
+    // the number of ticks that will have passed by the time the judging half
+    // runs -- which is the number the answer quotes. A move that lands on the
+    // first look therefore reads 1 and says nothing about waiting.
+    protected bool WaitForTheMove()
+    {
+        if (m_MoveWaited >= MOVE_WAIT_TICKS)
+            return false;
+
+        m_MoveWaited++;
+        DeferCompletion(1);
+        return true;
+    }
+
+    // How long the wait was, for a move that landed -- and nothing at all when
+    // it landed on the first look, which is the ordinary case and would only
+    // add noise. The number is evidence about the engine's own timing, so a
+    // DONE that hid a four-tick wait would make the next timing question
+    // unanswerable.
+    protected string WaitedPhrase()
+    {
+        if (m_MoveWaited > 1)
+            return " after " + m_MoveWaited + " tick(s)";
+        return "";
+    }
+
+    // attach and detach both wait for the move to land before judging
+    // themselves, because the engine applies it after the frame that asked for
+    // it. Anything else that defers without completing itself is a bridge bug
+    // and says so.
     protected void CompleteDeferred()
     {
         if (m_CmdVerb == "attach")
@@ -1165,7 +1223,7 @@ class DZMCP_BridgeCore
         m_MoveWhat = item.GetType();
         m_MoveTo = "";
         m_MoveCall = taken;
-        DeferCompletion(1);
+        WaitForTheMove();
     }
 
     protected void FinishAttach()
@@ -1178,7 +1236,14 @@ class DZMCP_BridgeCore
 
         if (m_MoveItem.GetHierarchyParent() != m_MoveHost)
         {
-            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + m_MoveWhat + " to " + m_MoveHost.GetType() + " (the call answered " + YesNo(m_MoveCall) + ") -- the host may have no slot that fits it, or that slot may already be taken");
+            // Not there YET is not the same as not there: an item coming out
+            // of the hands travels through the hand state machine and lands on
+            // the player's next command-handler frame, which can be several
+            // ticks away (MOVE_WAIT_TICKS). Look again while the budget holds.
+            if (WaitForTheMove())
+                return;
+
+            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + m_MoveWhat + " to " + m_MoveHost.GetType() + " within " + m_MoveWaited + " tick(s) (the call answered " + YesNo(m_MoveCall) + ") -- the host may have no slot that fits it, or that slot may already be taken");
             return;
         }
 
@@ -1196,7 +1261,7 @@ class DZMCP_BridgeCore
         string detail = "attached " + m_MoveWhat + " to " + m_MoveHost.GetType();
         if (landed != InventorySlots.INVALID)
             detail += " in slot " + InventorySlots.GetSlotName(landed);
-        FinishCommand(DZMCP_STATUS_DONE, detail);
+        FinishCommand(DZMCP_STATUS_DONE, detail + WaitedPhrase());
     }
 
     // detach: slot (required), host = hands|player|<class>, to = inventory|hands|ground.
@@ -1270,7 +1335,7 @@ class DZMCP_BridgeCore
         m_MoveWhat = item.GetType();
         m_MoveTo = to;
         m_MoveCall = moved;
-        DeferCompletion(1);
+        WaitForTheMove();
     }
 
     protected void FinishDetach()
@@ -1289,11 +1354,17 @@ class DZMCP_BridgeCore
         string slotName = InventorySlots.GetSlotName(m_MoveSlot);
         if (m_MoveHost.GetInventory().FindAttachment(m_MoveSlot))
         {
-            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " is still in slot '" + slotName + "' on " + m_MoveHost.GetType() + " a tick after the move (the call answered " + YesNo(m_MoveCall) + ") -- there may be no room in the player's " + m_MoveTo);
+            // Same bounded wait as attach, for the same reason: a move whose
+            // destination is the hands is a hand event, applied on the
+            // player's next command-handler frame rather than on this tick.
+            if (WaitForTheMove())
+                return;
+
+            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " is still in slot '" + slotName + "' on " + m_MoveHost.GetType() + " " + m_MoveWaited + " tick(s) after the move (the call answered " + YesNo(m_MoveCall) + ") -- there may be no room in the player's " + m_MoveTo);
             return;
         }
 
-        FinishCommand(DZMCP_STATUS_DONE, "detached " + m_MoveWhat + " from " + m_MoveHost.GetType() + " slot " + slotName + ", to the player's " + m_MoveTo);
+        FinishCommand(DZMCP_STATUS_DONE, "detached " + m_MoveWhat + " from " + m_MoveHost.GetType() + " slot " + slotName + ", to the player's " + m_MoveTo + WaitedPhrase());
     }
 
     // power: on (required, true|false), target = hands|player|<class>, energy.
