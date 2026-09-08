@@ -1152,12 +1152,13 @@ class DZMCP_BridgeCore
         item.SetQuantity(raw.ToFloat());
     }
 
-    // ---- attachments and power --------------------------------------------
+    // ---- attachments, movement and power ----------------------------------
     //
-    // These three are engine operations, not mod behaviour: taking an item off
-    // a slot, putting one on, and throwing an energy manager's switch are the
-    // same calls whatever mod drew the device. The verb-in-your-own-copy rule
-    // above is about behaviour a mod defines; nothing here is.
+    // These four are engine operations, not mod behaviour: taking an item off
+    // a slot, putting one on, carrying it between hands, inventory and
+    // ground, and throwing an energy manager's switch are the same calls
+    // whatever mod drew the device. The verb-in-your-own-copy rule above is
+    // about behaviour a mod defines; nothing here is.
     //
     // They exist because a WORN device could not be reached at all (measured
     // 2026-09-06): spawn's attachment path hangs a NEW item on the one in

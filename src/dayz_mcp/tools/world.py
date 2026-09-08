@@ -688,12 +688,15 @@ def world_attach(class_name: str, host: str = "hands", slot: str = "",
 
     The mod checks afterwards that the item really is in that slot and says
     so -- `TakeEntityAsAttachment` answers a bool, and a bool from an engine
-    call is not the same fact as the attachment being there. That check runs
-    ONE TICK LATER, because the engine applies the move after the frame that
-    asked for it (measured on the stand 2026-09-07: the slot still held the
-    old item in the frame where the call had just answered true, and was
-    empty by the next command), so this answer takes about a second longer
-    than the other world verbs.
+    call is not the same fact as the attachment being there. That check can
+    run for up to five ticks, not just one: the engine applies the move after
+    the frame that asked for it (measured on the stand 2026-09-07: the slot
+    still held the old item in the frame where the call had just answered
+    true, and was empty by the next command), and a move out of the hands
+    goes through the hand state machine, which can take several ticks when
+    the player is busy. So this answer normally costs about a second more
+    than the other world verbs, occasionally a few -- the detail says how
+    many ticks it waited, as "after N tick(s)", when it waited more than one.
 
     That tick buys more than a yes: the answer names the slot the item
     LANDED in, read off the item's own inventory location rather than echoed
@@ -723,9 +726,12 @@ def world_detach(slot: str, host: str = "hands", to: str = "inventory",
     something a caller can ask for; that is the whole reason it exists. The
     mod reports what came off, from which slot, and where it ended up, and
     checks the slot is empty afterwards rather than trusting the engine call's
-    own bool -- a tick later, because the engine applies the move after the
-    frame that asked for it (measured; see `world_attach`), so this answer
-    takes about a second longer than the other world verbs.
+    own bool -- up to five ticks later, not just one: the engine applies the
+    move after the frame that asked for it, and a move out of the hands can
+    take several ticks to land (measured; see `world_attach`). So this answer
+    normally costs about a second more than the other world verbs,
+    occasionally a few -- the detail says how many ticks it waited, as
+    "after N tick(s)", when it waited more than one.
 
     `to="hands"` while the hands hold something else is refused BY NAME. The
     engine's own answer there is a bare false with nothing said about why, and
