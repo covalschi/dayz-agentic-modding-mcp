@@ -505,6 +505,67 @@ def test_detach_refuses_an_empty_slot_before_anything_is_sent(live):
     assert live.sent == []
 
 
+def test_move_sends_the_class_and_where_it_goes(live):
+    world.world_move("Ssh68Helmet", to="ground")
+    args = live.sent[-1].args
+    assert live.sent[-1].verb == "move"
+    assert args["class"] == "Ssh68Helmet"
+    assert args["to"] == "ground"
+
+
+def test_move_defaults_to_the_inventory(live):
+    """"Carry it, do not hold it" is the state a test of a worn or pocketed
+    device starts from, so it is the default rather than an argument to
+    remember."""
+    world.world_move("hands")
+    assert live.sent[-1].args == {"class": "hands", "to": "inventory"}
+
+
+def test_move_refuses_an_empty_class_before_anything_is_sent(live):
+    result = world.world_move("")
+    assert not result.ok
+    assert live.sent == []
+
+
+def test_move_refuses_a_destination_outside_the_three(live):
+    """There are three places a player can keep an item. A slot on a device is
+    world_attach's business, and sending "Headgear" here would have the mod
+    refuse a second later for a reason this side already knows."""
+    for bad in ("Headgear", "cargo", "", "GROUND"):
+        result = world.world_move("Ssh68Helmet", to=bad)
+        assert not result.ok, bad
+        assert live.sent == [], f"{bad!r} was sent"
+        assert "inventory, hands, ground" in result.hint
+
+
+def test_a_move_already_true_comes_back_done(live):
+    """A caller that asks for a state it already has asked for a STATE. The mod
+    answers done and says so; nothing here may turn that into a failure."""
+    live.answer = CommandState(
+        id="", status="done",
+        detail="Ssh68Helmet is already in the player's hands",
+        finished_at=1.0,
+    )
+    result = world.world_move("Ssh68Helmet", to="hands")
+
+    assert result.ok
+    assert "already" in result.data["detail"]
+
+
+def test_a_move_still_running_at_the_deadline_is_not_a_success(live):
+    """Same shape as the deferred attach and detach below, and the same danger:
+    a move that never landed, reported as a success, sends every later
+    assertion about the device hunting in the wrong place."""
+    live.answer = CommandState(id="", status="running", detail="deferring a tick",
+                               finished_at=0.0)
+
+    result = world.world_move("Ssh68Helmet")
+
+    assert not result.ok
+    assert "running" in result.error
+    assert result.data["status"] == "running"
+
+
 def test_power_sends_a_lowercase_boolean_and_the_target(live):
     world.world_power(True, target="MyMod_Device")
     assert live.sent[-1].verb == "power"
@@ -525,6 +586,22 @@ def test_power_carries_an_energy_charge_when_it_is_given(live):
     assert live.sent[-1].args["energy"] == "100"
 
 
+def test_the_mods_refusal_about_occupied_hands_names_the_occupant(live):
+    """Hands hold one thing, and the engine's own answer to being asked
+    otherwise is a bare false. Which of "no room" and "occupied" it was decides
+    what the caller does next, so the mod names the occupant and this side
+    passes the sentence through."""
+    live.answer = CommandState(
+        id="", status="failed",
+        detail="detach: the player's hands hold Ssh68Helmet -- put that away first",
+        finished_at=1.0,
+    )
+    result = world.world_detach("BatteryD", to="hands")
+
+    assert not result.ok
+    assert "hands hold Ssh68Helmet" in result.error
+
+
 def test_the_mods_refusal_about_a_slot_reaches_the_caller_verbatim(live):
     live.answer = CommandState(
         id="", status="failed",
@@ -541,10 +618,17 @@ def test_the_mods_refusal_about_a_slot_reaches_the_caller_verbatim(live):
 # Measured on the stand 2026-09-07: `ServerTakeEntityToInventory` answered true
 # and the slot STILL HELD the battery in that same frame; the very next command
 # found the slot empty and the battery in cargo. So the mod defers its own
-# verdict by one tick (`DeferCompletion(1)`) and looks then. These two pin what
-# that costs this side: a command that reports itself RUNNING for a while is
-# normal for these two verbs, and one still running at the deadline is not a
-# success.
+# verdict by one tick (`DeferCompletion(1)`) and looks then.
+#
+# One tick is not always enough, measured 2026-09-08: a move whose SOURCE is
+# the hands goes through the engine's hand state machine and is applied on the
+# player's next command-handler frame, so `attach host=player` of the held item
+# answered FAILED once for a move that had worked. The mod now looks again
+# while a budget of five ticks holds and names the wait it actually spent.
+# These pin what that costs this side: a command that reports itself RUNNING
+# for a while is normal for these verbs, one still running at the deadline is
+# not a success, and the tick count in the detail is the mod's evidence about
+# the engine -- it comes through verbatim.
 
 
 def test_attach_reports_the_slot_the_mod_says_it_landed_in(live):
@@ -562,6 +646,21 @@ def test_attach_reports_the_slot_the_mod_says_it_landed_in(live):
     assert result.ok
     assert "slot" not in live.sent[-1].args, "no slot was asked for"
     assert result.data["detail"] == "attached Battery9V to MyMod_Device in slot BatteryD"
+
+
+def test_the_number_of_ticks_a_move_waited_reaches_the_caller(live):
+    """How long the engine took is the measurement the bounded wait exists to
+    produce -- summarising it away here would make the next timing question
+    unanswerable from a transcript."""
+    live.answer = CommandState(
+        id="", status="done",
+        detail="attached Ssh68Helmet to SurvivorM_Mirek in slot Headgear after 2 tick(s)",
+        finished_at=1.0,
+    )
+    result = world.world_attach("Ssh68Helmet", host="player", slot="Headgear")
+
+    assert result.ok
+    assert "after 2 tick(s)" in result.data["detail"]
 
 
 def test_a_deferred_move_still_running_at_the_deadline_is_not_a_success(live):

@@ -723,15 +723,67 @@ def world_detach(slot: str, host: str = "hands", to: str = "inventory",
     something a caller can ask for; that is the whole reason it exists. The
     mod reports what came off, from which slot, and where it ended up, and
     checks the slot is empty afterwards rather than trusting the engine call's
-    own bool -- one tick later, because the engine applies the move after the
+    own bool -- a tick later, because the engine applies the move after the
     frame that asked for it (measured; see `world_attach`), so this answer
     takes about a second longer than the other world verbs.
+
+    `to="hands"` while the hands hold something else is refused BY NAME. The
+    engine's own answer there is a bare false with nothing said about why, and
+    the two reasons a caller would have to choose between -- no room, or
+    occupied -- lead to different fixes. `world_move` is how the hands are
+    freed first.
     """
     if not slot.strip():
         return fail("world_detach needs the slot to empty",
                     hint="the CfgSlots slot name, like BatteryD -- a device can have "
                          "several, so there is no 'the' attachment to guess at")
     return _run("detach", _args(slot=slot, host=host, to=to), timeout)
+
+
+#: Where `world_move` will put an item, and the only three places there are.
+_MOVE_DESTINATIONS = ("inventory", "hands", "ground")
+
+
+def world_move(class_name: str, to: str = "inventory",
+               timeout: float = WORLD_TIMEOUT_SECONDS) -> Result:
+    """Move an item the player already has between hands, inventory and ground.
+
+    `class_name` is "hands" for whatever is held, or a config class looked up
+    on the player -- hands first, then worn attachments and cargo, recursively.
+    `to` is one of "inventory" (the player's cargo, the default), "hands", or
+    "ground".
+
+    In game each of these is a drag inside the inventory screen, and a headless
+    stand has no way to make that gesture -- which is the whole reason this
+    exists. **Carry it, do not hold it** is where every test of a worn or
+    pocketed device starts, and `world_spawn` cannot get there: it puts an item
+    in one place and leaves it. `world_detach` is the neighbouring half, for
+    the item that is in a SLOT.
+
+    An ask that is already true comes back done ("already in the player's
+    hands"), not failed: the caller asked for a state and the state is what
+    they have. Asking for the hands while they hold something else is refused
+    by name -- hands hold one thing, and the engine's own false says nothing
+    about which.
+
+    The mod reads the item's inventory location back afterwards rather than
+    trusting the engine call's bool, and does it ON A LATER TICK: a move out of
+    the hands goes through the engine's hand state machine and is applied on
+    the player's next command-handler frame, which can be several ticks away
+    when the player is busy. So this answer normally costs about a second more
+    than the other world verbs, and occasionally a few -- the detail says how
+    many ticks it waited when it waited more than one.
+    """
+    if not class_name.strip():
+        return fail("world_move needs the class of the item to move",
+                    hint="'hands' for whatever is held, or the config class of something "
+                         "the player already carries -- the item must already be on the "
+                         "player, so spawn one with world_spawn first")
+    if to not in _MOVE_DESTINATIONS:
+        return fail(f"world_move cannot put an item in {to!r}",
+                    hint="to is one of " + ", ".join(_MOVE_DESTINATIONS)
+                         + " -- a slot on a device is world_attach's business, not this one's")
+    return _run("move", _args(**{"class": class_name, "to": to}), timeout)
 
 
 def world_power(on: bool = True, target: str = "hands", energy: float | None = None,
