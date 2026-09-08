@@ -703,10 +703,20 @@ class DZMCP_BridgeCore
         return "";
     }
 
-    // attach and detach both wait for the move to land before judging
-    // themselves, because the engine applies it after the frame that asked for
-    // it. Anything else that defers without completing itself is a bridge bug
-    // and says so.
+    // Where a move put something, as a phrase. The ground is not the player's
+    // -- "to the player's ground" is what a template writes and nobody says --
+    // and these sentences are read far more often than they are written.
+    protected string MoveDestination(string to)
+    {
+        if (to == "ground")
+            return "the ground";
+        return "the player's " + to;
+    }
+
+    // attach, detach and move all wait at least one tick before judging
+    // themselves, because the engine applies the move after the frame that
+    // asked for it. Anything else that defers without completing itself is a
+    // bridge bug and says so.
     protected void CompleteDeferred()
     {
         if (m_CmdVerb == "attach")
@@ -717,6 +727,11 @@ class DZMCP_BridgeCore
         if (m_CmdVerb == "detach")
         {
             FinishDetach();
+            return;
+        }
+        if (m_CmdVerb == "move")
+        {
+            FinishMove();
             return;
         }
         FinishCommand(DZMCP_STATUS_FAILED, "verb '" + m_CmdVerb + "' deferred its completion and nothing completed it -- a bridge bug");
@@ -737,7 +752,7 @@ class DZMCP_BridgeCore
     // failure -- see DZMCP_Log.
     protected string KnownVerbs()
     {
-        return "ping, spawn, attach, detach, power, teleport, set, delete, query, entities, time, weather, action, chat, probe_bloat, probe_stall, probe_fault";
+        return "ping, spawn, attach, detach, move, power, teleport, set, delete, query, entities, time, weather, action, chat, probe_bloat, probe_stall, probe_fault";
     }
 
     protected bool IsKnownVerb(string verb)
@@ -751,7 +766,7 @@ class DZMCP_BridgeCore
         if (verb == "spawn" || verb == "teleport" || verb == "set" || verb == "delete" || verb == "query")
             return true;
 
-        if (verb == "attach" || verb == "detach" || verb == "power")
+        if (verb == "attach" || verb == "detach" || verb == "move" || verb == "power")
             return true;
 
         if (verb == "action")
@@ -806,6 +821,11 @@ class DZMCP_BridgeCore
         if (verb == "detach")
         {
             VerbDetach(args);
+            return;
+        }
+        if (verb == "move")
+        {
+            VerbMove(args);
             return;
         }
         if (verb == "power")
@@ -1321,6 +1341,22 @@ class DZMCP_BridgeCore
             return;
         }
 
+        // Hands hold ONE thing, and the engine's answer to being asked
+        // otherwise is a bare false: FindFreeLocationFor finds no hand
+        // location and the move never starts. That would spend the whole wait
+        // budget and end in "there may be no room", leaving the caller to
+        // guess between no room and occupied -- so name the occupant instead,
+        // the same refusal `move` makes.
+        if (to == "hands")
+        {
+            EntityAI held = player.GetEntityInHands();
+            if (held && held != item)
+            {
+                FinishCommand(DZMCP_STATUS_FAILED, "detach: the player's hands hold " + held.GetType() + " -- put that away first (move it to the inventory or the ground), or detach to the inventory or the ground");
+                return;
+            }
+        }
+
         bool moved;
         if (to == "ground")
             moved = player.ServerDropEntity(item);
@@ -1360,11 +1396,175 @@ class DZMCP_BridgeCore
             if (WaitForTheMove())
                 return;
 
-            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " is still in slot '" + slotName + "' on " + m_MoveHost.GetType() + " " + m_MoveWaited + " tick(s) after the move (the call answered " + YesNo(m_MoveCall) + ") -- there may be no room in the player's " + m_MoveTo);
+            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " is still in slot '" + slotName + "' on " + m_MoveHost.GetType() + " " + m_MoveWaited + " tick(s) after the move (the call answered " + YesNo(m_MoveCall) + ") -- there may be no room in " + MoveDestination(m_MoveTo));
             return;
         }
 
-        FinishCommand(DZMCP_STATUS_DONE, "detached " + m_MoveWhat + " from " + m_MoveHost.GetType() + " slot " + slotName + ", to the player's " + m_MoveTo + WaitedPhrase());
+        FinishCommand(DZMCP_STATUS_DONE, "detached " + m_MoveWhat + " from " + m_MoveHost.GetType() + " slot " + slotName + ", to " + MoveDestination(m_MoveTo) + WaitedPhrase());
+    }
+
+    // move: class (required -- hands|<class>), to = inventory|hands|ground.
+    //
+    // The other half of detach. detach empties a SLOT; this one moves an item
+    // between the three places a player can keep it, and in game each of those
+    // is a drag inside the inventory screen -- the gesture a headless stand has
+    // no way to make. "Carry it, do not hold it" is the state every test of a
+    // worn or pocketed device starts from, and until now nothing here could
+    // reach it: spawn puts an item in one place and leaves it there.
+    //
+    // An ask that is already true answers DONE, not FAILED. A caller that has
+    // just moved an item and calls again -- a retry, a second test reusing the
+    // same setup -- asked for a STATE, and the state is what it got; refusing
+    // there would make every setup step order-dependent for no gain.
+    protected void VerbMove(map<string, string> args)
+    {
+        if (RefuseUnknownArgs(args, "|class|to|", "class, to"))
+            return;
+
+        string className = ArgOr(args, "class", "");
+        if (className == "")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move needs a class argument naming the item to move -- 'hands' for whatever is held, or the config class of something the player already carries");
+            return;
+        }
+
+        string to = ArgOr(args, "to", "inventory");
+        if (to != "inventory" && to != "hands" && to != "ground")
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move: to must be inventory, hands or ground, not '" + to + "'");
+            return;
+        }
+
+        if (NoPlayerRefusal())
+            return;
+
+        Man player = DZMCP_World.FirstPlayer();
+        string why;
+        EntityAI item = DZMCP_World.FindOnPlayer(player, className, why);
+        if (!item)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move: " + why);
+            return;
+        }
+        if (item == player)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move: 'player' names the character itself, which cannot be put in its own inventory -- name the item's class, or 'hands' for whatever is held");
+            return;
+        }
+
+        // Where it is NOW, read off the item rather than assumed from how it
+        // was found: an item found by class can be in hands, worn, or in
+        // cargo, and the three answers below differ.
+        int at = InventoryLocationType.UNKNOWN;
+        EntityAI holder = null;
+        InventoryLocation where = new InventoryLocation();
+        if (item.GetInventory() && item.GetInventory().GetCurrentInventoryLocation(where))
+        {
+            at = where.GetType();
+            holder = where.GetParent();
+        }
+
+        EntityAI held = player.GetEntityInHands();
+
+        if (to == "hands" && held == item)
+        {
+            FinishCommand(DZMCP_STATUS_DONE, item.GetType() + " is already in the player's hands");
+            return;
+        }
+        if (to == "ground" && at == InventoryLocationType.GROUND)
+        {
+            FinishCommand(DZMCP_STATUS_DONE, item.GetType() + " is already on the ground");
+            return;
+        }
+        if (to == "inventory" && at == InventoryLocationType.CARGO)
+        {
+            string container = "something";
+            if (holder)
+                container = holder.GetType();
+            FinishCommand(DZMCP_STATUS_DONE, item.GetType() + " is already in the cargo of " + container);
+            return;
+        }
+
+        // Hands hold ONE thing. Asking the engine anyway would answer false
+        // with nothing said about why, and the caller would be left guessing
+        // between "no room" and "occupied" -- so name the occupant.
+        if (to == "hands" && held)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move: the player's hands hold " + held.GetType() + " -- move that to the inventory or the ground first, then ask again");
+            return;
+        }
+
+        bool moved;
+        if (to == "ground")
+            moved = player.ServerDropEntity(item);
+        else if (to == "hands")
+            moved = player.ServerTakeEntityToInventory(FindInventoryLocationType.HANDS, item);
+        else
+            moved = player.ServerTakeEntityToInventory(FindInventoryLocationType.CARGO, item);
+
+        m_MoveHost = player;
+        m_MoveItem = item;
+        m_MoveSlot = InventorySlots.INVALID;
+        m_MoveWhat = item.GetType();
+        m_MoveTo = to;
+        m_MoveCall = moved;
+        WaitForTheMove();
+    }
+
+    protected void FinishMove()
+    {
+        if (!m_MoveHost || !m_MoveItem)
+        {
+            FinishCommand(DZMCP_STATUS_FAILED, "move: the item or the player is gone a tick later, so where " + m_MoveWhat + " ended up cannot be read");
+            return;
+        }
+
+        int at = InventoryLocationType.UNKNOWN;
+        EntityAI holder = null;
+        InventoryLocation where = new InventoryLocation();
+        if (m_MoveItem.GetInventory() && m_MoveItem.GetInventory().GetCurrentInventoryLocation(where))
+        {
+            at = where.GetType();
+            holder = where.GetParent();
+        }
+
+        // The hands are asked of the PLAYER, not of the location: an item in
+        // hands and an item in the hands OF SOMEBODY ELSE read the same
+        // location type, and only one of them is what was asked for.
+        Man player = Man.Cast(m_MoveHost);
+        bool landed = false;
+        if (m_MoveTo == "ground")
+            landed = at == InventoryLocationType.GROUND;
+        else if (m_MoveTo == "hands")
+        {
+            if (player)
+                landed = player.GetEntityInHands() == m_MoveItem;
+        }
+        else
+            landed = at == InventoryLocationType.CARGO;
+
+        if (!landed)
+        {
+            if (WaitForTheMove())
+                return;
+
+            // The likely cause differs by destination, and a hint naming the
+            // wrong one sends the reader somewhere there is nothing to find.
+            // No room is what the engine answers for a full cargo (measured on
+            // the stand 2026-09-08: a fresh survivor's clothing filled up and
+            // every move into it answered false); the ground has no room to
+            // run out of.
+            string cause = " -- there may be no room for it there";
+            if (m_MoveTo == "ground")
+                cause = " -- the engine refused the drop";
+            FinishCommand(DZMCP_STATUS_FAILED, m_MoveWhat + " did not reach " + MoveDestination(m_MoveTo) + " within " + m_MoveWaited + " tick(s) (the call answered " + YesNo(m_MoveCall) + ")" + cause);
+            return;
+        }
+
+        string detail = "moved " + m_MoveWhat + " to " + MoveDestination(m_MoveTo);
+        if (m_MoveTo == "inventory" && holder)
+            detail = detail + ", in the cargo of " + holder.GetType();
+        FinishCommand(DZMCP_STATUS_DONE, detail + WaitedPhrase());
     }
 
     // power: on (required, true|false), target = hands|player|<class>, energy.
