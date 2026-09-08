@@ -1295,7 +1295,33 @@ class DZMCP_BridgeCore
             return;
         }
 
-        if (m_MoveItem.GetHierarchyParent() != m_MoveHost)
+        // Landed means the item's OWN InventoryLocation reads ATTACHMENT to
+        // this host -- NOT that GetHierarchyParent() matches it. Measured
+        // live 2026-09-08: with host="player", an item merely HELD IN THE
+        // HANDS already has the player as its hierarchy parent, the same fact
+        // that is true once it really is attached, so that check could not
+        // tell "still just held" from "landed" -- a second helmet attached
+        // onto an already-worn Headgear read DONE after one tick while the
+        // helmet stayed in the hands the whole time. When a slot was named,
+        // the landed slot has to be that one too, or an item already attached
+        // to a DIFFERENT slot on the same host would also read as landed.
+        int at = InventoryLocationType.UNKNOWN;
+        EntityAI holder = null;
+        int slotId = InventorySlots.INVALID;
+        InventoryLocation where = new InventoryLocation();
+        bool haveLocation = m_MoveItem.GetInventory() && m_MoveItem.GetInventory().GetCurrentInventoryLocation(where);
+        if (haveLocation)
+        {
+            at = where.GetType();
+            holder = where.GetParent();
+            slotId = where.GetSlot();
+        }
+
+        bool landed = at == InventoryLocationType.ATTACHMENT && holder == m_MoveHost;
+        if (landed && m_MoveSlot != InventorySlots.INVALID)
+            landed = slotId == m_MoveSlot;
+
+        if (!landed)
         {
             // Not there YET is not the same as not there: an item coming out
             // of the hands travels through the hand state machine and lands on
@@ -1304,25 +1330,52 @@ class DZMCP_BridgeCore
             if (WaitForTheMove())
                 return;
 
-            FinishCommand(DZMCP_STATUS_FAILED, "the engine did not attach " + m_MoveWhat + " to " + m_MoveHost.GetType() + " within " + m_MoveWaited + " tick(s) (the call answered " + YesNo(m_MoveCall) + ") -- the host may have no slot that fits it, or that slot may already be taken");
+            // The truthful place, not a guess: where the item actually is
+            // right now, read off the same location this check just used.
+            string place = "in a location that could not be read";
+            if (at == InventoryLocationType.HANDS)
+                place = "still in the player's hands";
+            else if (at == InventoryLocationType.CARGO)
+            {
+                string container = "something";
+                if (holder)
+                    container = holder.GetType();
+                place = "in the cargo of " + container;
+            }
+            else if (at == InventoryLocationType.ATTACHMENT)
+            {
+                string onWhat = "something";
+                if (holder)
+                    onWhat = holder.GetType();
+                place = "in slot " + InventorySlots.GetSlotName(slotId) + " of " + onWhat;
+            }
+            else if (haveLocation)
+                place = "somewhere this bridge does not name";
+
+            string detail = "the engine did not attach " + m_MoveWhat + " to " + m_MoveHost.GetType() + " within " + m_MoveWaited + " tick(s) (the call answered " + YesNo(m_MoveCall) + ") -- " + m_MoveWhat + " is " + place;
+
+            // A slot holds one item. If the one asked for is already taken,
+            // name what is actually there instead of leaving it a guess.
+            if (m_MoveSlot != InventorySlots.INVALID && m_MoveHost.GetInventory())
+            {
+                EntityAI occupant = m_MoveHost.GetInventory().FindAttachment(m_MoveSlot);
+                if (occupant && occupant != m_MoveItem)
+                    detail += "; slot " + InventorySlots.GetSlotName(m_MoveSlot) + " on " + m_MoveHost.GetType() + " is already taken by " + occupant.GetType();
+            }
+
+            FinishCommand(DZMCP_STATUS_FAILED, detail);
             return;
         }
 
-        // Which slot it LANDED in, not which one was asked for. With no slot
-        // named the engine picks one, and the whole point of looking a tick
-        // late is that its choice is readable by then -- so the answer names
-        // it, and the caller has the name `detach` will want. GetSlot() is
-        // -1 (== InventorySlots.INVALID) for any location that is not an
-        // attachment, so one comparison covers "not read" and "not a slot".
-        int landed = m_MoveSlot;
-        InventoryLocation where = new InventoryLocation();
-        if (m_MoveItem.GetInventory() && m_MoveItem.GetInventory().GetCurrentInventoryLocation(where))
-            landed = where.GetSlot();
-
-        string detail = "attached " + m_MoveWhat + " to " + m_MoveHost.GetType();
-        if (landed != InventorySlots.INVALID)
-            detail += " in slot " + InventorySlots.GetSlotName(landed);
-        FinishCommand(DZMCP_STATUS_DONE, detail + WaitedPhrase());
+        // Which slot it LANDED in, not necessarily the one asked for -- with
+        // no slot named the engine picks one. slotId is only trusted here
+        // because ATTACHMENT was just verified above: GetSlot() on a HANDS
+        // location does NOT read InventorySlots.INVALID on this build
+        // (measured 2026-09-08 -- it returned the id of the slot literally
+        // named "Hands", one of CfgSlots' first 32 engine-populated entries),
+        // so GetType() is what actually tells "attached" from "held", not
+        // GetSlot().
+        FinishCommand(DZMCP_STATUS_DONE, "attached " + m_MoveWhat + " to " + m_MoveHost.GetType() + " in slot " + InventorySlots.GetSlotName(slotId) + WaitedPhrase());
     }
 
     // detach: slot (required), host = hands|player|<class>, to = inventory|hands|ground.

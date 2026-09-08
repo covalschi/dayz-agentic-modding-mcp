@@ -96,7 +96,7 @@ in its notes.
 | `world_spawn(class_name, where, pos, quantity, slot)` | create an item on the ground (with no lifetime, so it cannot vanish mid-check), in the player's hands, in their inventory, or attached to the item they are holding (`where="attachment"`, optional `slot` naming the CfgSlots slot) |
 | `world_teleport(pos)` | move the player to `"x y z"` — the same format `world_state` reports, so a read position can be handed straight back |
 | `world_set(what, value, target)` | set `health` (player or held item) or `quantity` (held item) |
-| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the hierarchy back afterwards — the engine call's bool is about the call, not about where the item ended up — **a tick later**, because the move lands after the frame that asked for it, and names the slot the item actually landed in |
+| `world_attach(class_name, host, slot)` | attach an item the player **already has** to another of their items. `host` is `"hands"`, `"player"` (the character's own worn slots) or a config class looked up on the player; `slot` names the CfgSlots slot when there is more than one that fits. The mod reads the item's own inventory location back afterwards — the engine call's bool is about the call, not about where the item ended up — **a tick later**, because the move lands after the frame that asked for it, and names the slot the item actually landed in |
 | `world_detach(slot, host, to)` | take the attachment out of one slot and put it in the player's `inventory` (default), `hands`, or on the `ground`. The slot is required: a device can have several. In game this is a drag inside the inventory screen, which is not something a tool can ask for. Checks the slot is empty **a tick later**, for the same reason as `world_attach`. `to="hands"` while the hands hold something else is refused by name — the engine's own answer there is a bare false |
 | `world_move(class_name, to)` | move an item the player already has between `hands`, `inventory` (default) and `ground` — the drag inside the inventory screen a headless stand cannot make. `class_name` is `"hands"` for whatever is held, or a config class looked up on the player. **Carry it, do not hold it** is where every test of a worn or pocketed device starts, and `world_spawn` cannot get there. An ask that is already true comes back done, not failed; asking for the hands while they hold something else is refused by name |
 | `world_power(on, target, energy)` | switch a device on or off wherever it is on the player — worn, in a pocket, in hands — through its energy manager. `energy` optionally fills its own store first. The answer reads both facts back: **switched on and working are different**, and a device switched on with a flat battery has the first without the second |
@@ -325,8 +325,9 @@ place and leaves it, and the move between hands, inventory and ground is a drag
 inside the inventory screen — a gesture no tool can make.
 
 Each one reads the result back out of the engine rather than reporting the
-call's own bool: whether the slot is empty now, whether the item's hierarchy
-parent is the host, whether the manager says switched-on **and** working. That
+call's own bool: whether the slot is empty now, whether the item's own
+inventory location says it landed in that slot, whether the manager says
+switched-on **and** working. That
 is the same rule as `ui_text` reading its field back, and for the same reason —
 `SwitchOn()` does nothing at all when the device cannot switch on, and says
 nothing about it.
