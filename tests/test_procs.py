@@ -65,6 +65,62 @@ def test_spawn_stop_and_liveness(tmp_path):
     assert not is_alive(pid)
 
 
+def test_a_graceful_stop_closes_the_window_and_never_kills_a_process_that_leaves(tmp_path, monkeypatch):
+    """A DayZ server told to close its console window saves its world and
+    exits by itself; a kill on top would be the very thing that loses the
+    world. So when the window took the message and the process left, no
+    taskkill may follow."""
+    import subprocess as sp
+
+    from dayz_mcp import procs
+
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    killed = []
+
+    def window_that_makes_it_leave(target):
+        assert target == pid
+        procs._tracked[pid][0].kill()
+        return 1
+
+    real_run = sp.run
+
+    def no_kill(*args, **kwargs):
+        if args and args[0] and args[0][0] == "taskkill":
+            killed.append(args)
+            raise AssertionError("taskkill after a graceful exit")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(procs, "close_windows", window_that_makes_it_leave)
+    monkeypatch.setattr(sp, "run", no_kill)
+    assert stop(pid, graceful=True)
+    assert not is_alive(pid)
+    assert killed == []
+
+
+def test_a_graceful_stop_still_kills_a_process_that_ignores_its_window(tmp_path, monkeypatch):
+    """The window took WM_CLOSE but the process stays: after the close grace
+    the kill follows, so a wedged server never outlives server_stop."""
+    from dayz_mcp import procs
+
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    monkeypatch.setattr(procs, "close_windows", lambda target: 1)
+    assert stop(pid, graceful=True, close_grace=0.3)
+    assert not is_alive(pid)
+
+
+def test_a_graceful_stop_of_a_windowless_process_is_the_plain_kill(tmp_path, monkeypatch):
+    """No window, nothing to close: the kill comes at once, not after the
+    close grace -- a client_stop or a test process must not wait 30 s."""
+    from dayz_mcp import procs
+
+    pid = spawn([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path)
+    monkeypatch.setattr(procs, "close_windows", lambda target: 0)
+    started = time.time()
+    assert stop(pid, graceful=True)
+    assert time.time() - started < 5
+    assert not is_alive(pid)
+
+
 def test_liveness_of_a_process_we_started_never_shells_out(tmp_path, monkeypatch):
     """The measured cost of `tasklist` here is ~230 ms, and liveness is asked on
     every world_*/ui_* command and every lifecycle poll. For a pid this process

@@ -1267,7 +1267,7 @@ def test_the_client_pid_never_becomes_something_server_stop_can_kill(tmp_path, m
     make_project(tmp_path)
     killed = []
     monkeypatch.setattr(lifecycle, "is_alive", lambda pid, image="": False)
-    monkeypatch.setattr(lifecycle, "stop", lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(lifecycle, "stop", lambda pid, **kw: killed.append(pid) or True)
 
     session.set_client_pid(UNREACHABLE_PID, client.DIAG_IMAGE)
 

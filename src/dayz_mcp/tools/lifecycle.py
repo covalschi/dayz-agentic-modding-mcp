@@ -1083,8 +1083,17 @@ def server_start(timeout: float = 420, extra_args: list[str] | None = None) -> R
     return ok(started)
 
 
-def server_stop(pid: int = 0) -> Result:
-    """Stop a server this session is responsible for.
+def server_stop(pid: int = 0, force: bool = False) -> Result:
+    """Stop a server this session is responsible for, saving its world first.
+
+    The server's console window is closed, which makes it write its world
+    and exit (4.9 s on the retail build, every dynamic_*.bin rewritten --
+    measured 2026-09-19); only a server still alive 30 s later is killed.
+    That matters more than it sounds: an empty server never saves on its own,
+    so a kill throws away everything spawned or moved since the last player
+    left -- a box placed for a test was gone after the next boot, its store
+    directory an orphan. `force=True` skips the window and kills at once, for
+    when throwing the unsaved changes away is the point.
 
     With no `pid`, stops the session's own currently tracked server (the
     original behaviour). With `pid`, stops that specific process instead --
@@ -1095,10 +1104,9 @@ def server_stop(pid: int = 0) -> Result:
     process killer.
 
     Either way, the pid is checked against the recorded image name before it
-    is handed to `stop()` (which calls `taskkill`): a recycled Windows pid can
-    belong to an unrelated process by the time this runs, and killing that
-    process instead would be a worse outcome than the stale bookkeeping this
-    guards against.
+    is handed to `stop()`: a recycled Windows pid can belong to an unrelated
+    process by the time this runs, and killing that process instead would be
+    a worse outcome than the stale bookkeeping this guards against.
     """
     image = session.server_image()
     if pid:
@@ -1112,10 +1120,10 @@ def server_stop(pid: int = 0) -> Result:
             if pid == session.server_pid():
                 session.set_server_pid(0)
             return ok({"stopped": True, "pid": pid})
-        stopped = stop(pid)
+        stopped = stop(pid, graceful=not force)
         if pid == session.server_pid():
             session.set_server_pid(0)
-        return ok({"stopped": stopped, "pid": pid})
+        return ok({"stopped": stopped, "pid": pid, "saved_first": not force})
 
     session_pid = session.server_pid()
     if not session_pid:
@@ -1123,9 +1131,9 @@ def server_stop(pid: int = 0) -> Result:
     if not is_alive(session_pid, image=image):
         session.set_server_pid(0)
         return ok({"stopped": True, "pid": session_pid})
-    stopped = stop(session_pid)
+    stopped = stop(session_pid, graceful=not force)
     session.set_server_pid(0)
-    return ok({"stopped": stopped, "pid": session_pid})
+    return ok({"stopped": stopped, "pid": session_pid, "saved_first": not force})
 
 
 def server_status(pulse_seconds: float = 1.0) -> Result:

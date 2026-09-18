@@ -420,7 +420,7 @@ def test_client_compile_check_excludes_server_only_mods(tmp_path, monkeypatch):
         return 123
 
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.spawn", fake_spawn)
-    monkeypatch.setattr("dayz_mcp.tools.lifecycle.stop", lambda pid: True)
+    monkeypatch.setattr("dayz_mcp.tools.lifecycle.stop", lambda pid, **kw: True)
     monkeypatch.setattr("dayz_mcp.tools.lifecycle.time.sleep", lambda _s: None)
 
     job_id = tools.client_compile_check(wait_seconds=0).data["job_id"]

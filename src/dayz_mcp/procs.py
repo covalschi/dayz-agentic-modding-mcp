@@ -327,8 +327,76 @@ def is_alive(pid: int, image: str = "") -> bool:
     return True
 
 
-def stop(pid: int, grace: float = 3.0) -> bool:
+_WM_CLOSE = 0x0010
+
+
+def close_windows(pid: int) -> int:
+    """WM_CLOSE to every visible top-level window `pid` owns; how many got it.
+
+    The DayZ server is a console program with a console window, and Windows
+    attributes that window to the server's own pid (it is what .NET's
+    Process.MainWindowHandle finds). Closing it is the server's clean exit: it
+    writes its world first. Nothing on other platforms, and nothing for a
+    process without a window -- those two get the kill straight away.
+    """
+    if os.name != "nt":
+        return 0
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    def visit(hwnd, _lparam):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows(enum_proc(visit), 0)
+    for hwnd in found:
+        user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+    return len(found)
+
+
+def _wait_gone(pid: int, timeout: float) -> bool:
+    """True once `pid` has ended, False when `timeout` passes first."""
+    proc = _handle(pid, "")
+    if proc is not None:
+        # Waiting on the handle beats polling: it returns the moment the
+        # process is gone instead of on the next 0.2 s tick.
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        _tracked.pop(pid, None)
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not is_alive(pid)
+
+
+def stop(pid: int, grace: float = 3.0, *, graceful: bool = False, close_grace: float = 30.0) -> bool:
+    """End `pid`. Graceful first when asked, the kill in every other case.
+
+    `graceful` closes the process's windows and waits up to `close_grace` for
+    it to leave on its own before killing it. That is how a DayZ server is
+    stopped without losing anything: an empty server never saves its world
+    on its own, a closed console window makes it save and exit (4.9 s on the
+    retail build, every dynamic_*.bin rewritten -- measured 2026-09-19), and
+    a kill throws away everything since the last save. The default stays
+    the kill, because that is what the client tools and a wedged process
+    want, and because a wait of half a minute must be something the caller
+    chose.
+    """
     if not is_alive(pid):
+        return True
+    if graceful and close_windows(pid) and _wait_gone(pid, close_grace):
         return True
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],  # noqa: S603
@@ -338,19 +406,4 @@ def stop(pid: int, grace: float = 3.0) -> bool:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             return True
-    proc = _handle(pid, "")
-    if proc is not None:
-        # Waiting on the handle beats polling: it returns the moment the
-        # process is gone instead of on the next 0.2 s tick.
-        try:
-            proc.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            return False
-        _tracked.pop(pid, None)
-        return True
-    deadline = time.time() + grace
-    while time.time() < deadline:
-        if not is_alive(pid):
-            return True
-        time.sleep(0.2)
-    return not is_alive(pid)
+    return _wait_gone(pid, grace)
