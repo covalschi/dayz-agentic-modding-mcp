@@ -13,6 +13,13 @@ from .lint import mod_lint
 from .project import require_project
 
 
+#: Job kinds that exclude one another per project: a build rewrites the pbo
+#: a Workshop upload is reading, and an upload reads the pbo a build would
+#: rewrite. tools/workshop.py refuses by the same tuple, the other way round.
+EXCLUSIVE_KINDS = ("build", "workshop")
+EXCLUSIVE_NOUNS = {"build": "build", "workshop": "Workshop upload"}
+
+
 def session_tools_root() -> str | None:
     return session.tools_root()
 
@@ -61,12 +68,12 @@ def mod_build(skip_lint: bool = False) -> Result:
     # Per project, because the store is per project: another project's build is
     # not this project's problem. A job left "running" by a dead process cannot
     # block anything either -- JobStore.load() marks those failed on the way in.
-    in_flight = [j for j in store.all() if j.kind == "build" and j.status in (QUEUED, RUNNING)]
+    in_flight = [j for j in store.all() if j.kind in EXCLUSIVE_KINDS and j.status in (QUEUED, RUNNING)]
     if in_flight:
-        busy = in_flight[-1].id
+        busy = in_flight[-1]
         return fail(
-            f"a build is already running for this project (job {busy})",
-            hint=f"wait for it with job_wait('{busy}'), or look at it with job_status('{busy}')",
+            f"a {EXCLUSIVE_NOUNS.get(busy.kind, busy.kind)} is already running for this project (job {busy.id})",
+            hint=f"wait for it with job_wait('{busy.id}'), or look at it with job_status('{busy.id}')",
         )
 
     job = store.create("build")

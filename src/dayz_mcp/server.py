@@ -103,6 +103,11 @@ for _fn in (
     # clone is in. asset_convert is last, the one step of the four that
     # touches no model at all.
     tools.asset_export, tools.asset_build, tools.asset_check, tools.asset_convert,
+    # The Workshop, last: the final step of a mod's life on this machine,
+    # and the one tool whose effect is somewhere else. Status before
+    # publish in the reader's mind, publish before status in the list,
+    # because status is what a publish is checked with.
+    tools.workshop_publish, tools.workshop_status,
 ):
     mcp.tool()(_wrap(_fn))
 

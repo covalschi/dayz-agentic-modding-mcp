@@ -1,7 +1,8 @@
 # dayz-agentic-modding-mcp
 
 An MCP server that lets an agent build a DayZ mod, check that the client compiles,
-run a test server and get a structured verdict instead of a log.
+run a test server and get a structured verdict instead of a log -- and then
+publish the result to the Steam Workshop.
 
 The server does the work itself: it calls FileBank, the signing tool and the
 diagnostic executable directly. A project does not need its own build script.
@@ -139,6 +140,8 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
+| `workshop_publish(mod, changenote, title, description, preview, visibility, tags)` | upload a built mod to the Steam Workshop; returns a job id. The content is the built `@Name` folder, whole; `meta.cpp` inside it decides between **updating** the item it names and **creating** one (`title` required; `meta.cpp` is written into the folder first; the new item is **private** unless `visibility` says otherwise). Sends `title`, `description`, `preview` (an image under 1 MB), `visibility` (`public`, `friends`, `private`, `unlisted`) and `tags` only when given, so an update leaves the rest as it was. Refuses a mod the project does not declare, a folder with no pbo or with a junction inside it, a `meta.cpp` it cannot read, a missing or oversized preview, a build or upload already running for the project, and a machine without the game's `steam_api64.dll`. Needs the Steam client running and logged in -- the job checks that, first. See "The Workshop" |
+| `workshop_status(mod)` | the built folder against the public listing of its item: pbos, which are unsigned, keys, links, size, when the newest pbo was built; the item's title, last update, size, visibility and subscribers; and `stale` -- built after the last upload. Goes nowhere near the Steam client, needs no key, and answers without a network, saying so |
 
 ### Layout primitives
 
@@ -698,7 +701,80 @@ Whether the model looks right, is scaled right, is wound right, has a
 collision. Nothing outside the game answers that. C1–C12 shorten the road to
 it; they do not replace it.
 
+## The Workshop
+
+`workshop_publish` is the last step of a mod's life on this machine and the
+only tool here whose effect is somewhere else, so it is built the way
+`server_signatures` is: everything that could publish the wrong thing is
+refused before a byte leaves, the answer says what is about to happen, and
+the item is read back afterwards rather than taken on Steam's word.
+
+**What goes up is what `mod_build` made.** The `@Name` folder, whole --
+`addons/` with the pbos and their `.bisign`, `keys/`, `mod.cpp`, `meta.cpp` --
+which is also what Publisher uploads. A junction or symlink inside that
+folder is refused rather than followed: Steam would upload the tree behind
+it, and the tree behind it is usually the sources.
+
+**`meta.cpp` says which item.** Publisher leaves three lines in the folder
+it published from (`protocol = 1; publishedid = N; name = "...";`) and the
+launcher reads the id back out of them. This server does the same. With the
+file, the item it names is updated; without it, an item is created and the
+same three lines are written into the folder *before* the content goes up,
+so subscribers receive the id inside the folder, and Publisher can carry on
+from a folder this server created. Keep that file with the sources -- a
+deleted build folder takes the item id with it. A `meta.cpp` that exists but
+carries no readable id is refused, not treated as absent, because a guess
+there publishes a duplicate.
+
+**A new item is private.** Unless `visibility` says otherwise, an item is
+created hidden, so nothing is public before its page has been looked at;
+`workshop_publish(mod, visibility="public")` opens it (the content is sent
+again -- Steam skips unchanged files, and a mod is small). An update leaves
+untouched whatever it was not given: no `title` means the title stays.
+
+**How it reaches Steam, and why from another process.** There is no HTTP
+route for Workshop content, and Publisher has no command line -- measured
+2026-09-19, its binaries carry the strings of a WPF dialog and nothing else
+-- so the upload goes the way Publisher's own does, `ISteamUGC` through the
+running Steam client, using the game's own `steam_api64.dll`, found beside
+the game the way FileBank is found beside the tools. No SDK is shipped or
+needed: the DLL exports the flat C API, and `steamugc.py` binds the dozen
+calls an upload takes with `ctypes`, trying interface versions newest first
+so a DLL from a newer game build still answers. That module runs as its own
+process per upload (`python -m dayz_mcp.steamugc spec.json result.json`),
+because `SteamAPI_Init` marks the account "in game" for the process's
+lifetime, a fault inside the DLL takes its process down, and a second `Init`
+after `Shutdown` in one process is not something Valve supports. The app id
+is the game's, the same number Publisher runs under, handed to the DLL both
+ways it looks for one -- the environment and `steam_appid.txt` in the working
+directory. Measured the same day: from a plain Python process, with the
+client running, `SteamAPI_Init` succeeds, the app id reads back, and the two
+result structs are the 24 and 16 bytes `#pragma pack(push, 8)` makes them.
+
+**What Steam needs from the machine.** The Steam client running, logged into
+the account that owns the game and the item. That is the one refusal the job
+makes rather than the tool -- `SteamAPI_Init` is the only thing that can
+answer it -- and it is the first thing the job does, before anything is
+sent. An account that has not accepted the Workshop legal agreement can
+still create and update, but its item stays hidden until it has; Steam says
+so in the result, and the job summary repeats it with the link.
+
+**Read back.** After a successful submit the job reads the item through the
+public `GetPublishedFileDetails` listing -- no key, no login -- and the
+summary says what it showed: the title, when it was last updated, and
+whether that is this upload. A private item is not in that listing at all,
+and the summary says that instead. `workshop_status` is the same read on
+demand, beside what is on disk, with `stale` -- the newest pbo is younger
+than the item's last update -- as the one fact derived from both.
+
 ## Known limitations
+
+* **A Workshop upload needs the Steam client, and the account it is logged
+  into.** `workshop_publish` cannot log in and must not: it uses whatever
+  session the running client holds, and the job refuses when there is none
+  or when that account does not own the game. The public listing it reads
+  back does not show private items, so a freshly created item reads as "not
+  visible" until it is made public.
 
 * **Stale-pbo detection is mtime-based, not content-based.** `mod_build`
   refuses a freshly built pbo that is older than its sources -- the usual

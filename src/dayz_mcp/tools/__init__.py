@@ -26,6 +26,7 @@ from .lifecycle import (
 from .logs import log_tail, log_verdict
 from .project import project_open, project_status
 from .scope import knowledge_scope, server_mods
+from .workshop import workshop_publish, workshop_status
 from .world import (
     world_action, world_attach, world_delete, world_detach, world_entities, world_exec,
     world_move, world_power, world_ready, world_set, world_spawn, world_state,
@@ -52,4 +53,5 @@ __all__ = [
     "ui_menu", "ui_tree", "ui_find", "ui_click", "ui_cursor", "ui_text",
     "ui_load", "ui_unload", "ui_preview", "ui_gallery",
     "layout_build",
+    "workshop_publish", "workshop_status",
 ]
