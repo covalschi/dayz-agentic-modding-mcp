@@ -301,7 +301,7 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
             parts.append(f"{META_NAME} is MISSING from {folder_path.name}: write it by hand -- "
                          + render_meta(out.published_id, spec.title).replace("\n", " ").strip())
     parts.append(item_url(out.published_id))
-    parts.append(_readback(out.published_id, submitted_at, spec.send_content))
+    parts.append(_readback(out.published_id, submitted_at, spec.send_content, bool(spec.description)))
     if out.needs_legal:
         parts.append(f"Steam says the Workshop legal agreement is not accepted for this account; "
                      f"the item stays hidden until it is: {LEGAL_URL}")
@@ -311,14 +311,22 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
     return " | ".join(parts)
 
 
-def _readback(published_id: int, submitted_at: float, content_sent: bool = True) -> str:
+def _readback(published_id: int, submitted_at: float, content_sent: bool = True,
+              description_sent: bool = False) -> str:
     item, err = read_item(published_id)
     if item is None:
         return f"readback unavailable ({err})"
     if not item.visible:
         return "readback: not visible to the public listing (private, or just created)"
-    listing = (f"description {len(item.description)} chars, tags "
-               f"[{', '.join(item.tags) or 'none'}]")
+    # The public API showed every new description as empty for minutes after
+    # the item's own page already rendered it, while tags showed at once
+    # (measured 2026-09-19, thirteen items). Say so rather than report a
+    # number that reads as "the description did not take".
+    if description_sent and not item.description:
+        described = "description not yet in the public listing (the item's page shows it first)"
+    else:
+        described = f"description {len(item.description)} chars"
+    listing = f"{described}, tags [{', '.join(item.tags) or 'none'}]"
     when = _iso(item.time_updated) if item.time_updated else "unknown"
     if not content_sent:
         return f"readback: {item.title!r}, {listing}"

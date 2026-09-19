@@ -378,6 +378,18 @@ def test_a_listing_update_sends_no_content_and_needs_no_build(tmp_path, monkeypa
     assert "matches this upload" not in summary
 
 
+def test_a_listing_update_names_the_lag_of_the_public_listing(tmp_path, monkeypatch):
+    """Steam's public API shows a new description minutes after the page does;
+    a bare "0 chars" would read as a failed edit."""
+    make_project(tmp_path)
+    uploader = FakeUploader(Outcome(ok=True, published_id=ITEM, step="done", result=1))
+    lagging = fresh_item(description="", tags=["Mod"])
+    _, job = publish(monkeypatch, uploader, item=lagging, mod="MyMod", description="[b]New[/b]", content=False)
+    assert job["status"] == "done"
+    assert "not yet in the public listing" in job["summary"]
+    assert "0 chars" not in job["summary"]
+
+
 def test_a_listing_update_refuses_to_create_or_to_send_nothing(tmp_path, monkeypatch):
     make_project(tmp_path, meta=None)
     refused = tools.workshop_publish("MyMod", title="M", content=False)
