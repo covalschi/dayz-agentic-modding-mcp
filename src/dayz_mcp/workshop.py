@@ -85,6 +85,10 @@ def item_url(published_id: int) -> str:
 # launcher reads the id back out of them. The same three lines, byte for
 # byte, are what this server writes after creating an item -- a folder this
 # server created is one Publisher can carry on with, and the other way round.
+# The copy subscribers receive carries a fourth line, `timestamp = <int64>;`,
+# and CRLF (read off a subscribed item 2026-09-19): the reader takes either
+# shape, the writer sticks to the three lines the id lives in, because the
+# fourth is Publisher's own and its meaning is not documented anywhere.
 
 _META_ID = re.compile(r"\bpublishedid\s*=\s*(\d+)\s*;")
 _META_NAME = re.compile(r'\bname\s*=\s*"([^"]*)"\s*;')

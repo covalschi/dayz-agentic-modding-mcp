@@ -36,6 +36,15 @@ def test_meta_round_trips_publishers_own_bytes():
     assert render_meta(meta.published_id, meta.name) == PUBLISHER_META
 
 
+def test_meta_reads_publishers_own_copy_as_subscribers_receive_it():
+    """Read off a subscribed item 2026-09-19 (name and id made generic):
+    CRLF, and a fourth `timestamp` line this server neither needs nor
+    writes -- the id is what every reader wants, and it is on line two."""
+    delivered = ('protocol = 1;\r\npublishedid = 123456789;\r\nname = "MyMod";\r\n'
+                 'timestamp = 5250938868662592531;\r\n')
+    assert parse_meta(delivered) == Meta(123456789, "MyMod")
+
+
 def test_meta_tolerates_whitespace_and_crlf():
     text = 'protocol=1;\r\n  publishedid =  42 ;\r\nname="X" ;\r\n'
     assert parse_meta(text) == Meta(42, "X")

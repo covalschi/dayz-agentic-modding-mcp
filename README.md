@@ -717,7 +717,10 @@ it, and the tree behind it is usually the sources.
 
 **`meta.cpp` says which item.** Publisher leaves three lines in the folder
 it published from (`protocol = 1; publishedid = N; name = "...";`) and the
-launcher reads the id back out of them. This server does the same. With the
+launcher reads the id back out of them. The copy subscribers receive adds a
+fourth, `timestamp = <int64>;`, and CRLF line ends (read off a subscribed
+item 2026-09-19); the reader here takes either shape, and this server
+writes the three lines the id lives in. Otherwise it does the same. With the
 file, the item it names is updated; without it, an item is created and the
 same three lines are written into the folder *before* the content goes up,
 so subscribers receive the id inside the folder, and Publisher can carry on
