@@ -87,8 +87,12 @@ def item_url(published_id: int) -> str:
 # server created is one Publisher can carry on with, and the other way round.
 # The copy subscribers receive carries a fourth line, `timestamp = <int64>;`,
 # and CRLF (read off a subscribed item 2026-09-19): the reader takes either
-# shape, the writer sticks to the three lines the id lives in, because the
-# fourth is Publisher's own and its meaning is not documented anywhere.
+# shape, the writer sticks to the three lines the id lives in. The fourth is
+# Publisher's own bookkeeping: a .NET DateTime.ToBinary() (UTC) of the
+# moment it wrote the file -- decoded 2026-09-19, 15 s before that item's
+# time_updated -- and nothing reads it back. Steam took the three-line file
+# for an update the same day, and the item's listed size shrank by exactly
+# the 37 bytes the fourth line and the CRLFs had added.
 
 _META_ID = re.compile(r"\bpublishedid\s*=\s*(\d+)\s*;")
 _META_NAME = re.compile(r'\bname\s*=\s*"([^"]*)"\s*;')

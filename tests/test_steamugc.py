@@ -277,7 +277,14 @@ def test_progress_is_logged_only_when_it_changes(tmp_path):
     assert out.ok
     assert out.bytes_total == 1_000_000
     progress = [line for line in log if "MB" in line or line == "preparing content"]
-    assert progress == ["preparing content", "uploading content 0.5 MB / 1.0 MB", "committing 1.0 MB / 1.0 MB"]
+    assert progress == ["preparing content", "uploading content 500.0 KB / 1.0 MB", "committing 1.0 MB / 1.0 MB"]
+
+
+def test_sizes_read_as_bytes_kilobytes_or_megabytes():
+    assert steamugc._size(58) == "58 B"
+    assert steamugc._size(58_000) == "58.0 KB"
+    assert steamugc._size(556_185) == "556.2 KB"
+    assert steamugc._size(12_345_678) == "12.3 MB"
 
 
 def test_a_submit_that_never_answers_times_out_by_the_spec(tmp_path):

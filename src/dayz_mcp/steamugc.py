@@ -291,7 +291,14 @@ def _wait(api, call: int, struct_cls, callback_id: int, timeout: float, clock, s
         sleep(POLL_SECONDS)
 
 
-def _mb(n: int) -> str:
+def _size(n: int) -> str:
+    """Steam sends only the files that changed -- the first live update of an
+    unchanged mod moved one 58-byte file -- so a line in megabytes would read
+    "0.0 MB / 0.0 MB" for most updates."""
+    if n < 1000:
+        return f"{n} B"
+    if n < 1_000_000:
+        return f"{n / 1000:.1f} KB"
     return f"{n / 1_000_000:.1f} MB"
 
 
@@ -364,7 +371,7 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
         def tick() -> None:
             status, done, total = api.progress(handle)
             out.bytes_total = max(out.bytes_total, total)
-            line = f"{UPDATE_STATUS.get(status, f'status {status}')} {_mb(done)} / {_mb(total)}" if total \
+            line = f"{UPDATE_STATUS.get(status, f'status {status}')} {_size(done)} / {_size(total)}" if total \
                 else UPDATE_STATUS.get(status, f"status {status}")
             if line != last["line"]:
                 last["line"] = line

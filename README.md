@@ -719,8 +719,11 @@ it, and the tree behind it is usually the sources.
 it published from (`protocol = 1; publishedid = N; name = "...";`) and the
 launcher reads the id back out of them. The copy subscribers receive adds a
 fourth, `timestamp = <int64>;`, and CRLF line ends (read off a subscribed
-item 2026-09-19); the reader here takes either shape, and this server
-writes the three lines the id lives in. Otherwise it does the same. With the
+item 2026-09-19; the fourth decodes as the .NET `DateTime.ToBinary()` of the
+moment Publisher wrote the file, and nothing reads it back); the reader here
+takes either shape, and this server writes the three lines the id lives in
+-- Steam took that file for an update the same day. Otherwise it does the
+same. With the
 file, the item it names is updated; without it, an item is created and the
 same three lines are written into the folder *before* the content goes up,
 so subscribers receive the id inside the folder, and Publisher can carry on
@@ -732,7 +735,9 @@ there publishes a duplicate.
 **A new item is private.** Unless `visibility` says otherwise, an item is
 created hidden, so nothing is public before its page has been looked at;
 `workshop_publish(mod, visibility="public")` opens it (the content is sent
-again -- Steam skips unchanged files, and a mod is small). An update leaves
+again, but Steam moves only the files that changed: the first live update
+here, an unchanged 0.55 MB mod, took 10 s end to end and uploaded one
+58-byte file, measured 2026-09-19). An update leaves
 untouched whatever it was not given: no `title` means the title stays.
 
 **How it reaches Steam, and why from another process.** There is no HTTP
