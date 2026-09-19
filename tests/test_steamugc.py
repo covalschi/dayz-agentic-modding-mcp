@@ -19,18 +19,21 @@ import pytest
 
 from dayz_mcp import steamugc
 from dayz_mcp.steamugc import (
-    CREATE_ITEM_RESULT, SUBMIT_ITEM_UPDATE_RESULT, CreateItemResult, Outcome, Spec,
-    SubmitItemUpdateResult, run_upload,
+    ADD_DEPENDENCY_RESULT, CREATE_ITEM_RESULT, REMOVE_DEPENDENCY_RESULT, SUBMIT_ITEM_UPDATE_RESULT,
+    UGC_QUERY_COMPLETED, CreateItemResult, DependencyResult, Outcome, Spec, SubmitItemUpdateResult,
+    UGCQueryCompleted, run_upload,
 )
 from dayz_mcp.workshop import META_NAME, parse_meta
 
 
 class FakeApi:
     """Steam as the driver sees it: call handles that complete, results in
-    the structs Steam would fill, and a record of every call made."""
+    the structs Steam would fill, a required-items list that AddDependency
+    and RemoveDependency edit, and a record of every call made."""
 
     def __init__(self, *, init_ok=True, create=(1, 777, False), submit=(1, False),
-                 refuse=(), handle=5, fail_call=None, pending_polls=0, progress=None):
+                 refuse=(), handle=5, fail_call=None, pending_polls=0, progress=None,
+                 children=(), dep_refuse=()):
         self.init_ok = init_ok
         self.create_res = create
         self.submit_res = submit
@@ -39,16 +42,18 @@ class FakeApi:
         self.fail_call = fail_call
         self.pending_polls = pending_polls
         self.progress_seq = list(progress or [])
+        self.children: list[int] = list(children)
+        self.dep_refuse = set(dep_refuse)
         self.calls: list[tuple] = []
         self.shutdown_called = False
         self.meta_seen_at_content: bool | None = None
-        self._pending: dict[int, str] = {}
+        self._pending: dict[int, tuple] = {}
         self._polls: dict[int, int] = {}
         self._n = 100
 
-    def _call(self, kind: str) -> int:
+    def _call(self, kind: str, *extra) -> int:
         self._n += 1
-        self._pending[self._n] = kind
+        self._pending[self._n] = (kind, *extra)
         self._polls[self._n] = 0
         return self._n
 
@@ -100,8 +105,34 @@ class FakeApi:
     def progress(self, h):
         return self.progress_seq.pop(0) if self.progress_seq else (5, 10, 10)
 
+    # --- required items
+    def add_dependency(self, parent, child):
+        self.calls.append(("add_dependency", parent, child))
+        return self._call("add_dep", parent, child)
+
+    def remove_dependency(self, parent, child):
+        self.calls.append(("remove_dependency", parent, child))
+        return self._call("remove_dep", parent, child)
+
+    def create_details_query(self, ids):
+        self.calls.append(("details_query", list(ids)))
+        return 9
+
+    def set_return_children(self, h, on=True):
+        return True
+
+    def send_query(self, h):
+        return self._call("query")
+
+    def query_children(self, h, index=0, limit=64):
+        return list(self.children)
+
+    def release_query(self, h):
+        self.calls.append(("release_query", h))
+
+    # --- the async answers
     def completed(self, call):
-        kind = self._pending[call]
+        kind = self._pending[call][0]
         if self.fail_call == kind:
             return True, True
         if self._polls[call] < self.pending_polls:
@@ -113,15 +144,27 @@ class FakeApi:
         return 1
 
     def result(self, call, struct_cls, callback_id):
-        kind = self._pending[call]
-        assert (kind, callback_id) in {("create", CREATE_ITEM_RESULT), ("submit", SUBMIT_ITEM_UPDATE_RESULT)}, \
-            (kind, callback_id)
+        kind, *extra = self._pending[call]
+        expected = {"create": CREATE_ITEM_RESULT, "submit": SUBMIT_ITEM_UPDATE_RESULT,
+                    "add_dep": ADD_DEPENDENCY_RESULT, "remove_dep": REMOVE_DEPENDENCY_RESULT,
+                    "query": UGC_QUERY_COMPLETED}
+        assert expected[kind] == callback_id, (kind, callback_id)
         if kind == "create":
             code, pid, legal = self.create_res
             return CreateItemResult(code, pid, legal)
-        code, legal = self.submit_res
-        return SubmitItemUpdateResult(code, legal, 0)
-
+        if kind == "submit":
+            code, legal = self.submit_res
+            return SubmitItemUpdateResult(code, legal, 0)
+        if kind == "query":
+            return UGCQueryCompleted(9, 1, 1, 1, False, b"")
+        parent, child = extra
+        if child in self.dep_refuse:
+            return DependencyResult(2, parent, child)
+        if kind == "add_dep":
+            self.children.append(child)
+        else:
+            self.children.remove(child)
+        return DependencyResult(1, parent, child)
 
 def a_spec(tmp_path: Path, **kw) -> Spec:
     content = tmp_path / "@MyMod"
@@ -147,6 +190,14 @@ def test_result_structs_have_the_measured_layout():
     assert SubmitItemUpdateResult.needs_legal.offset == 4
     assert SubmitItemUpdateResult.published_id.offset == 8
     assert CREATE_ITEM_RESULT == 3403 and SUBMIT_ITEM_UPDATE_RESULT == 3404
+
+
+def test_dependency_structs_have_the_expected_layout():
+    """pack(8) again: the two dependency results share one 24-byte layout, and the
+    query result of ISteamUGC v017 ends in a 256-byte cursor, 280 bytes in all."""
+    assert ctypes.sizeof(DependencyResult) == 24 and DependencyResult.child_id.offset == 16
+    assert ctypes.sizeof(UGCQueryCompleted) == 280 and UGCQueryCompleted.cursor.offset == 21
+    assert (UGC_QUERY_COMPLETED, ADD_DEPENDENCY_RESULT, REMOVE_DEPENDENCY_RESULT) == (3401, 3412, 3413)
 
 
 def test_spec_and_outcome_round_trip_through_json(tmp_path):
@@ -263,6 +314,37 @@ def test_submit_failure_carries_the_code_and_the_legal_flag(tmp_path):
     out = run_upload(api, a_spec(tmp_path, published_id=42), log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
     assert not out.ok and out.step == "submit" and out.result == 2 and out.needs_legal
     assert "Fail" in out.error
+
+
+# --------------------------------------------------------- required items
+
+
+def test_required_items_are_added_only_when_missing_and_read_back(tmp_path):
+    api = FakeApi(children=[100])
+    spec = a_spec(tmp_path, published_id=42, send_content=False, requires=[100, 200], remove_requires=[300])
+    out = run_upload(api, spec, log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert out.ok and out.step == "done"
+    assert out.requires_added == [200] and out.requires_removed == [] and out.requires_now == [100, 200]
+    assert "start_update" not in names(api) and "submit" not in names(api)
+    assert ("add_dependency", 42, 200) in api.calls and ("add_dependency", 42, 100) not in api.calls
+    assert ("remove_dependency", 42, 300) not in api.calls, "nothing to remove: it was not there"
+    assert api.calls.count(("details_query", [42])) == 2, "read before, read back after"
+
+
+def test_required_items_are_removed_when_present(tmp_path):
+    api = FakeApi(children=[100, 300])
+    out = run_upload(api, a_spec(tmp_path, published_id=42, send_content=False, remove_requires=[300]),
+                     log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert out.ok and out.requires_removed == [300] and out.requires_now == [100]
+
+
+def test_a_refused_required_item_fails_the_run_after_the_update(tmp_path):
+    api = FakeApi(dep_refuse={200})
+    out = run_upload(api, a_spec(tmp_path, published_id=42, title="T", send_content=False, requires=[200]),
+                     log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert not out.ok and out.step == "requires"
+    assert out.requires_failed == [[200, 2]] and "Fail" in out.error
+    assert "submit" in names(api) and "update itself went through" in out.error
 
 
 # ------------------------------------------------------------------ waits

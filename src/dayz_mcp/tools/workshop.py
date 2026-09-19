@@ -77,6 +77,7 @@ def run_uploader(spec_path: Path, result_path: Path, cwd: Path, log_path: Path) 
 def workshop_publish(
     mod: str, changenote: str = "", title: str = "", description: str = "", preview: str = "",
     visibility: str = "", tags: list[str] | None = None, content: bool = True,
+    requires: list[int] | None = None, remove_requires: list[int] | None = None,
 ) -> Result:
     """Upload a built mod to the Steam Workshop. Returns a `job_id`.
 
@@ -94,6 +95,12 @@ def workshop_publish(
     is `private` unless `visibility` says otherwise -- `public`, `friends`,
     `private` or `unlisted` -- so nothing is public before its page has been
     looked at; publish again with `visibility="public"` to open it.
+
+    `requires` puts Workshop items into the item's Required Items -- the section
+    the DayZ Launcher reads to pull dependencies, distinct from the description
+    -- and `remove_requires` takes them off; ids are the numbers in the items'
+    page URLs. The job reads the item's list first and changes only what
+    differs, so a repeated call is a no-op, and the summary reads the list back.
 
     `content=False` sends only what was given -- title, description, preview,
     visibility, tags -- and leaves the item's files alone: the folder need
@@ -168,12 +175,21 @@ def workshop_publish(
                 hint="a listing-only update needs the item id meta.cpp carries; build and "
                      "package the mod once, or publish with the content to create the item",
             )
-        if not (title or description or preview or visibility or tags):
+        if not (title or description or preview or visibility or tags or requires or remove_requires):
             return fail(
                 "nothing to update: content=False and no title, description, preview, "
-                "visibility or tags",
+                "visibility, tags or required items",
                 hint="pass what should change, or leave content=True to upload the folder",
             )
+    require_ids, refused = _item_ids("requires", requires)
+    if refused:
+        return refused
+    unrequire_ids, refused = _item_ids("remove_requires", remove_requires)
+    if refused:
+        return refused
+    own = folder.meta.published_id if folder.meta else 0
+    if own and own in require_ids:
+        return fail(f"item {own} cannot require itself")
     if creating and not title:
         return fail(
             "a new item needs a title",
@@ -225,6 +241,7 @@ def workshop_publish(
         published_id=published_id, title=title, description=description, preview=preview_path,
         visibility=vis, tags=[t.strip() for t in (tags or []) if t.strip()],
         changenote=changenote, timeout=UPLOAD_TIMEOUT, send_content=content,
+        requires=require_ids, remove_requires=unrequire_ids,
     )
 
     job = store.create(KIND)
@@ -270,8 +287,24 @@ def workshop_publish(
         "creating": creating, "url": item_url(published_id) if published_id else None,
         "visibility": VISIBILITY_NAMES[vis] if vis is not None else "unchanged",
         "files": folder.files, "bytes": folder.bytes, "unsigned": folder.unsigned,
-        "content": content,
+        "content": content, "requires": require_ids, "remove_requires": unrequire_ids,
     })
+
+
+def _item_ids(name: str, values) -> tuple[list[int], Result | None]:
+    """Workshop item ids, or the refusal that names the first thing that is not one."""
+    out: list[int] = []
+    for value in values or []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        if number <= 0:
+            return [], fail(f"{name} needs Workshop item ids, not {value!r}",
+                            hint="the number in an item's page URL, e.g. 1559212036")
+        if number not in out:
+            out.append(number)
+    return out, None
 
 
 def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outcome,
@@ -302,6 +335,10 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
                          + render_meta(out.published_id, spec.title).replace("\n", " ").strip())
     parts.append(item_url(out.published_id))
     parts.append(_readback(out.published_id, submitted_at, spec.send_content, bool(spec.description)))
+    if spec.requires or spec.remove_requires or out.requires_now:
+        parts.append(f"requires now [{', '.join(str(i) for i in out.requires_now) or 'none'}]"
+                     + (f" (added {out.requires_added})" if out.requires_added else "")
+                     + (f" (removed {out.requires_removed})" if out.requires_removed else ""))
     if out.needs_legal:
         parts.append(f"Steam says the Workshop legal agreement is not accepted for this account; "
                      f"the item stays hidden until it is: {LEGAL_URL}")

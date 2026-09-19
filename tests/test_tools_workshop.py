@@ -401,6 +401,26 @@ def test_a_listing_update_refuses_to_create_or_to_send_nothing(tmp_path, monkeyp
     assert not nothing.ok and "nothing to update" in nothing.error
 
 
+def test_required_items_go_to_the_uploader_and_the_summary(tmp_path, monkeypatch):
+    make_project(tmp_path)
+    uploader = FakeUploader(Outcome(ok=True, published_id=ITEM, step="done", result=1,
+                                    requires_now=[1559212036], requires_added=[1559212036]))
+    started, job = publish(monkeypatch, uploader, item=fresh_item(), mod="MyMod", content=False,
+                           requires=[1559212036, "1559212036"])
+    assert started["requires"] == [1559212036], "deduplicated, and a digit string is an id too"
+    assert uploader.spec.requires == [1559212036] and uploader.spec.send_content is False
+    assert job["status"] == "done", job
+    assert "requires now [1559212036] (added [1559212036])" in job["summary"]
+
+
+def test_a_required_item_must_be_a_workshop_id_and_not_the_item_itself(tmp_path):
+    make_project(tmp_path)
+    bad = tools.workshop_publish("MyMod", content=False, requires=[0])
+    assert not bad.ok and "Workshop item ids" in bad.error
+    own = tools.workshop_publish("MyMod", content=False, requires=[ITEM])
+    assert not own.ok and "itself" in own.error
+
+
 # ----------------------------------------------------------------- failures
 
 

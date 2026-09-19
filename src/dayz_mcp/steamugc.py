@@ -46,6 +46,13 @@ from .workshop import META_NAME, WORKSHOP_APP_ID, eresult_name, explain, render_
 UGC_CALLBACKS = 3400
 CREATE_ITEM_RESULT = UGC_CALLBACKS + 3
 SUBMIT_ITEM_UPDATE_RESULT = UGC_CALLBACKS + 4
+#: The required-items side: SteamUGCQueryCompleted_t = +1 (the details query that
+#: reads them back), AddUGCDependencyResult_t = +12, RemoveUGCDependencyResult_t = +13.
+UGC_QUERY_COMPLETED = UGC_CALLBACKS + 1
+ADD_DEPENDENCY_RESULT = UGC_CALLBACKS + 12
+REMOVE_DEPENDENCY_RESULT = UGC_CALLBACKS + 13
+#: How many required items one query reads back. Steam's own pages list a handful.
+MAX_CHILDREN = 64
 #: EWorkshopFileType: a mod is a community file, the first value.
 FILE_TYPE_COMMUNITY = 0
 #: EItemUpdateStatus, for the progress line.
@@ -75,6 +82,17 @@ class StringArray(ctypes.Structure):
     _fields_ = [("strings", POINTER(c_char_p)), ("count", c_int)]
 
 
+class DependencyResult(ctypes.Structure):
+    """AddUGCDependencyResult_t and RemoveUGCDependencyResult_t: one layout."""
+    _fields_ = [("result", c_int), ("published_id", c_uint64), ("child_id", c_uint64)]
+
+
+class UGCQueryCompleted(ctypes.Structure):
+    """SteamUGCQueryCompleted_t of ISteamUGC v017: the cursor field makes it 280 bytes."""
+    _fields_ = [("handle", c_uint64), ("result", c_int), ("returned", c_uint32), ("total", c_uint32),
+                ("cached", c_bool), ("cursor", ctypes.c_char * 256)]
+
+
 @dataclass
 class Spec:
     """Everything one upload needs, written by the tool, read by this process."""
@@ -91,6 +109,9 @@ class Spec:
     timeout: float = 1800.0
     #: False sends the fields above and not the folder: the listing, not the files.
     send_content: bool = True
+    #: Workshop item ids to put into, and take out of, the item's Required Items.
+    requires: list[int] = field(default_factory=list)
+    remove_requires: list[int] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
@@ -113,6 +134,11 @@ class Outcome:
     bytes_total: int = 0
     seconds: float = 0.0
     meta_written: str = ""
+    requires_now: list[int] = field(default_factory=list)
+    requires_added: list[int] = field(default_factory=list)
+    requires_removed: list[int] = field(default_factory=list)
+    #: [child id, EResult] per refused change; 0 when Steam gave no answer at all.
+    requires_failed: list[list] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
@@ -166,6 +192,20 @@ class SteamApi:
         ]
         d.SteamAPI_ISteamUtils_GetAPICallFailureReason.restype = c_int
         d.SteamAPI_ISteamUtils_GetAPICallFailureReason.argtypes = [c_void_p, c_uint64]
+        for name in ("AddDependency", "RemoveDependency"):
+            fn = getattr(d, f"SteamAPI_ISteamUGC_{name}")
+            fn.restype = c_uint64
+            fn.argtypes = [c_void_p, c_uint64, c_uint64]
+        d.SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest.restype = c_uint64
+        d.SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest.argtypes = [c_void_p, POINTER(c_uint64), c_uint32]
+        d.SteamAPI_ISteamUGC_SetReturnChildren.restype = c_bool
+        d.SteamAPI_ISteamUGC_SetReturnChildren.argtypes = [c_void_p, c_uint64, c_bool]
+        d.SteamAPI_ISteamUGC_SendQueryUGCRequest.restype = c_uint64
+        d.SteamAPI_ISteamUGC_SendQueryUGCRequest.argtypes = [c_void_p, c_uint64]
+        d.SteamAPI_ISteamUGC_GetQueryUGCChildren.restype = c_bool
+        d.SteamAPI_ISteamUGC_GetQueryUGCChildren.argtypes = [c_void_p, c_uint64, c_uint32, POINTER(c_uint64), c_uint32]
+        d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest.restype = c_bool
+        d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest.argtypes = [c_void_p, c_uint64]
         self._ugc: int | None = None
         self._utils: int | None = None
         self._keep: list = []
@@ -250,6 +290,32 @@ class SteamApi:
     def failure_reason(self, call: int) -> int:
         return int(self._dll.SteamAPI_ISteamUtils_GetAPICallFailureReason(self.utils, call))
 
+    def add_dependency(self, parent: int, child: int) -> int:
+        return self._dll.SteamAPI_ISteamUGC_AddDependency(self.ugc, parent, child)
+
+    def remove_dependency(self, parent: int, child: int) -> int:
+        return self._dll.SteamAPI_ISteamUGC_RemoveDependency(self.ugc, parent, child)
+
+    def create_details_query(self, ids: list[int]) -> int:
+        arr = (c_uint64 * len(ids))(*ids)
+        self._keep.append(arr)
+        return self._dll.SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest(self.ugc, arr, len(ids))
+
+    def set_return_children(self, handle: int, on: bool = True) -> bool:
+        return self._dll.SteamAPI_ISteamUGC_SetReturnChildren(self.ugc, handle, on)
+
+    def send_query(self, handle: int) -> int:
+        return self._dll.SteamAPI_ISteamUGC_SendQueryUGCRequest(self.ugc, handle)
+
+    def query_children(self, handle: int, index: int = 0, limit: int = MAX_CHILDREN) -> list[int]:
+        arr = (c_uint64 * limit)()
+        if not self._dll.SteamAPI_ISteamUGC_GetQueryUGCChildren(self.ugc, handle, index, arr, limit):
+            return []
+        return [int(v) for v in arr if v]
+
+    def release_query(self, handle: int) -> None:
+        self._dll.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(self.ugc, handle)
+
     def result(self, call: int, struct_cls, callback_id: int):
         out = struct_cls()
         failed = c_bool(False)
@@ -304,9 +370,72 @@ def _size(n: int) -> str:
     return f"{n / 1_000_000:.1f} MB"
 
 
+def _children(api, item: int, clock, sleep) -> tuple[list[int] | None, str]:
+    """The item's Required Items as Steam lists them now, through a details
+    query with children, or None and why not."""
+    handle = api.create_details_query([item])
+    if not handle:
+        return None, "CreateQueryUGCDetailsRequest returned no handle"
+    api.set_return_children(handle, True)
+    res, err = _wait(api, api.send_query(handle), UGCQueryCompleted, UGC_QUERY_COMPLETED,
+                     CREATE_TIMEOUT, clock, sleep)
+    try:
+        if res is None:
+            return None, err
+        if res.result != 1:
+            return None, f"details query: {eresult_name(res.result)}"
+        return (api.query_children(handle, 0) if res.returned else []), ""
+    finally:
+        api.release_query(handle)
+
+
+def _change_requires(api, spec: Spec, out: Outcome, log, clock, sleep) -> str:
+    """Add what is missing, remove what is present, read the list back. Steam
+    is asked only about the difference, so a repeated call changes nothing."""
+    current, err = _children(api, out.published_id, clock, sleep)
+    if current is None:
+        return f"cannot read the required items: {err}"
+    log(f"required items before: {current or 'none'}")
+    for child in spec.requires:
+        if child in current or child in out.requires_added:
+            continue
+        res, err = _wait(api, api.add_dependency(out.published_id, child), DependencyResult,
+                         ADD_DEPENDENCY_RESULT, CREATE_TIMEOUT, clock, sleep)
+        if res is None or res.result != 1:
+            out.requires_failed.append([child, 0 if res is None else int(res.result)])
+            log(f"require {child}: {err if res is None else eresult_name(res.result)}")
+        else:
+            out.requires_added.append(child)
+            log(f"required item added: {child}")
+    for child in spec.remove_requires:
+        if child not in current:
+            continue
+        res, err = _wait(api, api.remove_dependency(out.published_id, child), DependencyResult,
+                         REMOVE_DEPENDENCY_RESULT, CREATE_TIMEOUT, clock, sleep)
+        if res is None or res.result != 1:
+            out.requires_failed.append([child, 0 if res is None else int(res.result)])
+            log(f"unrequire {child}: {err if res is None else eresult_name(res.result)}")
+        else:
+            out.requires_removed.append(child)
+            log(f"required item removed: {child}")
+    after, err = _children(api, out.published_id, clock, sleep)
+    if after is None:
+        log(f"required items could not be read back: {err}")
+        out.requires_now = sorted((set(current) | set(out.requires_added)) - set(out.requires_removed))
+    else:
+        out.requires_now = after
+        log(f"required items now: {after or 'none'}")
+    if out.requires_failed:
+        return "required item change refused: " + ", ".join(
+            f"{child} ({eresult_name(code) if code else 'no answer from Steam'})"
+            for child, code in out.requires_failed)
+    return ""
+
+
 def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.sleep) -> Outcome:
-    """Create the item if there is none, then send one update with the
-    content folder. Every step that can refuse names itself in the outcome."""
+    """Create the item if there is none, send one update with whatever was
+    given, then change its required items. Every step that can refuse names
+    itself in the outcome."""
     started = clock()
     out = Outcome(published_id=spec.published_id)
 
@@ -315,6 +444,14 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
         out.seconds = clock() - started
         log(f"[{step}] {error}")
         return out
+
+    wants_update = bool(spec.send_content or spec.title or spec.description or spec.preview
+                        or spec.tags or spec.visibility is not None)
+    wants_requires = bool(spec.requires or spec.remove_requires)
+    if not spec.published_id and not spec.send_content:
+        return finish("update", "a new item needs its content")
+    if not wants_update and not wants_requires:
+        return finish("update", "nothing to send: no content, no field to set, no required item to change")
 
     if not api.init():
         return finish(
@@ -347,56 +484,62 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
                 log("Steam says this account has not accepted the Workshop legal agreement; "
                     "the item stays hidden until it is")
 
-        handle = api.start_update(spec.app_id, out.published_id)
-        if not handle:
-            return finish("start_update", "StartItemUpdate returned no handle")
-        steps = []
-        if spec.title:
-            steps.append(("title", lambda: api.set_title(handle, spec.title)))
-        if spec.description:
-            steps.append(("description", lambda: api.set_description(handle, spec.description)))
-        if spec.visibility is not None:
-            steps.append(("visibility", lambda: api.set_visibility(handle, spec.visibility)))
-        if spec.tags:
-            steps.append(("tags", lambda: api.set_tags(handle, list(spec.tags))))
-        if spec.preview:
-            steps.append(("preview", lambda: api.set_preview(handle, spec.preview)))
-        if spec.send_content:
-            steps.append(("content", lambda: api.set_content(handle, spec.content)))
-        if not steps:
-            return finish("update", "nothing to send: no content and no field to set")
-        for name, call in steps:
-            if not call():
-                return finish(name, f"Steam refused the {name} for this update")
-            log(f"set {name}")
+        if wants_update:
+            handle = api.start_update(spec.app_id, out.published_id)
+            if not handle:
+                return finish("start_update", "StartItemUpdate returned no handle")
+            steps = []
+            if spec.title:
+                steps.append(("title", lambda: api.set_title(handle, spec.title)))
+            if spec.description:
+                steps.append(("description", lambda: api.set_description(handle, spec.description)))
+            if spec.visibility is not None:
+                steps.append(("visibility", lambda: api.set_visibility(handle, spec.visibility)))
+            if spec.tags:
+                steps.append(("tags", lambda: api.set_tags(handle, list(spec.tags))))
+            if spec.preview:
+                steps.append(("preview", lambda: api.set_preview(handle, spec.preview)))
+            if spec.send_content:
+                steps.append(("content", lambda: api.set_content(handle, spec.content)))
+            for name, call in steps:
+                if not call():
+                    return finish(name, f"Steam refused the {name} for this update")
+                log(f"set {name}")
 
-        log(f"submitting item {out.published_id}"
-            + ("" if spec.send_content else " (listing only, no content)")
-            + (f": {spec.changenote}" if spec.changenote else ""))
-        last = {"line": ""}
+            log(f"submitting item {out.published_id}"
+                + ("" if spec.send_content else " (listing only, no content)")
+                + (f": {spec.changenote}" if spec.changenote else ""))
+            last = {"line": ""}
 
-        def tick() -> None:
-            status, done, total = api.progress(handle)
-            out.bytes_total = max(out.bytes_total, total)
-            line = f"{UPDATE_STATUS.get(status, f'status {status}')} {_size(done)} / {_size(total)}" if total \
-                else UPDATE_STATUS.get(status, f"status {status}")
-            if line != last["line"]:
-                last["line"] = line
-                log(line)
+            def tick() -> None:
+                status, done, total = api.progress(handle)
+                out.bytes_total = max(out.bytes_total, total)
+                line = f"{UPDATE_STATUS.get(status, f'status {status}')} {_size(done)} / {_size(total)}" if total \
+                    else UPDATE_STATUS.get(status, f"status {status}")
+                if line != last["line"]:
+                    last["line"] = line
+                    log(line)
 
-        res, err = _wait(api, api.submit(handle, spec.changenote), SubmitItemUpdateResult,
-                         SUBMIT_ITEM_UPDATE_RESULT, spec.timeout, clock, sleep, tick)
-        if res is None:
-            return finish("submit", err)
-        out.needs_legal = out.needs_legal or bool(res.needs_legal)
-        if res.result != 1:
-            return finish("submit", f"SubmitItemUpdate: {eresult_name(res.result)} -- {explain(res.result) or 'no detail'}",
-                          res.result)
+            res, err = _wait(api, api.submit(handle, spec.changenote), SubmitItemUpdateResult,
+                             SUBMIT_ITEM_UPDATE_RESULT, spec.timeout, clock, sleep, tick)
+            if res is None:
+                return finish("submit", err)
+            out.needs_legal = out.needs_legal or bool(res.needs_legal)
+            if res.result != 1:
+                return finish("submit", f"SubmitItemUpdate: {eresult_name(res.result)} -- {explain(res.result) or 'no detail'}",
+                              res.result)
+            log(f"item {out.published_id} {'created' if out.created else 'updated'} in {clock() - started:.0f} s")
+
+        if wants_requires:
+            err = _change_requires(api, spec, out, log, clock, sleep)
+            if err:
+                return finish("requires", err + (" -- the update itself went through" if wants_update else ""))
+
         out.ok = True
         out.result = 1
         out.step = "done"
         out.seconds = clock() - started
-        log(f"item {out.published_id} {'created' if out.created else 'updated'} in {out.seconds:.0f} s")
+        log(f"done in {out.seconds:.0f} s")
         return out
     finally:
         api.shutdown()
