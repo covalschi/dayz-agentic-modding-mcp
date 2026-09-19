@@ -247,6 +247,7 @@ class Item:
     tags: list[str] = field(default_factory=list)
     preview_url: str = ""
     url: str = ""
+    description: str = ""
 
     @property
     def visible(self) -> bool:
@@ -290,6 +291,7 @@ def parse_details(body: bytes | str, published_id: int) -> Item:
     item.subscriptions = int(raw.get("subscriptions", 0) or 0)
     item.tags = [str(t.get("tag", "")) for t in raw.get("tags", []) or [] if isinstance(t, dict)]
     item.preview_url = str(raw.get("preview_url", "") or "")
+    item.description = str(raw.get("file_description", "") or "")
     return item
 
 

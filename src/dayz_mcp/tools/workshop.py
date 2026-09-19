@@ -76,7 +76,7 @@ def run_uploader(spec_path: Path, result_path: Path, cwd: Path, log_path: Path) 
 
 def workshop_publish(
     mod: str, changenote: str = "", title: str = "", description: str = "", preview: str = "",
-    visibility: str = "", tags: list[str] | None = None,
+    visibility: str = "", tags: list[str] | None = None, content: bool = True,
 ) -> Result:
     """Upload a built mod to the Steam Workshop. Returns a `job_id`.
 
@@ -94,6 +94,12 @@ def workshop_publish(
     is `private` unless `visibility` says otherwise -- `public`, `friends`,
     `private` or `unlisted` -- so nothing is public before its page has been
     looked at; publish again with `visibility="public"` to open it.
+
+    `content=False` sends only what was given -- title, description, preview,
+    visibility, tags -- and leaves the item's files alone: the folder need
+    not be built, only its `meta.cpp` is read, for the item id, so nothing
+    that could ship an unreleased build is touched. It cannot create an
+    item, and refuses when nothing was given.
 
     It refuses, before any byte leaves: a mod the project does not declare;
     a folder with no pbo; a junction or symlink inside the folder (Steam
@@ -136,12 +142,12 @@ def workshop_publish(
 
     folder_path = mod_folder(prof.root, mod)
     folder = inspect_folder(folder_path)
-    if not folder.built:
+    if content and not folder.built:
         return fail(
             f"{mod} is not built: no pbo under {folder_path / 'addons'}",
             hint="run mod_build first; the Workshop gets the built folder, never the sources",
         )
-    if folder.links:
+    if content and folder.links:
         return fail(
             f"{folder_path.name} contains a junction or symlink: {', '.join(folder.links)}",
             hint="Steam follows links and would upload everything behind them -- remove the "
@@ -155,6 +161,19 @@ def workshop_publish(
         )
     creating = folder.meta is None
     title = title.strip()
+    if not content:
+        if creating:
+            return fail(
+                f"no {META_NAME} in {folder_path}, and content=False cannot create an item",
+                hint="a listing-only update needs the item id meta.cpp carries; build and "
+                     "package the mod once, or publish with the content to create the item",
+            )
+        if not (title or description or preview or visibility or tags):
+            return fail(
+                "nothing to update: content=False and no title, description, preview, "
+                "visibility or tags",
+                hint="pass what should change, or leave content=True to upload the folder",
+            )
     if creating and not title:
         return fail(
             "a new item needs a title",
@@ -205,7 +224,7 @@ def workshop_publish(
         dll=str(dll), content=str(folder_path.resolve()), app_id=WORKSHOP_APP_ID,
         published_id=published_id, title=title, description=description, preview=preview_path,
         visibility=vis, tags=[t.strip() for t in (tags or []) if t.strip()],
-        changenote=changenote, timeout=UPLOAD_TIMEOUT,
+        changenote=changenote, timeout=UPLOAD_TIMEOUT, send_content=content,
     )
 
     job = store.create(KIND)
@@ -251,14 +270,24 @@ def workshop_publish(
         "creating": creating, "url": item_url(published_id) if published_id else None,
         "visibility": VISIBILITY_NAMES[vis] if vis is not None else "unchanged",
         "files": folder.files, "bytes": folder.bytes, "unsigned": folder.unsigned,
+        "content": content,
     })
 
 
 def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outcome,
              submitted_at: float) -> str:
-    verb = "created" if out.created else "updated"
-    parts = [f"{mod}: {verb} item {out.published_id} -- {folder.files} files, {folder.bytes} B, "
-             f"{out.seconds:.0f} s"]
+    if out.created:
+        verb = "created"
+    elif spec.send_content:
+        verb = "updated"
+    else:
+        verb = "updated the listing of"
+    head = f"{mod}: {verb} item {out.published_id}"
+    if spec.send_content or out.created:
+        head += f" -- {folder.files} files, {folder.bytes} B, {out.seconds:.0f} s"
+    else:
+        head += f" -- no content sent, {out.seconds:.0f} s"
+    parts = [head]
     if spec.visibility is not None:
         parts.append(f"visibility {VISIBILITY_NAMES[spec.visibility]}")
     if out.created:
@@ -272,7 +301,7 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
             parts.append(f"{META_NAME} is MISSING from {folder_path.name}: write it by hand -- "
                          + render_meta(out.published_id, spec.title).replace("\n", " ").strip())
     parts.append(item_url(out.published_id))
-    parts.append(_readback(out.published_id, submitted_at))
+    parts.append(_readback(out.published_id, submitted_at, spec.send_content))
     if out.needs_legal:
         parts.append(f"Steam says the Workshop legal agreement is not accepted for this account; "
                      f"the item stays hidden until it is: {LEGAL_URL}")
@@ -282,17 +311,21 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
     return " | ".join(parts)
 
 
-def _readback(published_id: int, submitted_at: float) -> str:
+def _readback(published_id: int, submitted_at: float, content_sent: bool = True) -> str:
     item, err = read_item(published_id)
     if item is None:
         return f"readback unavailable ({err})"
     if not item.visible:
         return "readback: not visible to the public listing (private, or just created)"
+    listing = (f"description {len(item.description)} chars, tags "
+               f"[{', '.join(item.tags) or 'none'}]")
     when = _iso(item.time_updated) if item.time_updated else "unknown"
+    if not content_sent:
+        return f"readback: {item.title!r}, {listing}"
     if item.time_updated >= submitted_at - 120:
-        return f"readback: {item.title!r}, updated {when}, matches this upload"
+        return f"readback: {item.title!r}, updated {when}, matches this upload; {listing}"
     return (f"readback: {item.title!r}, updated {when} -- still the previous upload; the public "
-            "listing lags a little, workshop_status will show it")
+            f"listing lags a little, workshop_status will show it; {listing}")
 
 
 def workshop_status(mod: str) -> Result:

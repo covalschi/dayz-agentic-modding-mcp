@@ -89,6 +89,8 @@ class Spec:
     tags: list[str] = field(default_factory=list)
     changenote: str = ""
     timeout: float = 1800.0
+    #: False sends the fields above and not the folder: the listing, not the files.
+    send_content: bool = True
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
@@ -359,13 +361,18 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
             steps.append(("tags", lambda: api.set_tags(handle, list(spec.tags))))
         if spec.preview:
             steps.append(("preview", lambda: api.set_preview(handle, spec.preview)))
-        steps.append(("content", lambda: api.set_content(handle, spec.content)))
+        if spec.send_content:
+            steps.append(("content", lambda: api.set_content(handle, spec.content)))
+        if not steps:
+            return finish("update", "nothing to send: no content and no field to set")
         for name, call in steps:
             if not call():
                 return finish(name, f"Steam refused the {name} for this update")
             log(f"set {name}")
 
-        log(f"submitting item {out.published_id}" + (f": {spec.changenote}" if spec.changenote else ""))
+        log(f"submitting item {out.published_id}"
+            + ("" if spec.send_content else " (listing only, no content)")
+            + (f": {spec.changenote}" if spec.changenote else ""))
         last = {"line": ""}
 
         def tick() -> None:

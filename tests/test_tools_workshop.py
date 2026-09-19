@@ -356,6 +356,39 @@ def test_the_legal_agreement_flag_reaches_the_summary(tmp_path, monkeypatch):
     assert job["status"] == "done" and LEGAL_URL in job["summary"]
 
 
+# ------------------------------------------------------------ listing only
+
+
+def test_a_listing_update_sends_no_content_and_needs_no_build(tmp_path, monkeypatch):
+    """The way to fix a description without shipping whatever the build folder
+    holds: no pbo is needed, only meta.cpp, and the summary says no content went."""
+    root = make_project(tmp_path)
+    (root / "@MyMod" / "addons" / "MyMod.pbo").unlink()
+    uploader = FakeUploader(Outcome(ok=True, published_id=ITEM, step="done", result=1, seconds=3.0))
+    listed = fresh_item(description="[b]Hello[/b]", tags=["Mod", "Mechanics"])
+    started, job = publish(monkeypatch, uploader, item=listed, mod="MyMod",
+                           description="[b]Hello[/b]", tags=["Mod", "Mechanics"], content=False)
+    assert started["content"] is False
+    assert job["status"] == "done", job
+    assert uploader.spec.send_content is False and uploader.spec.published_id == ITEM
+    assert uploader.spec.description == "[b]Hello[/b]" and uploader.spec.tags == ["Mod", "Mechanics"]
+    summary = job["summary"]
+    assert f"MyMod: updated the listing of item {ITEM}" in summary and "no content sent" in summary
+    assert "description 12 chars" in summary and "tags [Mod, Mechanics]" in summary
+    assert "matches this upload" not in summary
+
+
+def test_a_listing_update_refuses_to_create_or_to_send_nothing(tmp_path, monkeypatch):
+    make_project(tmp_path, meta=None)
+    refused = tools.workshop_publish("MyMod", title="M", content=False)
+    assert not refused.ok and "cannot create" in refused.error
+
+    session.reset()
+    make_project(tmp_path / "second")
+    nothing = tools.workshop_publish("MyMod", content=False)
+    assert not nothing.ok and "nothing to update" in nothing.error
+
+
 # ----------------------------------------------------------------- failures
 
 

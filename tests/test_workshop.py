@@ -155,7 +155,7 @@ def an_answer(**fields) -> bytes:
         "publishedfileid": "123456789", "result": 1, "title": "MyMod",
         "time_created": 1757400000, "time_updated": 1758200000, "file_size": "123456",
         "visibility": 0, "subscriptions": 12, "tags": [{"tag": "Mod"}],
-        "preview_url": "https://images/preview.png",
+        "preview_url": "https://images/preview.png", "file_description": "Hello",
     } | fields
     return json.dumps({"response": {"result": 1, "resultcount": 1, "publishedfiledetails": [entry]}}).encode()
 
@@ -169,6 +169,7 @@ def test_parse_details_reads_the_fields_an_answer_needs():
     assert item.visibility == 0
     assert item.subscriptions == 12
     assert item.tags == ["Mod"]
+    assert item.description == "Hello"
     assert item.url == item_url(123456789) == "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789"
     assert item.to_dict()["visibility_name"] == "public"
 

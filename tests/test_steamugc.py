@@ -227,6 +227,22 @@ def test_update_sets_every_field_it_was_given(tmp_path):
     assert ("set_preview", 5, str(preview)) in api.calls
 
 
+def test_a_listing_only_update_sends_no_content(tmp_path):
+    api = FakeApi()
+    spec = a_spec(tmp_path, published_id=42, title="T", tags=["Mod"], send_content=False)
+    out = run_upload(api, spec, log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert out.ok
+    assert names(api) == ["init", "start_update", "set_title", "set_tags", "submit"]
+
+
+def test_a_listing_only_update_with_nothing_to_set_is_refused_by_the_driver(tmp_path):
+    api = FakeApi()
+    out = run_upload(api, a_spec(tmp_path, published_id=42, send_content=False),
+                     log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert not out.ok and out.step == "update" and "nothing to send" in out.error
+    assert "submit" not in names(api)
+
+
 def test_a_refused_step_names_itself(tmp_path):
     api = FakeApi(refuse={"set_preview"})
     spec = a_spec(tmp_path, published_id=42, preview="x.png")

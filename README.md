@@ -140,7 +140,7 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
-| `workshop_publish(mod, changenote, title, description, preview, visibility, tags)` | upload a built mod to the Steam Workshop; returns a job id. The content is the built `@Name` folder, whole; `meta.cpp` inside it decides between **updating** the item it names and **creating** one (`title` required; `meta.cpp` is written into the folder first; the new item is **private** unless `visibility` says otherwise). Sends `title`, `description`, `preview` (an image under 1 MB), `visibility` (`public`, `friends`, `private`, `unlisted`) and `tags` only when given, so an update leaves the rest as it was. Refuses a mod the project does not declare, a folder with no pbo or with a junction inside it, a `meta.cpp` it cannot read, a missing or oversized preview, a build or upload already running for the project, and a machine without the game's `steam_api64.dll`. Needs the Steam client running and logged in -- the job checks that, first. See "The Workshop" |
+| `workshop_publish(mod, changenote, title, description, preview, visibility, tags, content)` | upload a built mod to the Steam Workshop; returns a job id. The content is the built `@Name` folder, whole; `meta.cpp` inside it decides between **updating** the item it names and **creating** one (`title` required; `meta.cpp` is written into the folder first; the new item is **private** unless `visibility` says otherwise). Sends `title`, `description`, `preview` (an image under 1 MB), `visibility` (`public`, `friends`, `private`, `unlisted`) and `tags` only when given, so an update leaves the rest as it was; `content=False` sends only those fields and leaves the item's files alone -- the way to fix a listing without shipping whatever the build folder holds. Refuses a mod the project does not declare, a folder with no pbo or with a junction inside it, a `meta.cpp` it cannot read, a missing or oversized preview, a build or upload already running for the project, and a machine without the game's `steam_api64.dll`. Needs the Steam client running and logged in -- the job checks that, first. See "The Workshop" |
 | `workshop_status(mod)` | the built folder against the public listing of its item: pbos, which are unsigned, keys, links, size, when the newest pbo was built; the item's title, last update, size, visibility and subscribers; and `stale` -- built after the last upload. Goes nowhere near the Steam client, needs no key, and answers without a network, saying so |
 
 ### Layout primitives
@@ -734,11 +734,20 @@ there publishes a duplicate.
 
 **A new item is private.** Unless `visibility` says otherwise, an item is
 created hidden, so nothing is public before its page has been looked at;
-`workshop_publish(mod, visibility="public")` opens it (the content is sent
-again, but Steam moves only the files that changed: the first live update
-here, an unchanged 0.55 MB mod, took 10 s end to end and uploaded one
-58-byte file, measured 2026-09-19). An update leaves
-untouched whatever it was not given: no `title` means the title stays.
+`workshop_publish(mod, visibility="public", content=False)` opens it without
+touching its files. An update leaves untouched whatever it was not given:
+no `title` means the title stays.
+
+**`content=False` edits the listing and nothing else.** Title, description,
+preview, visibility and tags go up; the folder's files do not, so the build
+folder may hold anything -- an unreleased build, no pbo at all -- and only
+its `meta.cpp` is read, for the item id. It is the way to fix a description
+without shipping whatever happens to be built. It cannot create an item,
+because an item without content is nothing, and it refuses when nothing was
+given. Sending the content again is cheap in any case: Steam moves only the
+files that changed (the first live update here, an unchanged 0.55 MB mod,
+took 10 s end to end and uploaded one 58-byte file, measured 2026-09-19),
+but it does stamp a new update on the item's page.
 
 **How it reaches Steam, and why from another process.** There is no HTTP
 route for Workshop content, and Publisher has no command line -- measured
