@@ -554,3 +554,32 @@ def test_status_names_a_broken_meta(tmp_path, monkeypatch):
     data = tools.workshop_status("MyMod").data
     assert data["item"] == 0 and "publishedid" in data["meta_error"]
     assert "workshop_publish will refuse" in data["note"]
+
+
+def test_it_refuses_an_additional_preview_that_is_missing_wrong_or_too_big(tmp_path):
+    root = make_project(tmp_path)
+    missing = tools.workshop_publish("MyMod", previews=["art/shot.png"])
+    assert not missing.ok and "previews not found" in missing.error
+
+    (root / "shot.bmp").write_bytes(b"bm")
+    wrong = tools.workshop_publish("MyMod", previews=["shot.bmp"])
+    assert not wrong.ok and ".png" in wrong.error
+
+    (root / "shot.png").write_bytes(b"p" * (wtool.MAX_PREVIEW_BYTES + 1))
+    big = tools.workshop_publish("MyMod", previews=["shot.png"])
+    assert not big.ok and str(wtool.MAX_PREVIEW_BYTES) in big.error
+
+
+def test_additional_previews_reach_the_uploader_and_the_summary(tmp_path, monkeypatch):
+    root = make_project(tmp_path)
+    (root / "art").mkdir()
+    for name in ("one.jpg", "two.jpg"):
+        (root / "art" / name).write_bytes(b"jpg")
+    uploader = FakeUploader(Outcome(ok=True, published_id=ITEM, step="done", result=1))
+    _, job = publish(monkeypatch, uploader, item=fresh_item(), mod="MyMod", content=False,
+                     previews=["art/one.jpg", "art/two.jpg", "art/one.jpg"])
+    assert job["status"] == "done", job
+    spec = uploader.spec
+    assert spec.previews == [str((root / "art" / "one.jpg").resolve()), str((root / "art" / "two.jpg").resolve())]
+    assert not spec.send_content
+    assert "2 picture(s) added to the screenshot strip" in job["summary"]

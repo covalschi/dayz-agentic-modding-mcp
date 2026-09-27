@@ -76,6 +76,7 @@ def run_uploader(spec_path: Path, result_path: Path, cwd: Path, log_path: Path) 
 
 def workshop_publish(
     mod: str, changenote: str = "", title: str = "", description: str = "", preview: str = "",
+    previews: list[str] | None = None,
     visibility: str = "", tags: list[str] | None = None, content: bool = True,
     requires: list[int] | None = None, remove_requires: list[int] | None = None,
 ) -> Result:
@@ -96,6 +97,11 @@ def workshop_publish(
     `private` or `unlisted` -- so nothing is public before its page has been
     looked at; publish again with `visibility="public"` to open it.
 
+    `previews` are additional images for the page's screenshot strip, with
+    the same limits as `preview`. Each call ADDS them: Steam keeps what the
+    page already shows, so send a picture once; taking one down is done on
+    the item's page.
+
     `requires` puts Workshop items into the item's Required Items -- the section
     the DayZ Launcher reads to pull dependencies, distinct from the description
     -- and `remove_requires` takes them off; ids are the numbers in the items'
@@ -103,7 +109,7 @@ def workshop_publish(
     differs, so a repeated call is a no-op, and the summary reads the list back.
 
     `content=False` sends only what was given -- title, description, preview,
-    visibility, tags -- and leaves the item's files alone: the folder need
+    previews, visibility, tags -- and leaves the item's files alone: the folder need
     not be built, only its `meta.cpp` is read, for the item id, so nothing
     that could ship an unreleased build is touched. It cannot create an
     item, and refuses when nothing was given.
@@ -175,10 +181,11 @@ def workshop_publish(
                 hint="a listing-only update needs the item id meta.cpp carries; build and "
                      "package the mod once, or publish with the content to create the item",
             )
-        if not (title or description or preview or visibility or tags or requires or remove_requires):
+        if not (title or description or preview or previews or visibility or tags or requires
+                or remove_requires):
             return fail(
                 "nothing to update: content=False and no title, description, preview, "
-                "visibility, tags or required items",
+                "previews, visibility, tags or required items",
                 hint="pass what should change, or leave content=True to upload the folder",
             )
     require_ids, refused = _item_ids("requires", requires)
@@ -199,22 +206,16 @@ def workshop_publish(
 
     preview_path = ""
     if preview:
-        candidate = Path(preview)
-        if not candidate.is_absolute():
-            candidate = prof.root / candidate
-        if not candidate.is_file():
-            return fail(f"preview not found: {candidate}",
-                        hint="a path relative to the project, or absolute")
-        if candidate.suffix.lower() not in PREVIEW_SUFFIXES:
-            return fail(f"preview must be one of {', '.join(PREVIEW_SUFFIXES)}, not {candidate.suffix!r}")
-        size = candidate.stat().st_size
-        if size > MAX_PREVIEW_BYTES:
-            return fail(
-                f"preview is {size} B; Steam's ceiling is {MAX_PREVIEW_BYTES} B",
-                hint="shrink the image -- Steam would refuse it after the whole content had "
-                     "been uploaded, with a bare LimitExceeded",
-            )
-        preview_path = str(candidate.resolve())
+        preview_path, refused = _image_file(prof.root, preview, "preview")
+        if refused:
+            return refused
+    preview_paths: list[str] = []
+    for extra in previews or []:
+        path, refused = _image_file(prof.root, str(extra), "previews")
+        if refused:
+            return refused
+        if path not in preview_paths:
+            preview_paths.append(path)
 
     game = session.game()
     if not game:
@@ -239,6 +240,7 @@ def workshop_publish(
     spec = Spec(
         dll=str(dll), content=str(folder_path.resolve()), app_id=WORKSHOP_APP_ID,
         published_id=published_id, title=title, description=description, preview=preview_path,
+        previews=preview_paths,
         visibility=vis, tags=[t.strip() for t in (tags or []) if t.strip()],
         changenote=changenote, timeout=UPLOAD_TIMEOUT, send_content=content,
         requires=require_ids, remove_requires=unrequire_ids,
@@ -287,8 +289,28 @@ def workshop_publish(
         "creating": creating, "url": item_url(published_id) if published_id else None,
         "visibility": VISIBILITY_NAMES[vis] if vis is not None else "unchanged",
         "files": folder.files, "bytes": folder.bytes, "unsigned": folder.unsigned,
-        "content": content, "requires": require_ids, "remove_requires": unrequire_ids,
+        "content": content, "previews": len(preview_paths),
+        "requires": require_ids, "remove_requires": unrequire_ids,
     })
+
+
+def _image_file(root: Path, value: str, what: str) -> tuple[str, Result | None]:
+    """A preview image Steam will take, resolved -- or the refusal that names why not."""
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if not candidate.is_file():
+        return "", fail(f"{what} not found: {candidate}", hint="a path relative to the project, or absolute")
+    if candidate.suffix.lower() not in PREVIEW_SUFFIXES:
+        return "", fail(f"{what} must be one of {', '.join(PREVIEW_SUFFIXES)}, not {candidate.suffix!r}")
+    size = candidate.stat().st_size
+    if size > MAX_PREVIEW_BYTES:
+        return "", fail(
+            f"{what} is {size} B; Steam's ceiling is {MAX_PREVIEW_BYTES} B",
+            hint="shrink the image -- Steam would refuse it after the whole content had "
+                 "been uploaded, with a bare LimitExceeded",
+        )
+    return str(candidate.resolve()), None
 
 
 def _item_ids(name: str, values) -> tuple[list[int], Result | None]:
@@ -323,6 +345,8 @@ def _summary(mod: str, folder_path: Path, folder: Folder, spec: Spec, out: Outco
     parts = [head]
     if spec.visibility is not None:
         parts.append(f"visibility {VISIBILITY_NAMES[spec.visibility]}")
+    if spec.previews:
+        parts.append(f"{len(spec.previews)} picture(s) added to the screenshot strip")
     if out.created:
         # Read the folder again rather than trust the uploader's word: the
         # file is the one thing a subscriber and the next publish both need.

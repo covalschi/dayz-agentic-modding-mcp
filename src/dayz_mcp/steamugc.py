@@ -55,6 +55,8 @@ REMOVE_DEPENDENCY_RESULT = UGC_CALLBACKS + 13
 MAX_CHILDREN = 64
 #: EWorkshopFileType: a mod is a community file, the first value.
 FILE_TYPE_COMMUNITY = 0
+#: EItemPreviewType: an additional preview that is a picture.
+PREVIEW_TYPE_IMAGE = 0
 #: EItemUpdateStatus, for the progress line.
 UPDATE_STATUS = {
     0: "waiting", 1: "preparing config", 2: "preparing content",
@@ -103,6 +105,10 @@ class Spec:
     title: str = ""
     description: str = ""
     preview: str = ""
+    #: Additional images for the item's screenshot strip, each a file under 1 MB.
+    #: Every upload ADDS them: Steam keeps what the page already shows, so a
+    #: picture is sent once, and taking one down is done on the item's page.
+    previews: list[str] = field(default_factory=list)
     visibility: int | None = None
     tags: list[str] = field(default_factory=list)
     changenote: str = ""
@@ -170,6 +176,11 @@ class SteamApi:
             fn = getattr(d, f"SteamAPI_ISteamUGC_{name}")
             fn.restype = c_bool
             fn.argtypes = [c_void_p, c_uint64, c_char_p]
+        # Additional images, the screenshot strip on the item's page. The flat
+        # export is in the game's DLL (checked 2026-09-27, ISteamUGC v017); the
+        # last argument is EItemPreviewType, 0 = image.
+        d.SteamAPI_ISteamUGC_AddItemPreviewFile.restype = c_bool
+        d.SteamAPI_ISteamUGC_AddItemPreviewFile.argtypes = [c_void_p, c_uint64, c_char_p, c_int]
         d.SteamAPI_ISteamUGC_SetItemVisibility.restype = c_bool
         d.SteamAPI_ISteamUGC_SetItemVisibility.argtypes = [c_void_p, c_uint64, c_int]
         # The fourth argument (bAllowAdminTags) arrived after v017. Under the
@@ -273,6 +284,11 @@ class SteamApi:
 
     def set_preview(self, handle: int, path: str) -> bool:
         return self._dll.SteamAPI_ISteamUGC_SetItemPreview(self.ugc, handle, path.encode("utf-8"))
+
+    def add_preview_file(self, handle: int, path: str) -> bool:
+        return self._dll.SteamAPI_ISteamUGC_AddItemPreviewFile(
+            self.ugc, handle, path.encode("utf-8"), PREVIEW_TYPE_IMAGE,
+        )
 
     def submit(self, handle: int, changenote: str) -> int:
         return self._dll.SteamAPI_ISteamUGC_SubmitItemUpdate(self.ugc, handle, changenote.encode("utf-8"))
@@ -446,7 +462,7 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
         return out
 
     wants_update = bool(spec.send_content or spec.title or spec.description or spec.preview
-                        or spec.tags or spec.visibility is not None)
+                        or spec.previews or spec.tags or spec.visibility is not None)
     wants_requires = bool(spec.requires or spec.remove_requires)
     if not spec.published_id and not spec.send_content:
         return finish("update", "a new item needs its content")
@@ -499,6 +515,9 @@ def run_upload(api, spec: Spec, log=print, clock=time.monotonic, sleep=time.slee
                 steps.append(("tags", lambda: api.set_tags(handle, list(spec.tags))))
             if spec.preview:
                 steps.append(("preview", lambda: api.set_preview(handle, spec.preview)))
+            for extra in spec.previews:
+                steps.append((f"preview {Path(extra).name}",
+                              lambda p=extra: api.add_preview_file(handle, p)))
             if spec.send_content:
                 steps.append(("content", lambda: api.set_content(handle, spec.content)))
             for name, call in steps:

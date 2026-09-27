@@ -94,6 +94,9 @@ class FakeApi:
     def set_preview(self, h, p):
         return self._set("set_preview", h, p)
 
+    def add_preview_file(self, h, p):
+        return self._set("add_preview_file", h, p)
+
     def set_content(self, h, folder):
         self.meta_seen_at_content = (Path(folder) / META_NAME).is_file()
         return self._set("set_content", h, folder)
@@ -432,3 +435,35 @@ def test_main_survives_a_driver_crash(tmp_path, monkeypatch):
     assert steamugc.main([str(spec_path), str(result_path)]) == 1
     out = json.loads(result_path.read_text(encoding="utf-8"))
     assert out["step"] == "crash" and "boom" in out["error"]
+
+
+def test_additional_previews_are_added_after_the_preview_and_before_the_content(tmp_path):
+    api = FakeApi()
+    main = tmp_path / "p.png"
+    main.write_bytes(b"png")
+    shots = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    for shot in shots:
+        shot.write_bytes(b"jpg")
+    spec = a_spec(tmp_path, published_id=42, preview=str(main), previews=[str(s) for s in shots])
+    out = run_upload(api, spec, log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert out.ok
+    assert names(api) == ["init", "start_update", "set_preview", "add_preview_file",
+                          "add_preview_file", "set_content", "submit"]
+    assert ("add_preview_file", 5, str(shots[0])) in api.calls
+    assert ("add_preview_file", 5, str(shots[1])) in api.calls
+
+
+def test_additional_previews_alone_are_a_listing_update(tmp_path):
+    api = FakeApi()
+    spec = a_spec(tmp_path, published_id=42, previews=[str(tmp_path / "a.jpg")], send_content=False)
+    out = run_upload(api, spec, log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert out.ok
+    assert names(api) == ["init", "start_update", "add_preview_file", "submit"]
+
+
+def test_a_refused_additional_preview_names_the_file(tmp_path):
+    api = FakeApi(refuse={"add_preview_file"})
+    spec = a_spec(tmp_path, published_id=42, previews=[str(tmp_path / "shot.jpg")])
+    out = run_upload(api, spec, log=lambda s: None, clock=lambda: 0.0, sleep=lambda s: None)
+    assert not out.ok and out.step == "preview shot.jpg" and "refused the preview shot.jpg" in out.error
+    assert "submit" not in names(api)

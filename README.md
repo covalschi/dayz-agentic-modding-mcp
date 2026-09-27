@@ -140,7 +140,7 @@ in its notes.
 | `asset_build(mod, source, deploy)` | binarize a mod's models from their MLOD sources, judge what came out, and only then put it in the mod; returns a job id |
 | `asset_check(mod, model)` | judge the models and textures a mod already ships. Builds nothing, needs no DayZ Tools, answers in milliseconds |
 | `asset_convert(source, output)` | convert one texture between `.png` and `.paa`, and judge the result |
-| `workshop_publish(mod, changenote, title, description, preview, visibility, tags, content, requires, remove_requires)` | upload a built mod to the Steam Workshop; returns a job id. The content is the built `@Name` folder, whole; `meta.cpp` inside it decides between **updating** the item it names and **creating** one (`title` required; `meta.cpp` is written into the folder first; the new item is **private** unless `visibility` says otherwise). Sends `title`, `description`, `preview` (an image under 1 MB), `visibility` (`public`, `friends`, `private`, `unlisted`) and `tags` only when given, so an update leaves the rest as it was; `content=False` sends only those fields and leaves the item's files alone -- the way to fix a listing without shipping whatever the build folder holds; `requires` and `remove_requires` edit the item's Required Items, the section the launcher reads for dependencies, against what Steam lists now. Refuses a mod the project does not declare, a folder with no pbo or with a junction inside it, a `meta.cpp` it cannot read, a missing or oversized preview, a build or upload already running for the project, and a machine without the game's `steam_api64.dll`. Needs the Steam client running and logged in -- the job checks that, first. See "The Workshop" |
+| `workshop_publish(mod, changenote, title, description, preview, previews, visibility, tags, content, requires, remove_requires)` | upload a built mod to the Steam Workshop; returns a job id. The content is the built `@Name` folder, whole; `meta.cpp` inside it decides between **updating** the item it names and **creating** one (`title` required; `meta.cpp` is written into the folder first; the new item is **private** unless `visibility` says otherwise). Sends `title`, `description`, `preview` (an image under 1 MB), `visibility` (`public`, `friends`, `private`, `unlisted`) and `tags` only when given, so an update leaves the rest as it was; `content=False` sends only those fields and leaves the item's files alone -- the way to fix a listing without shipping whatever the build folder holds; `requires` and `remove_requires` edit the item's Required Items, the section the launcher reads for dependencies, against what Steam lists now. Refuses a mod the project does not declare, a folder with no pbo or with a junction inside it, a `meta.cpp` it cannot read, a missing or oversized preview, a build or upload already running for the project, and a machine without the game's `steam_api64.dll`. Needs the Steam client running and logged in -- the job checks that, first. See "The Workshop" |
 | `workshop_status(mod)` | the built folder against the public listing of its item: pbos, which are unsigned, keys, links, size, when the newest pbo was built; the item's title, last update, size, visibility and subscribers; and `stale` -- built after the last upload. Goes nowhere near the Steam client, needs no key, and answers without a network, saying so |
 
 ### Layout primitives
@@ -746,6 +746,13 @@ item's current list first, through a details query with children, changes only w
 differs, and reads the list back into the summary -- a repeated call changes nothing.
 A refused change fails the job by name, after any listing update in the same call has
 already gone through, and the summary says so.
+
+`workshop_publish(mod, previews=[...], content=False)` adds pictures to the item's
+screenshot strip (each under 1 MB, png/jpg/gif, relative to the project or
+absolute). Every call adds: Steam keeps what the page already shows, so a
+picture is sent once, and taking one down is done on the item's page. The
+binding is the flat export `SteamAPI_ISteamUGC_AddItemPreviewFile` of the game's
+DLL, measured 2026-09-27: five images accepted in one update, shown on the page.
 
 **`content=False` edits the listing and nothing else.** Title, description,
 preview, visibility and tags go up; the folder's files do not, so the build
