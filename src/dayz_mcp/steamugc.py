@@ -572,6 +572,15 @@ def main(argv: list[str] | None = None) -> int:
     spec_path, result_path = Path(argv[0]), Path(argv[1])
     spec = Spec.from_json(spec_path.read_text(encoding="utf-8"))
 
+    # The log is a file the tool reads back as UTF-8, while a redirected stdout
+    # takes the machine's ANSI code page. Measured on a real update: a change
+    # note with a Ukrainian paragraph died on the line announcing its own
+    # submit ('charmap' codec can't encode), with the content already set and
+    # nothing sent. What the console can spell must not decide an upload.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure:
+        reconfigure(encoding="utf-8", errors="replace")
+
     def log(line: str) -> None:
         print(line, flush=True)
 

@@ -10,6 +10,7 @@ through a real subprocess.
 from __future__ import annotations
 
 import ctypes
+import io
 import json
 import subprocess
 import sys
@@ -435,6 +436,31 @@ def test_main_survives_a_driver_crash(tmp_path, monkeypatch):
     assert steamugc.main([str(spec_path), str(result_path)]) == 1
     out = json.loads(result_path.read_text(encoding="utf-8"))
     assert out["step"] == "crash" and "boom" in out["error"]
+
+
+def test_main_logs_a_change_note_the_console_code_page_cannot_spell(tmp_path, monkeypatch):
+    """The log is a file the tool reads back as UTF-8, but a redirected stdout
+    takes the machine's ANSI code page. Measured on a real update: a change
+    note with a Ukrainian paragraph killed the run on the log line announcing
+    its own submit -- `UnicodeEncodeError: 'charmap' codec can't encode` --
+    after the content was set and before anything was sent. What the console
+    can spell must never decide whether an upload happens."""
+    note = "New: the old fridge. Нове: старий холодильник."
+    spec = a_spec(tmp_path, published_id=42, changenote=note)
+    spec_path, result_path = tmp_path / "spec.json", tmp_path / "result.json"
+    spec_path.write_text(spec.to_json(), encoding="utf-8")
+    api = FakeApi()
+    monkeypatch.setattr(steamugc, "SteamApi", lambda dll: api)
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+
+    code = steamugc.main([str(spec_path), str(result_path)])
+
+    out = Outcome.from_json(result_path.read_text(encoding="utf-8"))
+    assert out.ok, out.error
+    assert code == 0
+    assert ("submit", api.handle, note) in api.calls
+    assert "старий холодильник" in raw.getvalue().decode("utf-8")
 
 
 def test_additional_previews_are_added_after_the_preview_and_before_the_content(tmp_path):
