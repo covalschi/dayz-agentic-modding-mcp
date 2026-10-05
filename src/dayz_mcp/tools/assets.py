@@ -29,6 +29,11 @@ exists for: a shipped copy SIX HOURS OLDER than the artifact beside it.
 **Long work returns a job id.** One small model measured 75.6, 77.6, 78.3 and
 78.7 seconds across four runs. A blocking call would stall the whole server for
 that long -- protocol ping and cancellation included, not just that one call.
+Those seconds turned out not to be the model at all: `binarize` walks the whole
+drive it is started on before it reads anything, and from a drive letter of its
+own the same model takes a tenth of a second (`assets/drive.py`). So every
+build asks for such a letter. It stays a job all the same: the letter is not
+guaranteed, and how long a model takes is the model's own business.
 
 The half these tools do NOT own is the visual verdict: whether the model looks
 right, is scaled right, is wound right, has a collision. Nothing outside the
@@ -50,6 +55,7 @@ from ..assets.checks import (
     check_model,
     check_texture,
 )
+from ..assets.drive import substituted
 from ..assets.p3d import Fingerprint, P3dError, fingerprint, read_p3d
 from ..assets.paa import CONVERTIBLE, DXT1, PaaError, alpha_levels, convert, expected_format
 from ..errors import Result, fail, ok
@@ -86,6 +92,18 @@ def session_tools_root() -> str | None:
     """Indirection on purpose: it is what lets these tools be exercised on a
     machine with no DayZ Tools installed."""
     return session.tools_root()
+
+
+def drive_mount():
+    """What gives a build a drive of its own, or None for none at all.
+
+    `binarize` walks the whole drive its working directory is on before it
+    reads a model (`assets/drive.py`), so every build is started from a letter
+    substituted for the model root. The same indirection as
+    `session_tools_root`, for the mirror-image reason: it is what lets the
+    build be exercised WITHOUT a real letter appearing on the machine.
+    """
+    return substituted
 
 
 # ------------------------------------------------------------------- the parts
@@ -361,17 +379,26 @@ def _texture_pairs(mod_dir: Path, prefix_dir: Path | None, exclude: list[str]) -
 def asset_build(mod: str = "", source: str = "", deploy: bool = True) -> Result:
     """Build a mod's models from their MLOD sources and put them in the mod.
 
-    Returns a `job_id` immediately: ONE small model measured 75.6 to 78.7
-    seconds across four runs, so this can never be a blocking call. Wait for it
-    with `job_wait(job_id, timeout=...)` -- give it minutes, not seconds -- and
-    read the numbers in the job's summary and its `asset-build.json` artifact.
+    Returns a `job_id` immediately, because how long `binarize` takes is not
+    this call's to promise: small models measured 0.1 seconds each from a drive
+    of their own and 510 to 651 seconds each without one. Wait for it with
+    `job_wait(job_id, timeout=...)` -- give it minutes, not seconds -- and read
+    the numbers in the job's summary and its `asset-build.json` artifact.
 
-    What it does, in order: run `binarize` with its working directory set to
-    the project root declared as `build.project_root`, judge the ARTIFACT that
-    came out (never the tool's exit code -- three separate broken outcomes were
-    measured exiting 0, one of them leaving a zero-length file), and only then
-    copy the models into the mod. A refused build deploys nothing and leaves
-    the artifact the mod already ships exactly as it was.
+    What it does, in order: substitute a free drive letter for the project root
+    declared as `build.project_root` and run `binarize` from it, judge the
+    ARTIFACT that came out (never the tool's exit code -- three separate broken
+    outcomes were measured exiting 0, one of them leaving a zero-length file),
+    and only then copy the models into the mod. A refused build deploys nothing
+    and leaves the artifact the mod already ships exactly as it was.
+
+    The letter is there because `binarize` walks the whole DRIVE its working
+    directory is on before it reads a model, so a drive that holds the root and
+    nothing else is the whole difference between those two times. It is the
+    same root, the letter is removed when the run is over, and the artifact
+    records where the tool really ran (`cwd`). With no letter free the build
+    runs from the root itself -- as correct, and as slow as the drive is large
+    -- and the summary says so, because that wait looks exactly like a hang.
 
     `mod` names one of `build.mods`; with a single declared mod it can be
     omitted. `source` is the model directory relative to the mod's own folder
@@ -515,6 +542,7 @@ def _run_build(
         prefix=prefix,
         binpath=find_binpath(tools_root),
         judge=judge,
+        mount=drive_mount(),
     )
     if log_path.is_file():
         store.add_artifact(job_id, log_path)

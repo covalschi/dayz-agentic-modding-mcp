@@ -23,9 +23,18 @@ is recorded without being believed in either direction. The third outcome is
 refused before the process starts, because after it starts there is nothing
 left to save: the artifact it would have replaced is already gone.
 
-**The wait is on the process handle, with a ceiling.** Runtime was measured at
-seconds, at 68 s, at 78 s, and at "still going after 120 s" -- there is no
-duration that can be assumed. Worse, `binarize` spawns a FileServer grandchild
+**It walks the whole drive it is started on.** Before a model is read the tool
+goes over every file of the drive its working directory is on, so its run time
+was a property of the DISK and not of the model: one small model was measured
+at seconds, at 68 s, at 78 s and at "still going after 120 s" -- and at a
+tenth of a second from a drive that holds the root and nothing else. Handed
+the means (`mount`), the run is therefore started from a drive letter
+substituted for the root. `drive.py` has what was measured, and why every run
+maps a letter of its own.
+
+**The wait is on the process handle, with a ceiling.** Without such a drive
+there is no duration that can be assumed, and with one the model may still be
+large. Worse, `binarize` spawns a FileServer grandchild
 that inherits the output handle and outlives it, so waiting for end-of-stream
 waits for the GRANDCHILD and an unattended job hangs forever. `procs.run_blocking`
 already waits on the handle and tree-kills on expiry, which is why nothing here
@@ -47,6 +56,7 @@ import os
 import time
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -145,6 +155,9 @@ class BinarizeResult:
     output: str
     code: int | None = None
     seconds: float = 0.0
+    #: The directory the tool was started in: the root, or the drive standing
+    #: in for it. Empty when nothing was started.
+    cwd: str = ""
     error: str = ""
     hint: str = ""
     builds: tuple[ModelBuild, ...] = ()
@@ -171,6 +184,7 @@ class BinarizeResult:
             "output": self.output,
             "code": self.code,
             "seconds": round(self.seconds, 2),
+            "cwd": self.cwd,
             "error": self.error,
             "hint": self.hint,
             "models": [
@@ -279,6 +293,7 @@ def binarize_models(
     binpath: str = "",
     run=run_blocking,
     judge=None,
+    mount=None,
 ) -> BinarizeResult:
     """Build every model in one directory, from the declared project root.
 
@@ -304,6 +319,15 @@ def binarize_models(
     OTHER copy of the model.cfg lives -- passes its own, and that one answer
     then gates `ok`. Two passes over one artifact would mean two verdicts, and
     a build refused by one and allowed by the other is not a decision.
+
+    `mount(root)` is a context manager that yields a drive whose root IS
+    `root`, or None (`drive.substituted`). Given one, the tool is started from
+    that drive with the source named on it, because `binarize` walks the whole
+    drive its working directory is on before it reads a model: 510 to 540
+    seconds a model from a folder on a large drive against a tenth of a second
+    from a letter of its own, measured on the same small models. It is the same
+    root, so nothing about the artifact changes. Asked for only once every
+    refusal is behind, and held until the process is gone.
     """
     attempt = _Attempt(
         root=Path(root) if root else Path(),
@@ -398,16 +422,29 @@ def binarize_models(
     for dst in expected.values():
         dst.unlink(missing_ok=True)
 
-    cmd = binarize_command(binarize_exe, attempt.source, attempt.output, binpath)
     if not binpath:
         attempt.notes.append(
             "no -binpath: the log will carry the engine's config lookups (25 lines of 112 on "
             "the build this was measured against). They are muted, not read"
         )
 
-    started = time.monotonic()
-    code, tail = run(cmd, root_resolved, Path(log_path), timeout)
-    seconds = time.monotonic() - started
+    with (mount(root_resolved) if mount else nullcontext()) as drive:
+        if drive is not None:
+            # Never `.resolve()`d: resolving a substituted letter gives back
+            # the folder it stands for, and the walk with it.
+            cwd, named_source = Path(drive), Path(drive) / relative
+        else:
+            cwd, named_source = root_resolved, attempt.source
+            if mount:
+                attempt.notes.append(
+                    f"no drive letter could be substituted for {root_resolved}, so binarize "
+                    "ran from that folder itself and first walked the whole drive it is on: "
+                    "minutes instead of seconds on a large one, and not a hang"
+                )
+        cmd = binarize_command(binarize_exe, named_source, attempt.output, binpath)
+        started = time.monotonic()
+        code, tail = run(cmd, cwd, Path(log_path), timeout)
+        seconds = time.monotonic() - started
 
     # The FULL log, not the waiter's tail: the tail is capped at a few thousand
     # characters and one small model's log is already larger than that, so the
@@ -420,7 +457,8 @@ def binarize_models(
 
     outcome = BinarizeResult(
         ok=False, root=str(root_resolved), source=str(source_resolved),
-        output=str(attempt.output.resolve()), code=code, seconds=seconds, log=digest,
+        output=str(attempt.output.resolve()), code=code, seconds=seconds, cwd=str(cwd),
+        log=digest,
     )
 
     if code == 124:
@@ -428,12 +466,21 @@ def binarize_models(
         # killed". Whatever is in the output directory was written by a process
         # that did not finish, so it is not judged at all -- a truncated model
         # can still parse.
+        if drive is None:
+            hint = (
+                f"it was started from {cwd}, and binarize walks the whole drive its working "
+                "directory is on before it reads a model -- nine to eleven minutes were "
+                "measured on a large one, for models that build in a fraction of a second from "
+                "a drive of their own. Free a drive letter so one can be substituted for the "
+                "root, or raise the ceiling"
+            )
+        else:
+            hint = ("raise the ceiling if the model is genuinely large, or check that the "
+                    "source is what you think it is")
         return replace(
             outcome,
             error=f"binarize did not finish within {int(timeout)} s and was stopped",
-            hint="raise the ceiling if the model is genuinely large, or check that the "
-                 "source is what you think it is; runtime was measured varying from seconds "
-                 "to well over two minutes for one small model",
+            hint=hint,
             notes=tuple(attempt.notes),
         )
 

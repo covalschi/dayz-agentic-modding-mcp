@@ -60,6 +60,28 @@ def run_blocking(
     return code, text[-TAIL_CHARS:]
 
 
+def run_captured(cmd: list[str], timeout: float = 30.0) -> tuple[int, str]:
+    """Run one short command and hand back its exit code and all it printed.
+
+    For a command whose whole answer is a line or two and which needs neither
+    a log file nor a working directory; `run_blocking` is for the rest. The
+    same two codes for the same two failures, so nothing here raises either:
+    127 when the command could not be started, 124 when it did not finish.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 - command is assembled by us
+            cmd, capture_output=True, text=True, errors="replace", check=False,
+            timeout=timeout,
+            # See run_blocking: this server's own stdin is a live JSON-RPC pipe.
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"[dayz-mcp] timeout after {timeout}s"
+    except OSError as exc:
+        return 127, f"[dayz-mcp] cannot start: {exc}"
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
 # Handles of the processes THIS server is watching, keyed by pid, with the
 # image name each was started under. Kept because a live handle answers "is it
 # running" with one syscall, while the fallback -- spawning `tasklist` -- was

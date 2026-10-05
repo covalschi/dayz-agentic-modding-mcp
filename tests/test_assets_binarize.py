@@ -2,10 +2,11 @@
 
 Two halves, as the checks' own tests have. The hermetic half injects the waiter
 and therefore needs no DayZ Tools at all: it pins the command's shape (`-silent`
-is not optional, the working directory is the declared root, the ceiling is
-real), every refusal that has to happen BEFORE a process starts, and the fact
-that a success code with an empty output directory is a refusal. The corpus
-half at the bottom actually runs the tool on a real model.
+is not optional, the working directory is the declared root or the drive
+standing in for it, the ceiling is real), every refusal that has to happen
+BEFORE a process starts, and the fact that a success code with an empty output
+directory is a refusal. The corpus half at the bottom actually runs the tool on
+a real model -- once from the root itself and once from a real drive letter.
 
 Samples are named by the PROPERTY under test and never by the mod they came
 from, exactly as the readers' and the checks' corpus tests are. On a machine
@@ -24,6 +25,7 @@ import os
 import shutil
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,7 @@ from dayz_mcp.assets.binarize import (
     find_binpath,
 )
 from dayz_mcp.assets.checks import PROJECT_ROOT_KEY, REFUSE
+from dayz_mcp.assets.drive import substituted
 from dayz_mcp.paths import BINARIZE_BINPATH_REL, BINARIZE_REL, find_tools
 from dayz_mcp.procs import run_blocking, stop
 
@@ -266,6 +269,130 @@ def test_binpath_is_passed_only_when_the_main_config_is_really_there(tmp_path):
     assert not any(a.startswith("-binpath") for a in plain)
     with_flag = binarize_command(exe, src, out, binpath=found)
     assert f"-binpath={found}" in with_flag
+
+
+# ------------------------------------------------ a drive of its own for the run
+
+
+class Mount:
+    """A stand-in for `drive.substituted`: hands out a drive, and records what
+    it was asked to stand in for and when it got the drive back."""
+
+    def __init__(self, drive: Path | None):
+        self.drive = drive
+        self.roots: list[Path] = []
+        self.events: list[str] = []
+
+    @contextmanager
+    def __call__(self, root):
+        self.roots.append(Path(root))
+        self.events.append("mapped")
+        try:
+            yield self.drive
+        finally:
+            self.events.append("released")
+
+
+def test_binarize_runs_from_the_drive_that_stands_in_for_the_root(tmp_path):
+    """binarize walks the whole DRIVE its working directory is on before it
+    reads a model. Measured on the same small models: 510 to 540 seconds each
+    from a folder on a large drive, a tenth of a second each from a letter
+    substituted for that same folder.
+    The letter's root IS the declared root, so every path inside the model
+    resolves exactly as before -- and the source is named on the letter, as it
+    was in the run that was measured. The output stays where the caller put it.
+    """
+    exe, root, src, out = stand(tmp_path)
+    drive = Path("Q:\\")
+    mount = Mount(drive)
+    waiter = Waiter(writes={str(out / "thing.p3d"): GOOD_ODOL})
+    result = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=mount)
+    assert result.ok, result.error
+    assert mount.roots == [root.resolve()]
+    assert waiter.calls[-1]["cwd"] == drive
+    assert waiter.cmd[-2] == str(drive / PREFIX / "data" / "models")
+    assert waiter.cmd[-1] == str(out)
+
+
+def test_the_drive_is_held_for_the_run_and_given_back_after_it(tmp_path):
+    exe, root, src, out = stand(tmp_path)
+    mount = Mount(Path("Q:\\"))
+    during: list[list[str]] = []
+
+    class Watching(Waiter):
+        def __call__(self, cmd, cwd, log_path, timeout=None):
+            during.append(list(mount.events))
+            return super().__call__(cmd, cwd, log_path, timeout)
+
+    waiter = Watching(writes={str(out / "thing.p3d"): GOOD_ODOL})
+    run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=mount)
+    assert during == [["mapped"]]
+    assert mount.events == ["mapped", "released"]
+
+
+def test_the_drive_is_given_back_when_the_waiter_blows_up(tmp_path):
+    """A letter nobody gives back stays on the machine until the next logon."""
+    exe, root, src, out = stand(tmp_path)
+    mount = Mount(Path("Q:\\"))
+
+    def broken(cmd, cwd, log_path, timeout=None):
+        raise RuntimeError("the waiter died")
+
+    with pytest.raises(RuntimeError):
+        run(tmp_path, broken, exe=exe, root=root, source=src, output=out, mount=mount)
+    assert mount.events == ["mapped", "released"]
+
+
+def test_a_build_refused_before_launch_asks_for_no_drive(tmp_path):
+    exe, root, src, out = stand(tmp_path, source=GOOD_ODOL)
+    mount = Mount(Path("Q:\\"))
+    waiter = Waiter()
+    result = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=mount)
+    assert not result.ok
+    assert not waiter.called
+    assert mount.events == []
+
+
+def test_without_a_drive_the_run_stays_on_the_root_and_says_what_that_costs(tmp_path):
+    """No free letter, or no `subst` at all, must cost the speed and never the
+    build: the root itself is still a correct working directory. But minutes
+    spent walking a drive look exactly like a hang, so the answer says why."""
+    exe, root, src, out = stand(tmp_path)
+    waiter = Waiter(writes={str(out / "thing.p3d"): GOOD_ODOL})
+    result = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=Mount(None))
+    assert result.ok, result.error
+    assert waiter.calls[-1]["cwd"] == root.resolve()
+    assert waiter.cmd[-2] == str(src)
+    assert any("drive" in note for note in result.notes), result.notes
+
+
+def test_a_timeout_names_the_drive_walk_only_when_there_was_one(tmp_path):
+    """A run that expires on the root itself most likely never got to the
+    model: the walk over the drive alone was measured at nine minutes and
+    grows with the drive. From a drive of its own that excuse is gone, and
+    pointing at it would send the reader the wrong way."""
+    exe, root, src, out = stand(tmp_path)
+    waiter = Waiter(code=124)
+    walked = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=Mount(None))
+    assert "drive" in walked.hint, walked.hint
+
+    own = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out,
+              mount=Mount(Path("Q:\\")))
+    assert "drive" not in own.hint, own.hint
+
+
+def test_the_result_says_where_binarize_ran(tmp_path):
+    """A tenth of a second or nine minutes is decided by this one directory and
+    by nothing else in the answer, so it is in the answer."""
+    exe, root, src, out = stand(tmp_path)
+    waiter = Waiter(writes={str(out / "thing.p3d"): GOOD_ODOL})
+    plain = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out)
+    assert plain.cwd == str(root.resolve())
+
+    drive = Path("Q:\\")
+    mounted = run(tmp_path, waiter, exe=exe, root=root, source=src, output=out, mount=Mount(drive))
+    assert mounted.cwd == str(drive)
+    assert mounted.to_dict()["cwd"] == str(drive)
 
 
 # ------------------------------------------------ judging the artifact, not the report
@@ -518,6 +645,36 @@ def test_binarize_really_builds_a_working_model_from_the_declared_root(tmp_path)
     assert statuses["C4"] == "pass", build.report.to_dict()
     assert result.seconds > 0
     assert result.log is not None and result.log.dropped > 0
+
+
+@live
+@pytest.mark.corpus
+def test_binarize_really_builds_the_same_model_from_a_letter_of_its_own(tmp_path):
+    """The acceptance of the substitution, on the real tool and a real letter.
+
+    A drive is mapped onto the copied root, binarize runs from it, and the
+    artifact passes the two checks that only a correct working directory can
+    pass -- which is the whole claim: a letter whose root is the declared root
+    is the same root. Afterwards the letter is gone again.
+    """
+    root = tmp_path / "root"
+    shutil.copytree(Path(SAMPLE_ROOT) / SAMPLE_PREFIX, root / SAMPLE_PREFIX)
+    source = root / SAMPLE_PREFIX / SAMPLE_SOURCE_REL
+    result = binarize_models(
+        Path(TOOLS) / BINARIZE_REL,
+        root=root, source=source, output=tmp_path / "out",
+        log_path=tmp_path / "binarize.log", prefix=SAMPLE_PREFIX.lower(),
+        binpath=find_binpath(TOOLS), mount=substituted,
+    )
+    assert result.ok, f"{result.error}\n{result.hint}"
+    ran_from = Path(result.cwd)
+    assert ran_from.parent == ran_from and ran_from != root.resolve(), result.notes
+    assert not ran_from.exists(), f"{ran_from} was left behind"
+    build = result.builds[0]
+    assert Path(build.output).open("rb").read(4) == b"ODOL"
+    statuses = {f.check: f.status for f in build.report.findings}
+    assert statuses["C3"] == "pass", build.report.to_dict()
+    assert statuses["C4"] == "pass", build.report.to_dict()
 
 
 @live

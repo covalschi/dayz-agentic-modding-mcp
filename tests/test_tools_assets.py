@@ -45,6 +45,7 @@ import textwrap
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -293,6 +294,18 @@ def run_build(**kw):
     return answer, job
 
 
+@pytest.fixture(autouse=True)
+def _no_real_drive_letters(monkeypatch):
+    """Nothing in this file may map a real drive letter on the machine it runs on.
+
+    `asset_build` substitutes one for the model root (`assets/drive.py`), and
+    with the waiter faked there is no run for it to shorten -- only a letter
+    that would appear and vanish under every test here. The tests that are
+    about the letter put their own stand-in in its place.
+    """
+    monkeypatch.setattr(assets, "drive_mount", lambda: None)
+
+
 # ------------------------------------------------------- refusals before work
 
 
@@ -493,6 +506,50 @@ def test_the_prefix_and_the_declared_root_always_reach_the_binarizer(tmp_path, m
     run_build()
     assert seen[-1]["prefix"] == PREFIX
     assert Path(seen[-1]["root"]) == (root / "staging")
+
+
+def test_asset_build_runs_binarize_from_a_drive_of_its_own(tmp_path, monkeypatch):
+    """binarize walks the whole DRIVE its working directory is on before it
+    reads a model: nine minutes for one small model from a folder on a large
+    drive, a tenth of a second from a letter substituted for that folder. The tool
+    asks for such a letter on every build -- for the declared root and nothing
+    else -- and the job's artifact says where the run really happened."""
+    root = open_project(tmp_path, monkeypatch)
+    drive = Path("Q:\\")
+    asked: list[Path] = []
+
+    @contextmanager
+    def mount(model_root):
+        asked.append(Path(model_root))
+        yield drive
+
+    monkeypatch.setattr(assets, "drive_mount", lambda: mount)
+    run = waiter({"thing.p3d": GOOD_ODOL})
+    with_waiter(monkeypatch, run)
+    answer, job = run_build()
+    assert job.status == "done", job.error
+    assert asked == [(root / "staging").resolve()]
+    assert run.calls[-1]["cwd"] == drive
+    assert Path(run.calls[-1]["cmd"][-2]) == drive / MOD / "data" / "models"
+    payload = json.loads(Path([a for a in job.artifacts if a.endswith(".json")][0]).read_text("utf-8"))
+    assert payload["cwd"] == str(drive)
+
+
+def test_a_build_that_got_no_drive_says_so_where_the_agent_reads(tmp_path, monkeypatch):
+    """Without a letter the build is still correct and nine minutes long. A job
+    that sits there that long with nothing said about it reads as a hang, so
+    the reason is in the summary -- the one line an agent always sees."""
+    open_project(tmp_path, monkeypatch)
+
+    @contextmanager
+    def no_letter(model_root):
+        yield None
+
+    monkeypatch.setattr(assets, "drive_mount", lambda: no_letter)
+    with_waiter(monkeypatch, waiter({"thing.p3d": GOOD_ODOL}))
+    answer, job = run_build()
+    assert job.status == "done", job.error
+    assert "drive" in job.summary, job.summary
 
 
 def test_both_model_cfg_copies_reach_c11(tmp_path, monkeypatch):

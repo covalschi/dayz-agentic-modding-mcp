@@ -5,7 +5,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from dayz_mcp.procs import run_blocking, spawn, stop, is_alive, powershell_cmd
+from dayz_mcp.procs import run_blocking, run_captured, spawn, stop, is_alive, powershell_cmd
 
 
 @contextmanager
@@ -55,6 +55,46 @@ def test_missing_executable_is_reported_not_raised(tmp_path):
     code, tail = run_blocking(["definitely-not-a-real-binary-xyz"], tmp_path, log)
     assert code == 127
     assert "cannot start" in tail
+
+
+def test_a_short_command_answers_with_its_code_and_everything_it_printed():
+    code, text = run_captured([
+        sys.executable, "-c",
+        "import sys; print('to stdout'); print('to stderr', file=sys.stderr); raise SystemExit(3)",
+    ])
+    assert code == 3
+    assert "to stdout" in text
+    assert "to stderr" in text
+
+
+def test_a_short_command_that_cannot_start_is_reported_not_raised():
+    """The same code `run_blocking` gives the same failure. A caller on a job
+    thread must be able to tell "this command is not on the machine" from "it
+    said no" without catching anything."""
+    code, text = run_captured(["definitely-not-a-real-binary-xyz"])
+    assert code == 127
+    assert "cannot start" in text
+
+
+def test_a_short_command_that_never_ends_is_stopped():
+    started = time.monotonic()
+    code, text = run_captured([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+    assert code == 124
+    assert "timeout" in text.lower()
+    assert time.monotonic() - started < 15
+
+
+def test_a_short_command_does_not_inherit_stdin():
+    """Same hazard as `run_blocking`: this server's stdin is a live JSON-RPC
+    pipe, and a child that inherits it blocks on it -- here that would be a
+    timeout and 124 instead of the 0 asserted below."""
+    with _stdin_replaced_with_a_never_closing_pipe():
+        code, text = run_captured(
+            [sys.executable, "-c", "import sys; sys.stdin.readline(); print('past readline')"],
+            timeout=5,
+        )
+    assert code == 0
+    assert "past readline" in text
 
 
 def test_spawn_stop_and_liveness(tmp_path):

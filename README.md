@@ -617,7 +617,8 @@ it strips the drive letter, keeps the rest, and writes paths that look like
 paths.
 
 `build.project_root` is that directory, stated once in the portable half of the
-profile. The server sets it as the binarizer's working directory and pushes it
+profile. The server makes it the binarizer's working directory — through a
+drive letter of its own, see below — and pushes it
 into the add-on for the duration of the run, so what the add-on has stored
 decides nothing (it is reported, so you can go and fix it). That is what makes
 a wrong root **impossible** rather than detectable, and it is why the key is
@@ -626,6 +627,35 @@ required before anything model-shaped will run at all.
 The refusals it produces happen before a process exists — measured at 0.0003 s
 — and a refused build leaves the model the mod already ships byte for byte
 untouched.
+
+### A drive of its own for every build
+
+`binarize` reads the whole **drive** before it reads a model. Read off the
+running process: for the first minutes its one busy thread sits inside
+`FindNextFileW` with a handle on the root of the drive its working directory is
+on, and nothing is read from the model until that walk is over. So how long a
+build takes is the size of the disk, not of the model:
+
+| `binarize` started from | One small model | Five small models of another project |
+|---|---|---|
+| the model root itself, a folder on a large drive | **650.8 s** | **510 to 540 s** each |
+| a drive letter substituted for that folder | **0.1 s** | **0.1 s** each |
+
+`asset_build` therefore maps a free drive letter onto `build.project_root` with
+`subst`, starts `binarize` from it with the source named on the letter, and
+removes the letter when the process is gone. A letter whose root is the
+declared root *is* that root, so nothing about the artifact changes: C3 and C4,
+the two checks that only a correct working directory can pass, pass, and the
+files come out the same size to within three bytes. The job's artifact records
+the directory the tool really ran from (`cwd`).
+
+Every build maps a letter of its own and removes only its own — one that
+already points at the same root may be another server's build in flight. With
+no letter free the build runs from the folder itself, as correct as before and
+as slow, and its summary says so, because minutes spent walking a drive look
+exactly like a hang. The walk goes through junctions too, so whatever is linked
+into the root is walked with it: an unpacked game tree of 103,359 files turned
+the tenth of a second into half a second.
 
 ### Twelve checks on the artifact, and four of them refuse
 
@@ -682,7 +712,7 @@ One small model, on this machine, through the tools:
 | Step | Result | Time |
 |---|---|---|
 | `asset_export` | MLOD, 334,032 B, 5 LODs, clean | **2.1 s** (about 8 s on a cold start) |
-| `asset_build` | ODOL v55, 58,646 B, 4 LODs, all five C4 markers | **43.8 s** (75.6–78.7 s measured on four earlier runs) |
+| `asset_build` | ODOL v55, 58,646 B, 4 LODs, all five C4 markers | **0.1 s** in `binarize`, from a drive letter of its own (from the folder itself: 650.8 s the same day, 43.8 s and 75.6–78.7 s on earlier runs) |
 | `asset_check` | 1 model and 10 texture pairs judged | milliseconds |
 | `asset_convert` | one PNG to DXT1, 50,764 B | 0.52 s |
 | a refusal on a wrong root | before any process is started | **0.0003 s** |
@@ -906,10 +936,20 @@ than the item's last update -- as the one fact derived from both.
   stable.** Rebuilding a model that nobody edited produced an artifact one byte
   larger than the shipped one, with the same kind, the same LOD count and the
   same fifty strings — and a different digest, because the size is part of it.
+  The step is not always that small: of five rebuilds in a row of another
+  unchanged model, four landed within three bytes of each other and one came
+  out 230 bytes larger, with the same LODs and the same strings.
   So C12 can warn about a rebuild that changed nothing. It warns rather than
   refuses for exactly this reason, and the parts it is built from are reported
   beside it so the comparison can be made by hand. Splitting the digest into a
   stable half and a size is the obvious refinement and is not done.
+* **A build that is killed outright leaves its drive letter behind.**
+  `asset_build` maps a letter onto the model root for the run and removes it
+  when the run is over. If the server process itself is killed in between, the
+  letter stays until the next logon (`subst Z: /D` removes it by hand). The
+  next build takes another letter instead of borrowing that one, because a
+  letter that already points at the same root may just as well be a build in
+  flight in another server, and nothing tells the two apart.
 * **A partial export warns; it does not refuse.** With the exporter's own
   default arguments a model came out carrying 2 of its 5 LODs and passing every
   other check. This server does not pass those arguments, so it should not
