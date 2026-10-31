@@ -883,6 +883,167 @@ def test_build_project_names_a_missing_given_tokens_path_in_the_refusal(tmp_path
         build_project(root, ["MyMod"], {}, write=True, tokens_path=root / "shared" / "tokens.json")
 
 
+#: A second tokens file, layered over TOKENS: a colour TOKENS has is overridden
+#: (`accent`) and one is added (`wood`), a font is added, a group neither
+#: shares is added (`card`), and one entry of a group BOTH carry is overridden
+#: (`device.rail`) while its siblings stay.
+OVERLAY = {
+    "color": {"accent": [1, 0, 0, 1], "wood": [0.4, 0.26, 0.13, 1]},
+    "font": {"card_title": {"face": "gui/fonts/MetronBook14", "size": 22}},
+    "card": {"size": [240, 120], "pad": 8},
+    "device": {"rail": 80},
+}
+#: A page that builds only when both files were read: `$card.*` and the
+#: `card_title` font exist only in OVERLAY, and `$accent` means a different
+#: colour in each.
+LAYERED_PAGE = {"layout": "my_page",
+                "root": {"frame": {"name": "MyPage", "size": "$card.size", "inset": "$card.pad"}},
+                "body": {"label": {"name": "Title", "h": 30, "text": "Hello", "color": "$accent", "font": "card_title"}}}
+BOTH = ["ui/tokens.json", "ui/overlay.json"]
+
+
+def layered_project(tmp_path: Path) -> Path:
+    """`project()`, with the page that needs the second file, and that file."""
+    root = project(tmp_path)
+    (root / "ui" / "MyMod" / "my_page.json").write_text(json.dumps(LAYERED_PAGE), encoding="utf-8")
+    (root / "ui" / "overlay.json").write_text(json.dumps(OVERLAY), encoding="utf-8")
+    return root
+
+
+def built_page(root: Path) -> str:
+    return (root / "MyMod" / "gui" / "layouts" / "my_page.layout").read_text(encoding="utf-8")
+
+
+def test_a_later_tokens_file_adds_names_and_overrides_same_named_entries():
+    t = tokens()
+    t.overlay(Tokens.from_text(json.dumps(OVERLAY), "ui/overlay.json"))
+    # colours and fonts: the later file's entry wins, the rest of the earlier set stays
+    assert t.color["accent"] == [1.0, 0.0, 0.0, 1.0] and t.color["wood"] == [0.4, 0.26, 0.13, 1.0]
+    assert t.color["panel"] == tokens().color["panel"] and len(t.color) == len(TOKENS["color"]) + 1
+    assert t.font["card_title"] == {"face": "gui/fonts/MetronBook14", "size": 22.0, "fixed": False}
+    assert t.font["body"] == tokens().font["body"] and len(t.font) == len(TOKENS["font"]) + 1
+    # a group only one of the files has is kept as it is
+    assert t.space == tokens().space and t.size == tokens().size
+    assert t.groups["card"] == {"size": [240, 120], "pad": 8}
+    # a group both files carry merges entry by entry
+    assert t.groups["device"] == {"page": [1306, 518], "iconset": "my_icons", "rail": 80}
+    # and the readers see the merged set
+    assert t.color_of("$accent", "f", "n")[0] == [1.0, 0.0, 0.0, 1.0]
+    assert t.font_of("$card_title", "f", "n")[0]["size"] == 22.0
+    assert t.pair("$card.size", "f", "n") == (240.0, 120.0)
+    assert t.number("$card.pad", "f", "n") == 8.0 and t.number("$device.rail", "f", "n") == 80.0
+    assert t.pair("$device.page", "f", "n") == (1306.0, 518.0)
+
+
+def test_an_overriding_entry_replaces_the_whole_entry_not_its_fields():
+    """A font spec is one entry: the later file's `field` does not inherit the
+    earlier one's face or `fixed`. What it leaves out is the default, exactly
+    as in a file of its own."""
+    t = tokens()
+    assert t.font["field"] == {"face": "gui/fonts/MetronBook14", "size": 14.0, "fixed": True}
+    t.overlay(Tokens.from_text('{"font": {"field": {"size": 20}}}', "ui/overlay.json"))
+    assert t.font["field"] == {"face": layoutgen.FONT_FACE_DEFAULT, "size": 20.0, "fixed": False}
+
+
+def test_build_project_layers_a_list_of_tokens_files_in_order(tmp_path):
+    root = layered_project(tmp_path)
+    # Only the first file: the page names things that file has never heard of.
+    with pytest.raises(LayoutGenError, match=r"ui/MyMod/my_page\.json root"):
+        build_project(root, ["MyMod"], {}, write=False)
+    report = build_project(root, ["MyMod"], {}, write=True, tokens_path=BOTH)
+    assert report.written == ["MyMod/gui/layouts/my_page.layout"]
+    text = built_page(root)
+    assert "\n size 240 120\n" in text  # $card.size: a group only the second file has
+    assert "   position 8 8\n   size 224 30\n" in text  # $card.pad, from the same group
+    assert "   color 1 0 0 1\n" in text  # $accent: the second file's, not the first's
+    assert '   font "gui/fonts/MetronBook14"\n' in text and '   "exact text size" 22\n' in text
+    assert clean(text) == []
+    # The order is the meaning: swapped, the first file's colour is the later one.
+    swapped = build_project(root, ["MyMod"], {}, write=False, tokens_path=["ui/overlay.json", "ui/tokens.json"])
+    swapped_text = swapped.files["MyMod/gui/layouts/my_page.layout"]
+    assert "   color 0.31 0.71 0.91 1\n" in swapped_text and "\n size 240 120\n" in swapped_text
+
+
+def test_a_one_entry_list_builds_what_the_string_form_does(tmp_path):
+    root = project(tmp_path)
+    by_default = build_project(root, ["MyMod"], {}, write=False)
+    as_string = build_project(root, ["MyMod"], {}, write=False, tokens_path="ui/tokens.json")
+    as_list = build_project(root, ["MyMod"], {}, write=False, tokens_path=["ui/tokens.json"])
+    assert by_default.files and by_default.files == as_string.files == as_list.files
+
+
+def test_tokens_list_entries_are_absolute_or_relative_to_the_root_like_the_single_path(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    root = layered_project(proj)
+    outside = tmp_path / "shared" / "overlay.json"
+    outside.parent.mkdir()
+    outside.write_text(json.dumps(OVERLAY), encoding="utf-8")
+    (root / "ui" / "overlay.json").unlink()
+    report = build_project(root, ["MyMod"], {}, write=False, tokens_path=[root / "ui" / "tokens.json", str(outside)])
+    assert "\n size 240 120\n" in report.files["MyMod/gui/layouts/my_page.layout"]
+    # a file outside the project is named by its full path, one inside by its path from the root
+    outside.write_text('{"color": {"bad": [1]}}', encoding="utf-8")
+    with pytest.raises(LayoutGenError) as caught:
+        build_project(root, ["MyMod"], {}, write=False, tokens_path=["ui/tokens.json", outside])
+    assert caught.value.file == str(outside) and str(caught.value).startswith(f"{outside}: color.bad must be")
+
+
+def test_a_bad_entry_in_a_tokens_file_names_the_file_that_holds_it(tmp_path):
+    root = layered_project(tmp_path)
+    overlay = root / "ui" / "overlay.json"
+    overlay.write_text('{"color": {"fine": [1, 1, 1, 1], "bad": [1, 2]}}', encoding="utf-8")
+    with pytest.raises(LayoutGenError) as caught:
+        build_project(root, ["MyMod"], {}, write=True, tokens_path=BOTH)
+    assert caught.value.file == "ui/overlay.json"
+    assert str(caught.value) == "ui/overlay.json: color.bad must be four numbers 0..1"
+    assert not (root / "MyMod" / "gui").exists()
+    # the same entry checks as in a file of its own: font, space, a group's entry, JSON itself
+    for text, message in (('{"font": {"h": "big"}}', "font.h must be"),
+                          ('{"space": {"page": "20"}}', "space.page must be a number"),
+                          ('{"card": {"pad": [1]}}', "card.pad must be a number, a [w, h] pair or a string"),
+                          ('{"card": 5}', "card must be an object"),
+                          ("{", "tokens do not parse")):
+        overlay.write_text(text, encoding="utf-8")
+        with pytest.raises(LayoutGenError) as caught:
+            build_project(root, ["MyMod"], {}, write=True, tokens_path=BOTH)
+        assert caught.value.file == "ui/overlay.json" and message in str(caught.value), text
+    # the first file is named the same way, and a later file does not make up for it
+    overlay.write_text('{"space": {"page": 20}}', encoding="utf-8")
+    (root / "ui" / "tokens.json").write_text('{"space": {"page": "20"}}', encoding="utf-8")
+    with pytest.raises(LayoutGenError) as caught:
+        build_project(root, ["MyMod"], {}, write=True, tokens_path=BOTH)
+    assert caught.value.file == "ui/tokens.json" and "space.page must be a number" in str(caught.value)
+
+
+def test_a_missing_file_of_a_tokens_list_is_named(tmp_path):
+    root = layered_project(tmp_path)
+    (root / "ui" / "overlay.json").unlink()
+    with pytest.raises(LayoutGenError, match=r"ui/overlay\.json is missing but ui/<Mod>/ exists") as caught:
+        build_project(root, ["MyMod"], {}, write=True, tokens_path=BOTH)
+    assert caught.value.file == "ui/overlay.json"
+
+
+def test_build_project_refuses_an_empty_tokens_list(tmp_path):
+    root = project(tmp_path)
+    with pytest.raises(LayoutGenError, match="names no tokens file"):
+        build_project(root, ["MyMod"], {}, write=True, tokens_path=[])
+
+
+def test_main_builds_from_a_profile_with_a_tokens_list(tmp_path, capsys):
+    root = layered_project(tmp_path)
+    (root / "dayz-mcp.toml").write_text(
+        '[project]\nname = "my-mod"\n\n[build]\nmods = ["MyMod"]\ntokens = ["ui/tokens.json", "ui/overlay.json"]\n',
+        encoding="utf-8")
+    (root / "MyMod" / "config.cpp").write_text("class CfgPatches { };\n", encoding="utf-8")
+    assert layoutgen.main([str(root)]) == 0
+    assert "wrote MyMod/gui/layouts/my_page.layout" in capsys.readouterr().out
+    assert "   color 1 0 0 1\n" in built_page(root)
+    (root / "ui" / "overlay.json").write_text('{"space": {"gap": "wide"}}', encoding="utf-8")
+    assert layoutgen.main([str(root)]) == 1
+    assert "refused: ui/overlay.json: space.gap must be a number" in capsys.readouterr().out
+
+
 def test_main_refuses_an_unknown_mod_and_builds_a_known_one(tmp_path, capsys):
     root = project(tmp_path)
     (root / "dayz-mcp.toml").write_text('[project]\nname = "my-mod"\n\n[build]\nmods = ["MyMod"]\n', encoding="utf-8")

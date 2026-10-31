@@ -59,7 +59,12 @@ def _generated_layout_findings(prof, mods: list[str]) -> list:
     the file is behind the description (layout-stale, refuse -- mod_build
     would ship stale geometry); a file says it is generated but nothing
     generates it (layout-orphan, warn); a description does not build or
-    raised a note (layout-desc: refuse / warn)."""
+    raised a note (layout-desc: refuse / warn).
+
+    Nothing is hashed: the layout is rebuilt in memory from the same tokens
+    `layout_build` reads -- every file of a `build.tokens` list, merged -- and
+    its text compared, so an edit to ANY of those files that reaches the
+    page shows up as layout-stale, and one that reaches nothing does not."""
     out = []
     try:
         report = build_project(prof.root, mods, prof.build.sources, write=False, tokens_path=prof.build.tokens)

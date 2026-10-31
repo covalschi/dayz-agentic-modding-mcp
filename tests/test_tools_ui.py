@@ -1643,6 +1643,38 @@ def test_layout_build_generates_the_project_layouts(tmp_path):
     assert tools.layout_build(mod="Other").ok is False
 
 
+def test_layout_build_layers_a_list_of_tokens_files(tmp_path):
+    """`[build] tokens` may be a list: later files add names to the set and
+    override same-named entries, and `layout_build` reads the merged set."""
+    root = make_project(tmp_path / "proj")
+    (root / "dayz-mcp.toml").write_text(
+        textwrap.dedent(PROFILE).replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ["ui/tokens.json", "ui/own.json"]'),
+        encoding="utf-8")
+    (root / "ui").mkdir()
+    (root / "ui" / "tokens.json").write_text(json.dumps({"color": {"text": [1, 1, 1, 1]}, "font": {"body": {"size": 15}}}), encoding="utf-8")
+    (root / "ui" / "own.json").write_text(json.dumps({"color": {"text": [1, 0, 0, 1], "gold": [1, 0.8, 0, 1]},
+                                                      "font": {"big": {"size": 30}}}), encoding="utf-8")
+    (root / "ui" / "MyMod").mkdir()
+    (root / "ui" / "MyMod" / "my_page.json").write_text(json.dumps(
+        {"layout": "my_page", "root": {"frame": {"name": "R", "size": [100, 100]}},
+         "body": {"vbox": {"children": [
+             {"label": {"name": "A", "h": 20, "text": "Hi", "color": "$gold", "font": "big"}},
+             {"label": {"name": "B", "h": 20, "text": "Hi"}}]}}}), encoding="utf-8")
+    assert tools.project_open(str(root)).ok
+    res = tools.layout_build()
+    assert res.ok, res.error
+    assert res.data["written"] == ["MyMod/gui/layouts/my_page.layout"]
+    text = (root / "MyMod" / "gui" / "layouts" / "my_page.layout").read_text(encoding="utf-8")
+    assert "   color 1 0.8 0 1\n" in text and '   "exact text size" 30\n' in text  # added by the second file
+    assert "   color 1 0 0 1\n" in text  # `$text`, the default of B, as the second file overrides it
+    assert "   color 1 1 1 1\n" not in text
+    assert tools.layout_build().data["unchanged"] == ["MyMod/gui/layouts/my_page.layout"]
+    # a bad entry in the second file refuses by that file's name and writes nothing new
+    (root / "ui" / "own.json").write_text('{"font": {"big": {"size": "huge"}}}', encoding="utf-8")
+    res = tools.layout_build()
+    assert not res.ok and "refused: ui/own.json: font.big must be" in res.error
+
+
 def test_layout_build_refuses_with_the_description_and_node(tmp_path):
     root = make_project(tmp_path / "proj")
     (root / "ui").mkdir()

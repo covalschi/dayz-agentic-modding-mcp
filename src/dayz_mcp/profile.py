@@ -60,8 +60,13 @@ class BuildCfg:
     # <root>/ui/tokens.json -- absolute, or relative to this file. Unlike
     # project_root, an absolute value is allowed: unlike a model's prefix
     # tree, a tokens file has no path baked into anything downstream that
-    # would make one machine's absolute path wrong on another.
-    tokens: str = f"{UI_DIR}/{TOKENS_FILE}"
+    # would make one machine's absolute path wrong on another. A LIST of such
+    # paths layers several files in the order written: a later file adds
+    # names and overrides same-named entries of an earlier one, so a mod can
+    # keep its own colours and fonts over a palette it shares. A string stays
+    # a string and a list a list -- the generator takes both, and a string is
+    # not wrapped into a one-entry list on the way.
+    tokens: str | list[str] = f"{UI_DIR}/{TOKENS_FILE}"
 
 
 @dataclass
@@ -282,10 +287,17 @@ def load_profile(path: str | Path) -> Result:
                     hint='e.g. layout_classes = ["MyMapWidgetClass"]')
 
     tokens_val = b.get("tokens", BuildCfg.tokens)
-    if not isinstance(tokens_val, str) or not tokens_val:
+    if isinstance(tokens_val, list):
+        tokens_ok = bool(tokens_val) and all(isinstance(x, str) and x for x in tokens_val)
+    else:
+        tokens_ok = isinstance(tokens_val, str) and bool(tokens_val)
+    if not tokens_ok:
         return fail(
-            f"build.tokens must be a non-empty string, got {tokens_val!r}",
-            hint='write it as tokens = "ui/tokens.json" (the default), or drop the key',
+            f"build.tokens must be a non-empty string or a non-empty list of non-empty strings, "
+            f"got {tokens_val!r}",
+            hint='write it as tokens = "ui/tokens.json" (the default), or as a list layered in '
+                 'order, a later file over an earlier one: tokens = ["ui/tokens.json", '
+                 '"ui/own.json"]; or drop the key',
         )
 
     build = BuildCfg(

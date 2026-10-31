@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,7 +70,11 @@ def _is_pair(value) -> bool:
 @dataclass
 class Tokens:
     """The tokens file (`ui/tokens.json` by default, `build.tokens` to move
-    it): the numbers, colours and fonts written once.
+    it): the numbers, colours and fonts written once. `build.tokens` may be a
+    LIST of files instead, laid over one another in order (`overlay`) so a
+    mod can keep its own colours and fonts over a palette it shares: this
+    class is one file, or the merged set of several, and nothing downstream
+    can tell which.
 
     `color`/`font`/`space`/`size` are the four fixed groups. `device` is no
     longer the one group with no fixed shape of its own -- every further
@@ -153,6 +158,25 @@ class Tokens:
         if not path.is_file():
             raise LayoutGenError(f"{label} is missing", label)
         return cls.from_text(path.read_text(encoding="utf-8"), label)
+
+    def overlay(self, later: "Tokens") -> None:
+        """Lay `later` over this set, entry by entry: within every group
+        (`color`, `font`, `space`, `size` and each further group a file names)
+        `later` adds the names this set lacks and overrides the same-named
+        entries; a group only one of the two has is kept as it is.
+
+        An entry is replaced whole -- a font `later` redefines does not
+        inherit the face or the `fixed` of the one it replaces -- because an
+        entry is validated, and its defaults filled in, as a unit by
+        `from_text` in the file that holds it. This is how `build.tokens` as a
+        LIST is read: an empty `Tokens` overlaid with each file in turn, so
+        the file named last wins."""
+        self.color.update(later.color)
+        self.font.update(later.font)
+        self.space.update(later.space)
+        self.size.update(later.size)
+        for gname, entries in later.groups.items():
+            self.groups.setdefault(gname, {}).update(entries)
 
     def number(self, value, file: str, node: str, what: str = "size") -> float:
         """A number, or a `$space.<name>` / `$size.<name>` / `$<group>.<name>`
@@ -1536,8 +1560,39 @@ class BuildReport:
     sources: dict[str, str] = field(default_factory=dict)
 
 
+def _tokens_files(root: Path, tokens_path) -> list[tuple[Path, str]]:
+    """The tokens files of a build in the order they are layered, each as
+    (path on disk, the label its errors name).
+
+    `None` is the default `ui/tokens.json`; a path is `[build] tokens` as a
+    string and a non-empty list of paths is `[build] tokens` as a list.
+    Every path is absolute or relative to `root`, and its label is the path
+    from `root` when the file lies inside the project -- not the machine's
+    own absolute path to it -- and the full path when it lies outside."""
+    if tokens_path is None:
+        given = [root / UI_DIR / TOKENS_FILE]
+    elif isinstance(tokens_path, (str, Path)):
+        given = [tokens_path]
+    else:
+        given = list(tokens_path)
+        if not given:
+            raise LayoutGenError("the tokens list names no tokens file -- give at least one")
+    files = []
+    for item in given:
+        path = Path(item)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            label = path.relative_to(root).as_posix()
+        except ValueError:
+            label = str(path)
+        files.append((path, label))
+    return files
+
+
 def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
-                  write: bool = True, tokens_path: str | Path | None = None) -> BuildReport:
+                  write: bool = True,
+                  tokens_path: str | Path | Sequence[str | Path] | None = None) -> BuildReport:
     """Generate every description under `<root>/ui/<Mod>/` for `mods`.
 
     Generation completes for every file before anything is written, so a bad
@@ -1546,7 +1601,13 @@ def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
     reads as unchanged.
 
     `tokens_path` names `ui/tokens.json` (the default, `None`) or wherever
-    `[build] tokens` points instead -- absolute, or relative to `root`.
+    `[build] tokens` points instead -- absolute, or relative to `root`. A
+    LIST of paths names several files: they are read in order and merged
+    entry by entry (`Tokens.overlay`), a later file adding names and
+    overriding same-named entries of an earlier one. Every caller that passes
+    `[build] tokens` through here -- layout_build, mod_lint's layout-stale
+    rebuild, the command line -- therefore reads the same merged set, and an
+    error names the file that holds the bad entry.
     """
     root = Path(root)
     report = BuildReport()
@@ -1554,19 +1615,15 @@ def build_project(root, mods: list[str], sources: dict[str, str], mod: str = "",
     dirs = [(m, root / UI_DIR / m) for m in wanted if (root / UI_DIR / m).is_dir()]
     if not dirs:
         return report
-    tokens_file = Path(tokens_path) if tokens_path is not None else root / UI_DIR / TOKENS_FILE
-    if not tokens_file.is_absolute():
-        tokens_file = root / tokens_file
-    try:
-        tokens_label = tokens_file.relative_to(root).as_posix()
-    except ValueError:
-        tokens_label = str(tokens_file)
-    # `Tokens.load`'s own message only names the path -- this caller is the
-    # one that knows a ui/<Mod>/ already exists (checked above, via `dirs`),
-    # so it is the one that says a tokens file is missing DESPITE that.
-    if not tokens_file.is_file():
-        raise LayoutGenError(f"{tokens_label} is missing but {UI_DIR}/<Mod>/ exists", tokens_label)
-    tokens = Tokens.load(tokens_file, tokens_label)
+    tokens = Tokens()
+    for tokens_file, tokens_label in _tokens_files(root, tokens_path):
+        # `Tokens.load`'s own message only names the path -- this caller is the
+        # one that knows a ui/<Mod>/ already exists (checked above, via
+        # `dirs`), so it is the one that says a tokens file is missing DESPITE
+        # that. Read in order, so the first file at fault is the one named.
+        if not tokens_file.is_file():
+            raise LayoutGenError(f"{tokens_label} is missing but {UI_DIR}/<Mod>/ exists", tokens_label)
+        tokens.overlay(Tokens.load(tokens_file, tokens_label))
     for m, ui_dir in dirs:
         for path in sorted(ui_dir.glob("*.json")):
             rel = path.relative_to(root).as_posix()

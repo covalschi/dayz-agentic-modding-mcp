@@ -231,6 +231,61 @@ def test_a_layout_behind_its_description_refuses_with_the_line(tmp_path):
     assert stale[0]["line"] > 1 and stale[0]["hint"] == "run layout_build and commit the result"
 
 
+def with_layered_tokens(root: Path, own: dict) -> None:
+    """`with_ui`'s tokens file plus a second one, `ui/own.json`, named by the
+    profile: the page's label is `$text`, which `own` may override."""
+    (root / "ui" / "own.json").write_text(_json.dumps(own), encoding="utf-8")
+    (root / "dayz-mcp.toml").write_text(
+        textwrap.dedent(PROFILE).replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ["ui/tokens.json", "ui/own.json"]'),
+        encoding="utf-8")
+    opened = tools.project_open(str(root))
+    assert opened.ok, opened.error
+
+
+def test_a_change_in_the_second_tokens_file_makes_a_generated_layout_stale(tmp_path):
+    """The lint hashes nothing: it rebuilds the layout in memory from the very
+    tokens set `layout_build` reads and compares the text. So the second file
+    of a list is seen exactly if that rebuild reads it, and this is what pins
+    that it does -- and that it reads the MERGED set, not "any file changed"."""
+    root = tmp_path / "proj"
+    open_with(root, {})
+    with_ui(root)
+    with_layered_tokens(root, {"color": {"text": [1, 0, 0, 1]}})
+    assert tools.layout_build().ok
+    built = root / "MyMod" / "gui" / "layouts" / "my_page.layout"
+    assert "   color 1 0 0 1\n" in built.read_text(encoding="utf-8")  # the second file's red, not the first's white
+    assert by_check(tools.mod_lint(), "layout-stale") == []
+    # the second file changes a colour the page uses
+    (root / "ui" / "own.json").write_text(_json.dumps({"color": {"text": [0, 1, 0, 1]}}), encoding="utf-8")
+    stale = by_check(tools.mod_lint(), "layout-stale")
+    assert len(stale) == 1 and stale[0]["severity"] == REFUSE
+    assert "is behind ui/MyMod/my_page.json" in stale[0]["message"]
+    assert stale[0]["file"] == "MyMod/gui/layouts/my_page.layout" and stale[0]["line"] > 1
+    assert tools.layout_build().ok
+    assert by_check(tools.mod_lint(), "layout-stale") == []
+    # an entry nothing in the page reads leaves it fresh ...
+    (root / "ui" / "own.json").write_text(_json.dumps({"color": {"text": [0, 1, 0, 1], "unused": [0, 0, 1, 1]}}), encoding="utf-8")
+    assert by_check(tools.mod_lint(), "layout-stale") == []
+    # ... and so does a change to the FIRST file's entry that the second one overrides
+    (root / "ui" / "tokens.json").write_text(_json.dumps({**TOKENS_MIN, "color": {"text": [0.5, 0.5, 0.5, 1]}}), encoding="utf-8")
+    assert by_check(tools.mod_lint(), "layout-stale") == []
+    # whereas a change to the first file that reaches the page does make it stale
+    (root / "ui" / "tokens.json").write_text(_json.dumps({**TOKENS_MIN, "font": {"body": {"size": 21}}}), encoding="utf-8")
+    assert len(by_check(tools.mod_lint(), "layout-stale")) == 1
+
+
+def test_a_bad_entry_in_the_second_tokens_file_refuses_naming_that_file(tmp_path):
+    root = tmp_path / "proj"
+    open_with(root, {})
+    with_ui(root)
+    with_layered_tokens(root, {"color": {"text": [1, 2]}})
+    res = tools.mod_lint()
+    desc = by_check(res, "layout-desc")
+    assert len(desc) == 1 and desc[0]["severity"] == REFUSE
+    assert desc[0]["file"] == "ui/own.json" and "color.text must be four numbers 0..1" in desc[0]["message"]
+    assert not res.ok
+
+
 def test_a_generated_file_with_no_description_warns(tmp_path):
     open_with(tmp_path / "proj", {})
     root = tmp_path / "proj"

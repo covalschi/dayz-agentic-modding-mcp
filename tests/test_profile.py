@@ -633,13 +633,27 @@ def test_tokens_path_defaults_to_ui_tokens_json_and_is_overridable(tmp_path):
     assert load_profile(write(tmp_path, main)).data.build.tokens == "shared/tokens.json"
 
 
-def test_tokens_path_must_be_a_non_empty_string(tmp_path):
-    r = load_profile(write(tmp_path, BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = 3')))
-    assert not r.ok
-    assert "build.tokens must be a non-empty string" in r.error
-    r = load_profile(write(tmp_path, BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ""')))
-    assert not r.ok
-    assert "build.tokens must be a non-empty string" in r.error
+def test_tokens_may_be_a_list_of_paths_kept_in_the_order_written(tmp_path):
+    """A list layers several tokens files (a later one over an earlier one),
+    so the profile hands the generator the list exactly as written -- the
+    order IS the meaning. A string stays a string; it is not wrapped."""
+    main = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ["shared/tokens.json", "ui/own.json"]')
+    r = load_profile(write(tmp_path, main))
+    assert r.ok, r.error
+    assert r.data.build.tokens == ["shared/tokens.json", "ui/own.json"]
+    main = BASE.replace('mods = ["MyMod"]', 'mods = ["MyMod"]\ntokens = ["/shared/tokens.json"]')
+    assert load_profile(write(tmp_path, main)).data.build.tokens == ["/shared/tokens.json"]
+
+
+def test_tokens_must_be_a_non_empty_string_or_a_non_empty_list_of_them(tmp_path):
+    """The refusal names BOTH accepted forms: a reader who wrote the wrong one
+    must not be left guessing that the other exists."""
+    for bad in ("3", '""', "[]", '[""]', '["ui/tokens.json", 3]', '["ui/tokens.json", ""]',
+                '[["ui/tokens.json"]]', "true", '{ file = "ui/tokens.json" }'):
+        r = load_profile(write(tmp_path, BASE.replace('mods = ["MyMod"]', f'mods = ["MyMod"]\ntokens = {bad}')))
+        assert not r.ok, bad
+        assert "build.tokens must be a non-empty string or a non-empty list of non-empty strings" in r.error, bad
+        assert "tokens = [" in r.hint, bad
 
 
 def test_machine_window_is_two_positive_integers(tmp_path):

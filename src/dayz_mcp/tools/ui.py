@@ -1205,6 +1205,11 @@ def ui_gallery(index: str = "preview/index.json", sizes: list[list[int]] | None 
 def layout_build(mod: str = "") -> Result:
     """Generate every .layout described under `ui/<Mod>/` from the project's
     tokens file (`ui/tokens.json` unless `build.tokens` says otherwise).
+    `build.tokens` may be a list of files instead: they are read in order
+    and merged entry by entry -- within every group a later file adds names
+    and overrides same-named entries -- so a mod can keep its own colours
+    and fonts over a palette it shares; an error names the file that holds
+    the bad entry.
 
     A description is one JSON file per layout (spec 2026-09-04 §3.3): a page
     is containers and tokens, and every number the engine cannot derive --
