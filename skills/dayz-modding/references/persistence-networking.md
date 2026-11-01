@@ -194,7 +194,7 @@ class MyModPlayerData
 {
     int Version = 1;
     int ResearchPoints;
-    ref map<string, int> BranchProgress = new map<string, int>();   // a map in JSON: untested here, see "JSON notes"
+    ref map<string, int> BranchProgress = new map<string, int>();   // a map in JSON: round-trips, see "JSON notes"
 }
 
 // 4_World/5_Mission — manager singleton on server:
@@ -300,9 +300,11 @@ Client stores it into `s_Instance`. Version field + migration keeps old JSONs wo
 follow Expansion's `m_Version` bump pattern.
 
 JSON notes: `JsonFileLoader<T>` (de)serializes public non-static fields, including nested
-`ref` classes and arrays. Maps with string keys are untested here: vanilla
-`1_core/proto/serializer.c` documents map support, but every production config examined for this skill
-uses an array of `{key, value}` records instead (see "Persistent id is read-only"). Mark
+`ref` classes and arrays. Maps with string keys round-trip (measured 2026-11-01, DayZ
+1.30.164200, a stand mod): `map<string,int>`, `map<string,string>` and `map<string, ref T>`
+save as JSON objects (`{"MI":{"beta":2,"alpha":1}}`) and `LoadFile` restores them. Every
+production config examined for this skill still uses an array of `{key, value}` records (see
+"Persistent id is read-only"). Mark
 runtime-only fields `[NonSerialized()]`.
 `$profile:` = the server's `-profiles=` directory — the standard place admins expect to edit.
 
@@ -980,8 +982,8 @@ server".
   every player seeing every other player stand still. File loads belong at mission start or
   behind a player action with a size cap, never on a per-frame or per-save path; a JSON that
   grows with the player base is a freeze that grows with the player base. Part of the cost
-  may be `JsonLoadFile`'s own line-by-line string building (likely, not measured: see "JSON
-  I/O is not the slow part" below).
+  is `JsonLoadFile`'s own line-by-line string building (measured 2026-11-01: see "JSON I/O is
+  not the slow part" below).
 - **Scripted lights run their full visual logic on a dedicated server:** `ScriptedLightBase.EOnFrame`
   (dancing shadows, flicker, brightness/radius fading, daylight pulse) took 26 % of the live
   main thread inclusive with 60 players' lights, and ZombFix's light "optimization" layer added
@@ -1160,7 +1162,11 @@ retail client windowed in the background (19 fps).
   builds its text line by line, `while (FGets(...) >= 0) file_content += line_content;`
   (`3_game/tools/jsonfileloader.c:105-130`), copying the growing string once per line --
   quadratic in the line count of a pretty-printed file. Time `JsonLoadFile` itself before
-  blaming file size; switching to `LoadFile` helps either way.
+  blaming file size; switching to `LoadFile` helps either way. Measured 2026-11-01 (DayZ
+  1.30.164200, a stand mod, `TickCount`, pretty-printed `SaveFile` output of 250-2000
+  records): `LoadFile` 1.3 / 1.5 / 2.8 / 4.6 ms for 47 / 96 / 192 / 390 KB (2.5k / 5k / 10k /
+  20k lines); `JsonLoadFile` 14 / 50 / 181 / 672 ms on the same files -- x3.5-3.7 per
+  doubling, quadratic as read.
 - **The engine autosaves continuously while a player is connected**: `storage_1/data/
   dynamic_00N.bin` is rewritten round-robin, one file per second. A crate with 5000 items
   created at runtime survived `taskkill` + restart with all 5000 (they had been autosaved
@@ -1443,11 +1449,14 @@ re-key when it rebuilds an item rather than expecting the id to travel with it.
 Related engine limit: `JsonFileLoader` cuts every JSON string VALUE at 1023 bytes (pinned
 2026-08-28, see "A long string inside a JSON field arrives TRUNCATED"; seen again here
 2026-08-30 with envelope 2925 / body 1023), so a nested document or a base64 blob cannot
-travel as one string -- chunk it, or keep values as short scalars. `map<K,V>` is reported
-not to survive RPC serialization (stated here without a probe; the community report is
-about `map<string, ref T>`, patterns-cookbook.md / CannabisPlus), and its behaviour under
-`JsonFileLoader` is untested here; vanilla `1_core/proto/serializer.c` documents map support
-(its example writes a `map<string, float>`). Production mods (MapLink's UniversalAPI and
+travel as one string -- chunk it, or keep values as short scalars. Maps do survive RPC
+on 1.30.164200 (measured 2026-11-01, a stand mod, server to client): `ScriptRPC.Write` of a
+`map<string,int>` and of a `map<string,string>` returns true and `ctx.Read` restores both;
+`Param2<ref map<string,int>, ref map<string,string>>` and `Param1<ref map<string, ref T>>`
+(T holding a string, an int, a float and an `array<int>`) arrive intact; `JsonFileLoader`
+round-trips all three ("JSON notes"). The community report of a broken `map<string, ref T>`
+(patterns-cookbook.md / CannabisPlus) was not reproduced; vanilla `1_core/proto/serializer.c`
+documents map support (its example writes a `map<string, float>`). Production mods (MapLink's UniversalAPI and
 others) all use an array of `{key, value}` records instead -- and an array of
 RECORDS, never several parallel arrays, which carry an index invariant nothing enforces.
 

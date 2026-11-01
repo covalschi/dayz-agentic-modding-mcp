@@ -44,9 +44,10 @@ Rules (community-documented format; exercised by the shipped example layouts):
   center_ref` + exact pos `0 0` — NOT proportional `position 0.5 0.5` (that puts the
   top-left corner at screen center).
 - **`priority`** = z-order among SIBLINGS only (children always render above parent).
-  Use 998–999 for modal roots -- but NOT for a root that holds an `ItemPreviewWidget`:
-  §13 measured the 3D model vanishing at 300+ on the preview or an ancestor (keep such roots
-  under ~256 until §13's ancestor rule is re-measured).
+  Use 998–999 for modal roots. A root that holds an `ItemPreviewWidget` can sit that high
+  too if the preview's OWN priority is 201, as in vanilla's tooltip (§13, re-measured
+  2026-11-01: at 201 the model drew under every root from 1 to 998; at 300+ it never drew;
+  below 100 it vanished as soon as any ancestor was at 100+).
 - **Multi-word attribute names MUST be quoted**: `"exact text" 1`, `"exact text size" 14`,
   `"bold text" 1`, `"text halign" center` — unquoted silently fails.
 - **Colors** are 4 floats 0–1 in layouts (`color 0.09 0.09 0.09 0.9`) but `0xAARRGGBB` int
@@ -115,15 +116,16 @@ Gotchas:
   clamps the canvas (`if (want < 430) want = 430; rows.SetSize(w, want)`) the bar renders
   as a permanent full-height white thumb even for one row; dropping the clamp
   (`rows.SetSize(w, rowsY)`) makes the bar disappear whenever content fits.
-- **`style "DayZButton"` paints its own graphic OVER the button's children** (measured
-  live 2026-08-29/30, a stand mod's close button): any child Panel/Text inside such a button is
-  invisible. For a button with a text glyph, drop the style and build Edge/Bg/Text
-  children by hand. (Note 2026-11-01: no style named `DayZButton` is defined in vanilla
-  `dayzwidgets.styles`, 1.29 or 1.30 -- the button styles are `Default`, `MenuDefault`,
+- **No button style hides a button's children** (re-measured 2026-11-01, DayZ 1.30.164200,
+  a stand mod at 3840x1600, a red child panel and a child TextWidget in every button).
+  `DayZDefaultButton` paints a solid white plate UNDER the children -- they stay visible --
+  and its own `text` is invisible on the plate (§24's "solid white box hiding the text").
+  `Default`, `Empty`, no style at all, and the undefined name `DayZButton` paint no
+  background: the own text and the children all show (`Empty` draws the own text in a bold
+  serif face). Vanilla `dayzwidgets.styles` (1.29, 1.30) defines `Default`, `MenuDefault`,
   `Editor`, `DayZDefaultButton*`, `DayZInventoryButton*`, `Empty`, `Colorable`,
-  `EmptyHighlight`, `DayZDigitButton`... -- so this measured the engine's fallback for an
-  unknown style name. Re-measure with `DayZDefaultButton`, which §24 saw as a solid white box
-  hiding the text.)
+  `EmptyHighlight`, `DayZDigitButton`... -- no `DayZButton`. The 2026-08-29/30 observation
+  that a `DayZButton` button hid its children was not reproduced.
 
 ### Sizing widgets from script: Set* and Get* are NOT the same units
 
@@ -321,13 +323,14 @@ OnModalResult(w,x,y,code,result)  OnEvent(eventType,target,p0,p1)
 
    Fallback if the stack is still busy: build the menu yourself, as vanilla does with
    `LoginQueueStatic` (dayzgame.c:203-210 — it calls `Init()` in its own constructor):
-   `new MyMenu(); m.SetID(id); m.Init(); GetUIManager().ShowScriptedMenu(m, NULL);` — then
-   **`OnShow()` is NOT called for you** (suspect, 2026-11-01: vanilla's inventory, built by
-   `CreateScriptedMenu` and shown by `ShowScriptedMenu`, does reach `InventoryMenu.OnShow`,
-   inventorymenu.c:105 -- re-measure with a `new`-ed menu), so a menu opened this way has no cursor, no input
-   lock and NO DATA (whatever you populate in `OnShow` stays empty). Call it manually, and
-   route closing through a helper: `Close()` only works for menus on the stack; a
-   `ShowScriptedMenu`-ed one needs `HideScriptedMenu(this)` + a manual `OnHide()`.
+   `new MyMenu(); m.SetID(id); m.Init(); GetUIManager().ShowScriptedMenu(m, NULL);`.
+   Re-measured 2026-11-01 (DayZ 1.30.164200, a stand mod): `ShowScriptedMenu` calls `Init()`
+   a SECOND time and then `OnShow()` once, synchronously, before it returns, and `GetMenu()`
+   then returns the menu; `HideScriptedMenu(m)` calls `OnHide()` and `GetMenu()` goes back to
+   null. So guard `Init()` against the second call (create the layout only while `layoutRoot`
+   is null) and do NOT call `OnShow()`/`OnHide()` yourself -- they would run twice. The older
+   note here ("`OnShow()` is NOT called for you", a menu left without data) does not hold on
+   1.30.164200; vanilla's inventory, shown the same way, reaches `InventoryMenu.OnShow` too.
 2. **`super.OnShow()` does NOT block player movement** — it only touches game-focus/cursor.
    Movement/camera are killed separately, and you must do it yourself:
    `GetGame().GetMission().AddActiveInputExcludes({"menu"})` +
@@ -596,18 +599,21 @@ Because `color` multiplies, calibrate brightness **in the layout**, not by
 regenerating the texture. For a graphite panel authored at `(28,29,33)`,
 `color 0.38 0.38 0.40 1` looked right at 1600x900.
 
-Note 2026-11-01: this conflicts with §32 (measured 2026-10-31: the UI blends in linear light
-and OPAQUE colours draw as authored, within 1-3 levels). The shot above may predate
-`mode blend` -- the additive default washes dark colours to grey (previous trap). Re-measure
-with `_ca` + `mode blend` before darkening art through `color`.
+Re-measured 2026-11-01 (DayZ 1.30.164200, a stand mod, a DXT `_ca` texture of four solid
+quadrants over a (64,64,64) panel): with `mode blend` -- and with no `mode` line at all --
+the texture drew exactly as authored, (33,32,33), (132,130,132), (198,196,198), (198,97,33)
+on screen, the same as PanelWidgets of those colours (§32 agrees). Only `mode additive`
+lightened it, adding the background in linear light: 33 over 64 came out 73, 132 came out
+145. So the darkening through `color` above compensated for additive blending; a texture
+drawn with `mode blend` needs no correction.
 
-### `style "DayZButton"` draws over its own children
+### `style "DayZButton"` does not draw over its children (re-measured 2026-11-01)
 
-A `ButtonWidgetClass` with that style paints its own art ON TOP of child
-widgets, so an active-state marker panel underneath is invisible. Drop the style
-and draw the states yourself; the button still receives `OnClick`,
-`OnMouseEnter` and `OnMouseLeave`. (Vanilla defines no `DayZButton` style -- see the
-2026-11-01 note in §2's gotchas; re-measure with `DayZDefaultButton`.)
+An earlier note said a button with that style painted its art on top of child widgets.
+Re-measured on 1.30.164200, no style does that (§2's gotchas): `DayZDefaultButton` paints a
+white plate under the children, and every other style tried paints nothing. A button keeps
+receiving `OnClick`, `OnMouseEnter` and `OnMouseLeave` whatever its style, so drawing the
+states yourself still works.
 
 ### Bezel-behind-widgets ordering
 
@@ -625,11 +631,41 @@ The single loudest trap in this file, because nothing anywhere reports it.
 sane rect in `ui_tree` — and the model is simply never drawn. No script error,
 no RPT line, no blank placeholder. Just nothing.
 
-The cause is `priority`. If the preview widget itself, or ANY of its ancestors,
-carries too high a `priority`, the engine skips the model.
+The cause is `priority` -- the preview's own and its ancestors'. Re-measured 2026-11-01
+(DayZ 1.30.164200, a stand mod, layouts created on the workspace at 3840x1600, a held item
+and an apple, 74 cells; "own" is the preview widget's priority, a chain reads
+root > middle frame):
 
-Measured on a live client, one boot per rung, same item and same position, only
-the number changed:
+| own | ancestors | model drawn |
+|---|---|---|
+| 201 | roots 1, 5, 50, 100, 200, 201, 202, 256, 257, 300, 600, 952, 998; 952 > 0, 100 > 0, 300 > 0 | yes, every one |
+| 258-299 (nine values) | root 50 | yes |
+| 100, 101, 150, 200, 255, 256, 257 | root 100 | yes |
+| 100 | 150 > 5 | yes |
+| 99, 100 | roots 256, 952 | no |
+| 1 | roots 0, 1, 2, 3, 4, 5, 6, 8, 10, 20, 50, 99; 5 > 99 | yes |
+| 1, 2, 10, 50, 99 | root 100 | no |
+| 1 | roots 256, 300, 952, 998; 100 > 0, 952 > 0; 5 > 100, 5 > 150, 150 > 5 | no |
+| 300, 600 | root 100 | no |
+| 1, 150 | 99 > 300 | no |
+
+No single threshold fits every cell (own 100 drew under 150 > 5 but not under a 256 root,
+and a background panel made no difference), but three things held every time:
+
+- **own 201 draws under anything.** Vanilla's inventory tooltip is exactly that shape: root
+  `BackPanelWidget` at 952 > frame 0 > preview `ItemFrameWidget` at 201
+  (`inventory_new/day_z_inventory_new_tooltip.layout`, filled by `itemmanager.c:574-578`).
+- **own 300+ never draws**, and neither does a preview under a middle frame at 300.
+- **own below 100 needs every ancestor below 100**: a root or a middle frame at 100+ hides it.
+
+So the rule this section opened with in 2026-08 -- "the preview or ANY ancestor at 300+
+kills it" -- is wrong: a 998 root over a 201 preview draws. The 2026-08 ladder below fits
+the own-priority rows if its root was below 100 (the root was not recorded), and the menu
+story after it fits the third rule. The `dayz` MCP's `mod_lint` check `layout-preview-priority` still encodes the old rule
+and refuses vanilla's tooltip shape (noted 2026-11-01).
+
+The 2026-08 ladder, one boot per rung, same item and same position, only the number
+changed:
 
 | `priority` | model drawn |
 |---|---|
@@ -641,18 +677,9 @@ preview in the whole menu stayed empty, including one placed outside the device
 frame and outside every clipping parent. Dropping the root to `priority 2` made
 all of them appear at once.
 
-Vanilla never goes near the boundary — its highest preview priority is 151
-(`gui/layouts/inventory_new/medium/icon.layout`). Stay under ~256 and this
-never bites.
-
-Correction 2026-11-01 (read from the 1.29 and 1.30 `gui.pbo`, not measured): vanilla does go
-past it. The inventory tooltip `inventory_new/day_z_inventory_new_tooltip.layout` (and its
-`_xbox` twin) puts the preview `ItemFrameWidget` at `priority 201` under the root
-`BackPanelWidget` at `priority 952`, and `itemmanager.c:574-578` fills it with
-`SetItem`/`SetView`; `radial_quickbar_item_card.layout` has a preview at 200. If that tooltip
-preview draws in game, the "ANY of its ancestors" half of the rule above is wrong (the deciding
-number may be the preview's own, or a top-level root's) -- re-measure before relying on it.
-The ladder itself stands.
+Vanilla's previews sit at 151 (`gui/layouts/inventory_new/medium/icon.layout`), 200
+(`radial_quickbar_item_card.layout`) and 201 (the tooltip, and its `_xbox` twin). The recipe
+that held under every root measured: give the preview itself `priority 201`.
 
 ### How to tell this apart from the other preview failures
 
@@ -1009,12 +1036,30 @@ Three facts about `MultilineEditBoxWidgetClass`, all measured on the stand:
   8.8–14.8. A reader built on that threshold
   reclassifies each `\n` as engine-wrap (glue) or human Enter (keep) by
   whether line + next char would still fit.
+- Re-measured 2026-11-01 (DayZ 1.30.164200, a stand mod's notes box 765 units wide,
+  `MetronBook14`, `"exact text" 1`, clients at 1920x1080 and 3840x1600): the box breaks a
+  typed line in two places. The first is a **200-character line cap** -- characters, not
+  bytes (a Cyrillic line broke at 200 characters, 372 bytes), whatever the width: 200 capital
+  W, 2,392 native px and twice the box, still broke at the 200th. The second is the box's
+  edge -- but **only with `"limit visible" 1`** in the layout, which vanilla's paper note
+  (`EditWidget`, `lines 15`) carries. Without it the box ignores its edge: the text runs on
+  hidden past it (characters 106-200 of every line at 1920x1080) and breaks only at 200.
+- The scale was measured directly: the same 200-character line was 1421 in the ruler at
+  1080 rows and 2105 at 1600 (2105 / 1421 = 1600 / 1080); a width ratio (2.0 at 3840x1600)
+  makes the threshold a third too wide and keeps every engine break as an Enter. `GetSize()`
+  of the exact-size box returns screen px (1133.33 = 765 x 1600/1080). With `"limit visible"
+  1` the edge break fell between `inner` and `inner + one glyph` at both sizes (1661 against
+  1674, 753 against 759), so the threshold above stands -- and a reader must also glue every
+  line that reached 200 characters, or the cap's breaks survive as Enters.
 
 One more measured cap: the edit box accepts at most **512 bytes** of content —
 a 1371-byte clipboard paste survived as exactly 512 bytes in `GetText()`.
 Typing past the cap is silently dropped too. No layout attribute was found to
 raise it; treat 512 as the practical limit of any player-typed multiline field
-(the vanilla paper note lives happily inside it).
+(the vanilla paper note lives happily inside it). Re-measured 2026-11-01 (1.30.164200):
+typing is NOT capped at 512 bytes -- 279 Cyrillic characters (519 bytes) and 512 ASCII
+characters with four line breaks (516 bytes) arrived whole in `GetText()`; the paste was not
+re-measured.
 
 ## 23. The player equipment grid ignores `attachments[]` (measured 2026-08-28)
 
@@ -1837,11 +1882,14 @@ retail client at 3840x1600 (UA) and 1920x1080 (EN).
   a stand mod's tree window). A stretched torn-edge texture showed a seam along its
   border: the filter blended the opposite edge's texels in. Making the texture's last columns
   clear removed the seam. So a stretched picture's opposite edges must match, or lie where
-  nothing shows -- a soft edge, a clear margin of a texel or two. Vanilla's likely fix is the
-  layout key `"clamp mode" clamp` (772 uses in the 1.30 layouts, e.g. the stretched header image
-  of `inventory_new/day_z_inventory_new_tooltip.layout`; values seen: `clamp`, `wrap`, `border`),
-  next to the flag `WidgetFlags.NOWRAP` "Do not do texture wrapping" (enwidgets.c:63) -- not
-  measured here (note 2026-11-01).
+  nothing shows -- a soft edge, a clear margin of a texel or two. The fix is the layout key
+  `"clamp mode" clamp` (772 uses in the 1.30 layouts, e.g. the stretched header image of
+  `inventory_new/day_z_inventory_new_tooltip.layout`; values seen: `clamp`, `wrap`, `border`).
+  Measured 2026-11-01 (1.30.164200) on a 64-px texture with a red left and a blue right edge,
+  stretched to 400 units at 3840x1600: with no `"clamp mode"` line, and with `"clamp mode"
+  wrap`, each edge carried the opposite colour over ~5 px (half a texel); with `"clamp mode"
+  clamp` both edges stayed clean. The flag `WidgetFlags.NOWRAP` "Do not do texture wrapping"
+  (enwidgets.c:63) was not tried.
 - **Two widgets that meet edge to edge leave a hairline at 1.48 px a unit** (same day, another window:
   the fog's fade and the opaque fog under it). Each rectangle rounds to whole pixels on its own,
   and one row of what lies beneath showed between them at 3840x1600 (about 10 % at 1080). Lay the

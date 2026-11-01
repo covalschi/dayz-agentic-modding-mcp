@@ -67,7 +67,8 @@ apps (Workbench, the game, Publisher) are the user's to drive.
   with `itemcount=1&publishedfileids[0]=<id>`.
 - Before writing any nontrivial code, look up (index or grep) the class/method you plan to
   use. Extract game scripts to a scratch dir, not into the repo; BankRev `-f <outDir>`
-  writes into `<outDir>\<pbo file name without .pbo>\`, not into `<outDir>` itself.
+  writes into `<outDir>\<pbo file name without .pbo>\`, not into `<outDir>` itself, even
+  when the prefix differs (measured 2026-11-01); `-prefix` unpacks under the prefix path.
 
 ## Mod anatomy (60-second version)
 

@@ -102,8 +102,17 @@ Verified 2026-07-31 (1.29.163451 diag + official server):
   World-module compile / CfgVehicles scan, burning one core with stable memory, mission
   never loaded, no error anywhere (reproduced on BOTH DayZDiag -server and
   DayZServer_x64). That cfg had `template = ...;`
-  at TOP LEVEL, with no `class Missions` -- so the hang was most likely "no mission
-  configured", not "the cfg is too short". Not re-measured. What worked then and still
+  at TOP LEVEL, with no `class Missions` -- and that is the cause. Re-measured 2026-11-01
+  (DayZDiag 1.30.164200 `-server`, no mods, eight settings plus the mission): with `template`
+  inside `class Missions { class DayZ { ... } }` the server loaded the Mission module and
+  initialised the CE about 25 s after start; the same lines with `template` at top level
+  stalled after the World module -- no Mission module, no error, for 150 s, as in July; and a
+  cfg with no `class Missions` plus `-mission=<absolute path>` stalled the same way, so
+  `-mission` does not stand in for the cfg's mission on a server. The template resolves
+  against `mpmissions\` beside the EXECUTABLE, not the working directory (`$CurrentDir` in
+  the logs is the exe's folder): started from another folder that held its own
+  `mpmissions`, the server still loaded `<game>\mpmissions\<template>` and created
+  `storage_<instanceId>` in it -- point a test cfg's `instanceId` at a number no stand uses. What worked then and still
   works: start from the shipped `serverDZ.cfg` of the free official "DayZ Server" Steam
   app, editing only what you need (verifySignatures = 0; BattlEye = 0;
   allowFilePatching = 1;); build every stand cfg that way. With it the same
@@ -287,6 +296,9 @@ persistence-networking.md "DayZ 1.30 Update 2") -- re-check this workflow and an
    yellow arrow = paused, Debug menu = stepping. Print output appears in Workbench console.
 4. Packed and unpacked mod contents must be identical or breakpoints won't bind.
 
+Not re-measured on 1.30 (2026-11-01): attaching needs the Workbench GUI, which no
+scripted stand run drives.
+
 ## If it doesn't work (troubleshooting)
 
 | Error / symptom | Fix |
@@ -440,10 +452,12 @@ Mission = `mpmissions\<template>\`. Relevant to mods:
 ## PBO inspection & unpacking
 
 - **BankRev.exe** (official, `Tools\Bin\PboUtils`): extracts any normal PBO —
-  `& "...\PboUtils\BankRev.exe" -f <outDir> <file.pbo>`. It writes into a SUBFOLDER,
-  `<outDir>\<pbo name>\`, not into `<outDir>` itself (the `dayz` MCP's
-  `packer.py:107-118`; seen with `scripts.pbo`, whose name and prefix are both
-  `scripts`). Refuses obfuscated PBOs.
+  `& "...\PboUtils\BankRev.exe" -f <outDir> <file.pbo>`. It writes into a SUBFOLDER named
+  after the pbo FILE, not into `<outDir>` itself and not after the prefix: `Renamed.pbo` with
+  prefix `probe\deep\` unpacked to `<outDir>\Renamed\...` (measured 2026-11-01). Add
+  `-prefix` to unpack under the prefix path instead (`<outDir>\probe\deep\...`). Either way it
+  also writes `<outDir>\<name>.txt` with the pbo properties (`prefix=probe\deep\`). Refuses
+  obfuscated PBOs.
 - **CfgConvert.exe**: binarized config.bin → text:
   `& "...\CfgConvert\CfgConvert.exe" -txt -dst out.cpp config.bin`.
 - **scripts/ScanPbo.ps1** (bundled with this skill): obfuscation-tolerant scanner —

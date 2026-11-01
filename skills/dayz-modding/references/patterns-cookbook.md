@@ -15,8 +15,9 @@ mod named in parentheses). Full per-mod entries: references/mods-catalog.md. Tha
 - **Whole-object RPC serialization**: an entire config class serializes through one
   `Param1<ref ConfigClass>` RPC — no per-field packing (AgricultureCore, KK mods, MMG,
   SuppressionMod: `ScriptRPC().Write(instance)` / `ctx.Read(instance)` works for ref classes).
-  CAVEAT: `map<string, ref T>` does NOT survive RPC serialization intact — rebuild maps
-  entry-by-entry on the client (CannabisPlus).
+  CAVEAT reported by CannabisPlus: `map<string, ref T>` did not survive its RPC, so it
+  rebuilds maps entry by entry on the client. Not reproduced on 1.30.164200 (2026-11-01:
+  `Param1<ref map<string, ref T>>` arrived intact; persistence-networking.md).
 - **Sync flow** (Expansion, KK, WT — same shape): server loads JSON in MissionServer
   init; on client connect (`OnClientReadyEvent` / CF module `OnClientPrepare` /
   `InvokeOnConnect`) send config to that identity; client keeps a `s_ConfigReceived` flag and

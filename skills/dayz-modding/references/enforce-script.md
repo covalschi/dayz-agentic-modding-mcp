@@ -520,18 +520,20 @@ vector pos = at + Vector(col, 0, row);
   expected "compile clean" checkpoint before testing gameplay; fix the FIRST
   `SCRIPT (E)` error, the rest cascade.
 
-## `ref` on a LOCAL variable corrupts the stack frame (measured 2026-09-06)
+## `ref` on a LOCAL variable: the 2026-09-06 crash, not reproduced 2026-11-01
 
-> **Contradicted by vanilla (audit 2026-11-01); re-measure.** Vanilla runs a `ref` local
-> holding a `new` container in `PlayerBase.AddAction` on every server
-> (1.30 playerbase.c:1828-1832; also areadamage.c:175, 41 `ref` locals in 1.30), so `ref` on a
-> local is not fatal by itself. The crash below is most likely the wandering heap
-> corruption measured in the same project on 2026-09-01 (the compound-boolean field write,
-> further down), whose crash site "is never the culprit". Keep the house style (no `ref` on
-> locals) until it is re-measured in isolation.
+> **Not reproduced (re-measured 2026-11-01, DayZ 1.30.164200, a stand mod).** The exact
+> declaration below, with a `ref array<string>` local beside it and `string` locals read
+> before and after both, ran 100,000 times on the server and 100,000 times on the client at
+> mission start, then 2,000 times every 10 s for minutes: no fault, correct results. Vanilla
+> does the same in `PlayerBase.AddAction` on every server (1.30 playerbase.c:1828-1832; 41
+> `ref` locals in 1.30). So a `ref` local is redundant, not fatal; the crash below was most
+> likely the wandering heap corruption measured on 2026-09-01 (the compound-boolean field
+> write, further down), whose crash site "is never the culprit". No `ref` on locals stays the
+> house style.
 
 ```c
-// KILLS THE SERVER
+// the 2026-09-06 suspect; ran clean 100,000 times on 2026-11-01
 ref map<string, bool> online = new map<string, bool>();
 
 // The house style everywhere else, and the one that works
