@@ -1053,6 +1053,24 @@ Three facts about `MultilineEditBoxWidgetClass`, all measured on the stand:
   1` the edge break fell between `inner` and `inner + one glyph` at both sizes (1661 against
   1674, 753 against 759), so the threshold above stands -- and a reader must also glue every
   line that reached 200 characters, or the cap's breaks survive as Enters.
+- Measured 2026-11-01 with `etelkatextpro14` in the same box: a typed line holds 69 capital W
+  at 1920x1080 (759 of the 765 units; the 70th breaks) and 102 at 3840x1600, while the
+  12-px `inner` admits 68 and 101. The box's own padding is therefore at most 6 native px.
+  Reading is unaffected (an engine break still measures past `inner`), but a WRITER that
+  re-inserts breaks with the 12-px threshold puts one glyph fewer on each line than typing
+  does.
+- A display-side re-wrap is the way to show saved text, since `SetText()` text is never
+  wrapped: insert a `\n` wherever the reader would glue one (200 characters, or line + next
+  character past `inner`), and the reader glues them back on save. One trap, measured
+  2026-11-01: "136 W, Enter, x" and "136 W x" re-wrap to the same bytes, so a human Enter right
+  after a nearly full line cannot be told from a re-wrap break -- an untouched re-save of a
+  stand mod's note lost that Enter at 1920x1080. Keep the text you showed and the stored text
+  behind it, and save the stored text while the box still holds exactly what was shown.
+- `"limit visible" 1` also caps typing at the box's visible lines (2026-11-01, 1920x1080): a
+  301x50 box with `lines 3` and a 14-px font took a short line, Enter and 27 W, then refused
+  the 28th W, which would have wrapped onto a third line. `SetText()` is not capped: the same
+  box showed three lines when its saved text was put back. A small box with the key holds far
+  less typed text than the same box without it.
 
 One more measured cap: the edit box accepts at most **512 bytes** of content —
 a 1371-byte clipboard paste survived as exactly 512 bytes in `GetText()`.
