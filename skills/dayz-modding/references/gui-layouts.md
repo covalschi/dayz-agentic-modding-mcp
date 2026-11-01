@@ -1426,8 +1426,7 @@ authors of a stand mod's tree skins (2026-10-31; offline, not measured in the en
   mod's `MultilineEditBox` with `"exact text" 1` at 3840x1600): typed on the Ukrainian
   keyboard layout, `etelkatextpro14` drew "і І ї є Привіт" whole, where `MetronBook14` in the
   same box had drawn the capital І blank -- the drop-in face for an edit box that takes
-  Ukrainian. Typing went through only with the game's language set to English: with
-  `language="Russian"` the same Ukrainian keystrokes arrived as Russian letters or broken.
+  Ukrainian.
 
 ## 26. OnDoubleClick DOES reach a ButtonWidgetClass row, via the owning menu (measured 2026-09-09)
 
