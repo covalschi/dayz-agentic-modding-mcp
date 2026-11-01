@@ -419,7 +419,7 @@ ALLOWED: dict[str, set[str]] = {
     "keypad":  COMMON | {"cols", "rows", "gap", "keys", "font"},
     "label":   COMMON | {"text", "font", "align", "valign"},
     "text":    COMMON | {"text", "font", "align", "plain", "grow"},
-    "field":   COMMON | {"text", "font", "lines"},
+    "field":   COMMON | {"text", "font", "lines", "wrap"},
     # "children" is a root-only capability (a button root holds page
     # content the way a frame/panel root does) -- a plain child button
     # still gets its Edge/Bg/Text idiom from `_b_button`, which never reads it.
@@ -984,7 +984,17 @@ def _b_button(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
 
 def _b_field(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     """An edit box that always has a box around it: <Name>Frame (edge colour)
-    holding <Name>Fill (panel colour) and the EditBoxWidgetClass <Name>."""
+    holding <Name>Fill (panel colour) and the EditBoxWidgetClass <Name>.
+
+    `lines` makes it multiline. `wrap` (multiline only) adds `"limit visible" 1`,
+    the one key that makes the box break typed text at its own edge: without
+    it the text runs on hidden past the edge and breaks only every 200
+    characters (measured 2026-11-01, skill gui-layouts.md §22). It is opt-in
+    because every break the engine makes is a real `\\n` in the text -- a
+    reader has to glue them, and a JSON editor would carry them into values."""
+    if attrs.get("wrap") and not attrs.get("lines"):
+        raise LayoutGenError("field `wrap` needs `lines`: a one-line edit box has no edge to wrap at",
+                             ctx.file, path)
     name = ctx.claim(attrs.get("name", ""), path)
     frame = W("PanelWidgetClass", ctx.claim(name + "Frame", path), comment=str(attrs.get("note", "")))
     frame.set("visible", "0" if attrs.get("hidden") else "1")
@@ -1012,6 +1022,8 @@ def _b_field(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     _text_font(edit, attrs, ctx, path, "field")
     if lines:
         edit.set("lines", fmt(ctx.tokens.number(lines, ctx.file, path, "lines")))
+        if attrs.get("wrap"):
+            edit.set(key("limit visible"), "1")
     frame.children = [fill, edit]
     return [frame]
 

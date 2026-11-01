@@ -591,6 +591,18 @@ def test_field_puts_the_edit_box_inside_a_frame_and_a_fill():
     out = build(page({"field": {"name": "Body", "size": [400, 200], "lines": 8}}))
     assert "MultilineEditBoxWidgetClass Body {" in out.files["MyMod/gui/layouts/my_page.layout"]
     assert "     lines 8\n" in out.files["MyMod/gui/layouts/my_page.layout"]
+    assert "limit visible" not in out.files["MyMod/gui/layouts/my_page.layout"]
+
+
+def test_field_wrap_breaks_at_the_edge_and_needs_lines():
+    # Without "limit visible" 1 a multiline box breaks only every 200 characters and
+    # hides the rest of the line; `wrap` opts into the edge (skill gui-layouts.md §22).
+    out = build(page({"field": {"name": "Body", "size": [400, 200], "lines": 8, "wrap": True}}))
+    text = out.files["MyMod/gui/layouts/my_page.layout"]
+    assert '     lines 8\n     "limit visible" 1\n' in text
+    assert clean(text) == []
+    with pytest.raises(LayoutGenError, match=r"`wrap` needs `lines`"):
+        build(page({"field": {"name": "Line", "size": [400, 28], "wrap": True}}))
 
 
 def test_text_wraps_and_sizes_its_height_to_the_text():
