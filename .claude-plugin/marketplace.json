@@ -8,7 +8,7 @@
   },
   "plugins": [
     {
-      "name": "dayz",
+      "name": "dayz-agentic-modding",
       "source": "./",
       "description": "The dayz MCP server (lint, pack, sign, stand boot, verdict, live client, Workshop) and the dayz-modding skill.",
       "category": "development"

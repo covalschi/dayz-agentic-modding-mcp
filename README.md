@@ -9,8 +9,11 @@ diagnostic executable directly. A project does not need its own build script.
 
 It ships with a Claude Code skill, `skills/dayz-modding`: what the sources cannot
 tell an agent about Enforce Script, configs, layouts, persistence and the toolchain,
-each fact measured on a server and a client. The repository is a Claude Code plugin
-that installs both (see Install).
+each fact measured on a server and a client. The repository is a Claude Code plugin,
+`dayz-agentic-modding`, that installs both (see Install).
+
+A community tool: not affiliated with or endorsed by Bohemia Interactive, the maker
+of DayZ.
 
 ## Why a profile
 
@@ -1029,7 +1032,7 @@ vocabulary and the parse test are talking about one build of the game.
 The plugin brings the server and the `dayz-modding` skill. In Claude Code:
 
     /plugin marketplace add covalschi/dayz-agentic-modding-mcp
-    /plugin install dayz@dayz-agentic-modding
+    /plugin install dayz-agentic-modding@dayz-agentic-modding
 
 The plugin starts the server with `uv run --frozen`, so [uv](https://docs.astral.sh/uv/)
 must be on `PATH`; the first start builds the environment from `uv.lock` (seconds). A
