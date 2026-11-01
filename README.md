@@ -7,6 +7,11 @@ publish the result to the Steam Workshop.
 The server does the work itself: it calls FileBank, the signing tool and the
 diagnostic executable directly. A project does not need its own build script.
 
+It ships with a Claude Code skill, `skills/dayz-modding`: what the sources cannot
+tell an agent about Enforce Script, configs, layouts, persistence and the toolchain,
+each fact measured on a server and a client. The repository is a Claude Code plugin
+that installs both (see Install).
+
 ## Why a profile
 
 The server knows nothing about any particular mod. Everything specific lives in a
@@ -1019,12 +1024,31 @@ vocabulary and the parse test are talking about one build of the game.
 
 ## Install
 
+### As a Claude Code plugin
+
+The plugin brings the server and the `dayz-modding` skill. In Claude Code:
+
+    /plugin marketplace add covalschi/dayz-agentic-modding-mcp
+    /plugin install dayz@dayz-agentic-modding
+
+The plugin starts the server with `uv run`, so [uv](https://docs.astral.sh/uv/) must be
+on `PATH`; the first start builds the environment (seconds). A project still needs its
+`dayz-mcp.toml` and `dayz-mcp.local.toml` ("Why a profile" above). The gamepad stays
+optional: the plugin does not install the `client` extra.
+
+### By hand
+
     python -m pip install -e ".[dev]"
 
 Register in your MCP client:
 
     { "mcpServers": { "dayz": { "command": "dayz-mcp" } } }
 
+The skill on its own is the folder `skills/dayz-modding`: copy it, or link it, into
+`~/.claude/skills/`.
+
 ## Licence
 
-GPL-3.0-or-later. See `NOTICE.md`.
+GPL-3.0-or-later. See `NOTICE.md`. The skill in `skills/dayz-modding` has its own
+licence: its text is CC BY-SA 4.0 and its code (samples, template, scripts) MIT, so a
+mod built from them can carry any licence (`skills/dayz-modding/LICENSE.md`).

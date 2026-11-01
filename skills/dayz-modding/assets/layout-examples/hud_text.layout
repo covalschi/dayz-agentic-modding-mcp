@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: MIT
+//
+// HUD text overlay: a small title line above a value line, at an exact pixel position.
+// It is not a menu and never touches the menu stack. The script creates the widgets once,
+// straight on the workspace, updates the value text, hides the overlay while any menu is
+// open and unlinks it when the mission finishes.
+//
+// How the layout is built (rules measured on a live client, see references/gui-layouts.md):
+//  - All four exact flags are 1, so position and size are layout units: 1 unit is 1 px at
+//    1080 rows and H / 1080 px on a taller screen. Move or resize the root only; the two
+//    text rows are laid out inside it.
+//  - Every widget has ignorepointer 1, so the overlay never takes a click and nothing can
+//    focus it. A FrameWidget without ignorepointer takes the mouse.
+//  - priority counts among siblings only. The overlay is priority 1, so menu roots (2 and up) draw over it.
+//  - Text uses an SDF font, which scales crisply. Its box must be tall enough or the text is
+//    clipped: 13 pt needs about 19 units, 18 pt about 26. The Metron fonts have no U+0406
+//    (Ukrainian capital I); see the Ukrainian letters section of references/gui-layouts.md.
+//
+// Script companion (client side, for example 5_Mission/MyMod/MyModHud.c). The load path
+// starts at the mod's own pbo prefix:
+//
+//   #ifndef NO_GUI
+//   modded class MissionGameplay
+//   {
+//       protected Widget m_MyMod_HudRoot;
+//       protected TextWidget m_MyMod_HudValue;
+//       protected string m_MyMod_HudShown;    // TextWidget has no GetText(): remember what was set
+//       protected float m_MyMod_HudClock;
+//
+//       override void OnInit()
+//       {
+//           super.OnInit();
+//           if (m_MyMod_HudRoot)    // create it once
+//               return;
+//           m_MyMod_HudRoot = GetGame().GetWorkspace().CreateWidgets("MyMod/gui/layouts/hud_text.layout");
+//           if (!m_MyMod_HudRoot)    // a bad path is only two "Cannot load layout" lines in the log
+//               return;
+//           m_MyMod_HudValue = TextWidget.Cast(m_MyMod_HudRoot.FindAnyWidget("Value"));
+//       }
+//
+//       void MyMod_SetHudValue(string text)
+//       {
+//           if (!m_MyMod_HudValue || text == m_MyMod_HudShown)
+//               return;
+//           m_MyMod_HudShown = text;
+//           m_MyMod_HudValue.SetText(text);
+//       }
+//
+//       override void OnUpdate(float timeslice)
+//       {
+//           super.OnUpdate(timeslice);
+//           if (!m_MyMod_HudRoot)
+//               return;
+//
+//           // Hidden while any menu is on the stack: inventory, map, pause, chat input, your own menus.
+//           bool show = GetGame().GetUIManager().GetMenu() == NULL;
+//           if (show != m_MyMod_HudRoot.IsVisible())
+//               m_MyMod_HudRoot.Show(show);
+//
+//           m_MyMod_HudClock += timeslice;    // a text value does not need a refresh every frame
+//           if (m_MyMod_HudClock < 1.0)
+//               return;
+//           m_MyMod_HudClock = 0;
+//           PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+//           if (player)
+//               MyMod_SetHudValue(Math.Round(player.GetHealth("", "")).ToString());
+//       }
+//
+//       override void OnMissionFinish()
+//       {
+//           if (m_MyMod_HudRoot)
+//           {
+//               m_MyMod_HudRoot.Unlink();    // destroys the widget and all its children
+//               m_MyMod_HudRoot = NULL;
+//               m_MyMod_HudValue = NULL;
+//               m_MyMod_HudShown = "";
+//           }
+//           super.OnMissionFinish();
+//       }
+//   }
+//   #endif
+
+FrameWidgetClass MyMod_HudText {
+ ignorepointer 1
+ clipchildren 0
+ position 24 120
+ size 200 50
+ hexactpos 1
+ vexactpos 1
+ hexactsize 1
+ vexactsize 1
+ priority 1
+ {
+  TextWidgetClass Title {
+   ignorepointer 1
+   color 0.8 0.8 0.8 0.9
+   position 0 0
+   size 200 22
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   text "Title"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 13
+   "text halign" left
+   "text valign" center
+   "outline size" 1
+   "outline color" 0 0 0 0.6
+  }
+  TextWidgetClass Value {
+   ignorepointer 1
+   color 1 1 1 1
+   position 0 22
+   size 200 28
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   text "0"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 18
+   "text halign" left
+   "text valign" center
+   "outline size" 1
+   "outline color" 0 0 0 0.6
+  }
+ }
+}

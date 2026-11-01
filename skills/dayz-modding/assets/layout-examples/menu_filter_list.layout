@@ -1,0 +1,430 @@
+// SPDX-License-Identifier: MIT
+//
+// Centered menu: a title, an EditBox filter, a two-column TextListbox and two buttons (Select
+// and Close). The script rebuilds the list while the filter is edited, shows the selected row
+// and closes through the menu stack.
+//
+// How the layout is built (rules measured on a live client, see references/gui-layouts.md):
+//  - The root is centered with halign and valign center_ref plus exact position 0 0. A
+//    proportional position 0.5 0.5 would put its top-left corner at the screen centre. Inside
+//    it everything is in layout units: 1 unit is 1 px at 1080 rows, H / 1080 px on a taller screen.
+//  - A modal root gets priority 998 (999 at most) so it draws above other UI. Do not copy that
+//    number to a root that holds an ItemPreviewWidget; item_preview.layout explains why.
+//  - Children are ordered by priority among themselves. A PanelWidget shows its color only
+//    with style rover_sim_colorable; with a color and no style it draws nothing.
+//  - The listbox reads its columns from the property colums, the engine's own spelling, as
+//    name;width pairs. AddItem fills column 0 of a new row, SetItem fills the other columns.
+//  - A button's own text ignores the font and size of a TextWidget, so each caption is a child
+//    TextWidget. style Empty paints nothing: the opaque Bg child is the button's look and
+//    keeps it from flashing on hover. The children have ignorepointer 1 so the click reaches
+//    the button, and inheritalpha 1 so they follow the button's alpha (the script dims Select
+//    with SetAlpha while no row is selected).
+//  - userID on a button lets one OnClick tell the buttons apart.
+//
+// Script companion (client side, for example 5_Mission/MyMod/MyModFilterMenu.c). The load path
+// starts at the mod's own pbo prefix:
+//
+//   #ifndef NO_GUI
+//   const int MYMOD_MENU_FILTER = 774101;    // any number works: stack ownership matters, the id does not
+//   const int MYMOD_BTN_SELECT = 1;          // userID of BtnSelect
+//   const int MYMOD_BTN_CLOSE = 2;           // userID of BtnClose
+//
+//   class MyMod_FilterMenu : UIScriptedMenu
+//   {
+//       protected EditBoxWidget m_Filter;
+//       protected TextListboxWidget m_List;
+//       protected ButtonWidget m_BtnSelect;
+//       protected TextWidget m_Status;
+//       protected ref array<string> m_Names;
+//       protected ref array<int> m_Counts;
+//       protected string m_Picked;    // name of the selected row, empty while nothing is selected
+//
+//       override Widget Init()
+//       {
+//           layoutRoot = GetGame().GetWorkspace().CreateWidgets("MyMod/gui/layouts/menu_filter_list.layout");
+//           if (!layoutRoot)    // a bad path is only two "Cannot load layout" lines in the log
+//               return layoutRoot;
+//
+//           // No SetHandler and no WidgetEventHandler.Register*: the menu already is the handler of its
+//           // layout root, so the events of every child bubble up to the overrides below. SetHandler
+//           // holds ONE handler per widget (a later call replaces it) and Register* calls SetHandler
+//           // for you, so mixing the ways makes handlers displace each other silently.
+//           m_Filter = EditBoxWidget.Cast(layoutRoot.FindAnyWidget("Filter"));
+//           m_List = TextListboxWidget.Cast(layoutRoot.FindAnyWidget("List"));
+//           m_BtnSelect = ButtonWidget.Cast(layoutRoot.FindAnyWidget("BtnSelect"));
+//           m_Status = TextWidget.Cast(layoutRoot.FindAnyWidget("Status"));
+//
+//           m_Names = new array<string>;    // made here, not in a field initialiser
+//           m_Counts = new array<int>;
+//           m_Names.Insert("Apple");        // replace with your data source
+//           m_Counts.Insert(12);
+//           m_Names.Insert("Banana");
+//           m_Counts.Insert(5);
+//           m_Names.Insert("Cherry");
+//           m_Counts.Insert(40);
+//           return layoutRoot;
+//       }
+//
+//       override void OnShow()
+//       {
+//           super.OnShow();    // cursor and game focus on; OnHide undoes them in the same count
+//           // super.OnShow() does not stop movement or the camera. Do that here, undo it in OnHide.
+//           // Put GetMission() and GetHud() in locals and test them: both are null while a death
+//           // tears the mission down, and a chained call through them crashes the client.
+//           Mission mission = GetGame().GetMission();
+//           if (mission)
+//           {
+//               mission.AddActiveInputExcludes({"menu"});
+//               mission.AddActiveInputRestriction(EInputRestrictors.INVENTORY);
+//               Hud hud = mission.GetHud();
+//               if (hud)
+//               {
+//                   hud.ShowHudUI(false);
+//                   hud.ShowQuickbarUI(false);
+//               }
+//           }
+//           Rebuild();
+//           SetFocus(m_Filter);    // an EditBox takes typing only while it has focus
+//       }
+//
+//       override void OnHide()
+//       {
+//           super.OnHide();
+//           GetGame().GetCallQueue(CALL_CATEGORY_GUI).Remove(Rebuild);
+//           Mission mission = GetGame().GetMission();
+//           if (mission)
+//           {
+//               mission.RemoveActiveInputExcludes({"menu"}, true);    // true: force the release
+//               mission.RemoveActiveInputRestriction(EInputRestrictors.INVENTORY);
+//               Hud hud = mission.GetHud();
+//               if (hud)
+//               {
+//                   hud.ShowHudUI(true);
+//                   hud.ShowQuickbarUI(true);
+//               }
+//           }
+//       }
+//
+//       override void Update(float timeslice)
+//       {
+//           super.Update(timeslice);
+//           if (GetUApi().GetInputByID(UAUIBack).LocalPress())    // Esc, as in the vanilla menus
+//               Close();
+//       }
+//
+//       override bool OnChange(Widget w, int x, int y, bool finished)
+//       {
+//           if (super.OnChange(w, x, y, finished))
+//               return true;
+//           if (w == m_Filter)
+//           {
+//               // Debounce: every edit restarts a 150 ms timer, so a long list is rebuilt once per pause.
+//               ScriptCallQueue queue = GetGame().GetCallQueue(CALL_CATEGORY_GUI);
+//               queue.Remove(Rebuild);
+//               queue.CallLater(Rebuild, 150, false);
+//               return true;
+//           }
+//           return false;
+//       }
+//
+//       override bool OnItemSelected(Widget w, int x, int y, int row, int column, int oldRow, int oldColumn)
+//       {
+//           if (super.OnItemSelected(w, x, y, row, column, oldRow, oldColumn))
+//               return true;
+//           if (w == m_List)
+//           {
+//               m_Picked = "";
+//               if (row >= 0)
+//                   m_List.GetItemText(row, 0, m_Picked);    // column 0 holds the name
+//               ShowPick();
+//               return true;
+//           }
+//           return false;
+//       }
+//
+//       override bool OnClick(Widget w, int x, int y, int button)
+//       {
+//           if (super.OnClick(w, x, y, button))
+//               return true;
+//           if (button != MouseState.LEFT)
+//               return false;
+//           switch (w.GetUserID())
+//           {
+//               case MYMOD_BTN_SELECT:
+//                   if (m_Picked != "")
+//                   {
+//                       // use m_Picked here: send an RPC, fill a field, spawn an item...
+//                       Close();
+//                   }
+//                   return true;
+//               case MYMOD_BTN_CLOSE:
+//                   Close();    // the safe way to close a menu, also from inside its own handler
+//                   return true;
+//           }
+//           return false;
+//       }
+//
+//       protected void Rebuild()
+//       {
+//           string needle = m_Filter.GetText();
+//           needle.ToLower();    // an ASCII fold: for Cyrillic names compare with your own case table
+//           m_List.ClearItems();
+//           for (int i = 0; i < m_Names.Count(); i++)
+//           {
+//               string hay = m_Names[i];
+//               hay.ToLower();
+//               if (needle != "" && !hay.Contains(needle))
+//                   continue;
+//               int row = m_List.AddItem(m_Names[i], NULL, 0);             // creates the row, column 0
+//               m_List.SetItem(row, m_Counts[i].ToString(), NULL, 1);    // column 1 of the same row
+//           }
+//           m_Picked = "";
+//           ShowPick();
+//       }
+//
+//       protected void ShowPick()
+//       {
+//           bool picked = m_Picked != "";
+//           m_BtnSelect.Enable(picked);    // a disabled button takes no click
+//           if (picked)
+//           {
+//               m_Status.SetText(m_Picked);
+//               m_BtnSelect.SetAlpha(1.0);
+//           }
+//           else
+//           {
+//               m_Status.SetText("Nothing selected");
+//               m_BtnSelect.SetAlpha(0.4);
+//           }
+//       }
+//   }
+//
+//   modded class MissionGameplay
+//   {
+//       override UIScriptedMenu CreateScriptedMenu(int id)
+//       {
+//           UIScriptedMenu menu = super.CreateScriptedMenu(id);
+//           if (!menu && id == MYMOD_MENU_FILTER)
+//           {
+//               menu = new MyMod_FilterMenu();
+//               menu.SetID(id);
+//           }
+//           return menu;
+//       }
+//   }
+//
+//   // Open it with EnterScriptedMenu: Init(), OnShow(), the cursor, the focus and a working Close()
+//   // all come with it. ShowScriptedMenu is the wrong call for a gameplay menu: no cursor, and the
+//   // clicks fall through to the world. EnterScriptedMenu returns NULL while another menu owns the
+//   // stack (the chat input, an action, another mod's menu), so call this one frame after the key,
+//   // chat command or RPC that wants the menu:
+//   //     GetGame().GetCallQueue(CALL_CATEGORY_GUI).CallLater(MyMod_OpenFilterMenu, 100, false);
+//   void MyMod_OpenFilterMenu()
+//   {
+//       GetGame().GetUIManager().EnterScriptedMenu(MYMOD_MENU_FILTER, NULL);
+//   }
+//   #endif
+
+FrameWidgetClass MyMod_FilterMenu {
+ position 0 0
+ size 520 420
+ halign center_ref
+ valign center_ref
+ hexactpos 1
+ vexactpos 1
+ hexactsize 1
+ vexactsize 1
+ priority 998
+ {
+  PanelWidgetClass Background {
+   ignorepointer 1
+   color 0.09 0.09 0.09 0.92
+   position 0 0
+   size 1 1
+   hexactpos 0
+   vexactpos 0
+   hexactsize 0
+   vexactsize 0
+   priority 1
+   style rover_sim_colorable
+  }
+  TextWidgetClass Title {
+   ignorepointer 1
+   color 1 1 1 1
+   position 16 12
+   size 488 28
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   text "Select an item"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 18
+   "text halign" left
+   "text valign" center
+  }
+  TextWidgetClass FilterLabel {
+   ignorepointer 1
+   color 0.8 0.8 0.8 1
+   position 16 52
+   size 60 30
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   text "Filter"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 15
+   "text halign" left
+   "text valign" center
+  }
+  EditBoxWidgetClass Filter {
+   position 80 52
+   size 424 30
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   style Editor
+   font "gui/fonts/sdf_MetronLight24"
+  }
+  PanelWidgetClass ListBg {
+   ignorepointer 1
+   color 0.04 0.04 0.04 0.9
+   position 16 94
+   size 488 266
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 1
+   style rover_sim_colorable
+  }
+  TextListboxWidgetClass List {
+   clipchildren 1
+   color 1 1 1 1
+   position 16 94
+   size 488 266
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   style Default
+   "highlight row" 1
+   "title visible" 1
+   colums "Name;70;Count;30;"
+   font "gui/fonts/sdf_MetronLight24"
+  }
+  ButtonWidgetClass BtnSelect {
+   position 16 372
+   size 140 34
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 3
+   style Empty
+   userID 1
+   {
+    PanelWidgetClass SelectBg {
+     ignorepointer 1
+     inheritalpha 1
+     color 0.17 0.4 0.22 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 1
+     style rover_sim_colorable
+    }
+    TextWidgetClass SelectCaption {
+     ignorepointer 1
+     inheritalpha 1
+     color 1 1 1 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 2
+     text "Select"
+     font "gui/fonts/sdf_MetronBook24"
+     "exact text" 1
+     "exact text size" 16
+     "text halign" center
+     "text valign" center
+    }
+   }
+  }
+  TextWidgetClass Status {
+   ignorepointer 1
+   color 0.8 0.8 0.8 1
+   position 164 372
+   size 192 34
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   text "Nothing selected"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 15
+   "text halign" center
+   "text valign" center
+  }
+  ButtonWidgetClass BtnClose {
+   position 364 372
+   size 140 34
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 3
+   style Empty
+   userID 2
+   {
+    PanelWidgetClass CloseBg {
+     ignorepointer 1
+     inheritalpha 1
+     color 0.28 0.28 0.28 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 1
+     style rover_sim_colorable
+    }
+    TextWidgetClass CloseCaption {
+     ignorepointer 1
+     inheritalpha 1
+     color 1 1 1 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 2
+     text "Close"
+     font "gui/fonts/sdf_MetronBook24"
+     "exact text" 1
+     "exact text size" 16
+     "text halign" center
+     "text valign" center
+    }
+   }
+  }
+ }
+}

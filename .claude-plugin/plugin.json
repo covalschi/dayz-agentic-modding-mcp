@@ -1,0 +1,19 @@
+{
+  "name": "dayz",
+  "version": "0.1.0",
+  "description": "Agentic DayZ modding: an MCP server that lints, packs, signs, boots and judges a mod on a local stand, drives a live client and publishes to the Steam Workshop, plus the dayz-modding skill of measured engine facts.",
+  "author": {
+    "name": "Alexandru Covalschi",
+    "url": "https://github.com/covalschi"
+  },
+  "homepage": "https://github.com/covalschi/dayz-agentic-modding-mcp",
+  "repository": "https://github.com/covalschi/dayz-agentic-modding-mcp",
+  "license": "GPL-3.0-or-later",
+  "keywords": ["dayz", "enforce-script", "enfusion", "modding", "pbo", "steam-workshop", "mcp"],
+  "mcpServers": {
+    "dayz": {
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "dayz-mcp"]
+    }
+  }
+}

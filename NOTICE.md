@@ -8,3 +8,6 @@ with the original copyright and licence text.
 
 GPL-licensed tools are never vendored into this codebase. They may be invoked as
 separate processes, which does not make this project a derivative work.
+
+`skills/dayz-modding/` is licensed separately (text CC BY-SA 4.0, code MIT) and holds no
+third-party code or text; its sources are acknowledged in `skills/dayz-modding/LICENSE.md`.

@@ -1,0 +1,17 @@
+{
+  "name": "dayz-agentic-modding",
+  "owner": {
+    "name": "Alexandru Covalschi"
+  },
+  "metadata": {
+    "description": "Claude Code plugin for agentic DayZ mod development"
+  },
+  "plugins": [
+    {
+      "name": "dayz",
+      "source": "./",
+      "description": "The dayz MCP server (lint, pack, sign, stand boot, verdict, live client, Workshop) and the dayz-modding skill.",
+      "category": "development"
+    }
+  ]
+}

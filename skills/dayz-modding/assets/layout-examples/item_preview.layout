@@ -1,0 +1,368 @@
+// SPDX-License-Identifier: MIT
+//
+// Item inspect panel: a live 3D ItemPreviewWidget, a rotate-left and a rotate-right button and a
+// close button. The script gives the widget an item, turns the model with SetModelOrientation and
+// cleans up when the panel closes.
+//
+// How the layout is built (rules measured on a live client, see references/gui-layouts.md):
+//  - The priority limit. An ItemPreviewWidget drew nothing, with no error and no log line, when its
+//    priority or an ancestor's was 300 or more (256 and lower drew; the ancestor half of that rule
+//    is still being re-measured, see section 13 of references/gui-layouts.md). So this root is
+//    priority 200 and every child is lower. Do not give this root the 998 or 999 that
+//    menu_filter_list.layout gives its modal root, and check the whole chain if you embed this
+//    panel in another layout.
+//  - The preview has ignorepointer 1, as 49 of the 52 vanilla previews do: the buttons turn the
+//    model. Drag-to-rotate would need a widget that takes the mouse (OnMouseButtonDown) instead.
+//  - The root is centered with halign and valign center_ref plus exact position 0 0, and every
+//    size is in layout units (1 unit is 1 px at 1080 rows, H / 1080 px on a taller screen).
+//  - Each button is style Empty with an opaque Bg child and a caption child TextWidget, all of
+//    them ignorepointer 1, exactly as in menu_filter_list.layout. userID tells the buttons apart.
+//
+// Script companion (client side, for example 5_Mission/MyMod/MyModItemPreview.c). The load path
+// starts at the mod's own pbo prefix:
+//
+//   #ifndef NO_GUI
+//   const int MYMOD_MENU_ITEM_PREVIEW = 774102;
+//   const int MYMOD_BTN_LEFT = 1;     // userID of BtnRotateLeft
+//   const int MYMOD_BTN_RIGHT = 2;    // userID of BtnRotateRight
+//   const int MYMOD_BTN_CLOSE = 3;    // userID of BtnClose
+//
+//   class MyMod_ItemPreviewMenu : UIScriptedMenu
+//   {
+//       protected ItemPreviewWidget m_Preview;
+//       protected TextWidget m_Title;
+//       protected EntityAI m_Probe;    // a client-local copy made by SetClassName: this menu deletes it
+//       protected float m_Yaw;
+//
+//       override Widget Init()
+//       {
+//           layoutRoot = GetGame().GetWorkspace().CreateWidgets("MyMod/gui/layouts/item_preview.layout");
+//           if (!layoutRoot)    // a bad path is only two "Cannot load layout" lines in the log
+//               return layoutRoot;
+//           // The menu is the handler of its layout root, so no SetHandler (see menu_filter_list.layout).
+//           m_Preview = ItemPreviewWidget.Cast(layoutRoot.FindAnyWidget("Preview"));
+//           m_Title = TextWidget.Cast(layoutRoot.FindAnyWidget("Title"));
+//           return layoutRoot;
+//       }
+//
+//       // The item must be a real EntityAI on this client. To show what the server is talking about,
+//       // send its network id (GetNetworkID) and resolve it here with GetObjectByNetworkId.
+//       void SetItem(EntityAI item)
+//       {
+//           ClearProbe();
+//           if (!item)
+//               return;
+//           m_Preview.SetItem(item);
+//           m_Preview.SetView(item.GetViewIndex());          // vanilla sets the view of every preview
+//           m_Preview.SetModelPosition(Vector(0, 0, 1));     // as the vanilla inspect panel does
+//           m_Title.SetText(item.GetDisplayName());
+//           SetYaw(0);
+//       }
+//
+//       // To preview a class name instead, spawn a client-local probe; the menu deletes it again.
+//       void SetClassName(string className)
+//       {
+//           EntityAI probe = EntityAI.Cast(GetGame().CreateObjectEx(className, "0 0 0", ECE_LOCAL));
+//           if (!probe)
+//               return;
+//           SetItem(probe);    // clears the previous probe first
+//           m_Probe = probe;
+//       }
+//
+//       protected void SetYaw(float yaw)
+//       {
+//           m_Yaw = yaw;
+//           if (m_Yaw >= 360)
+//               m_Yaw -= 360;
+//           if (m_Yaw < 0)
+//               m_Yaw += 360;
+//           m_Preview.SetModelOrientation(Vector(0, m_Yaw, 0));    // component 1 spins the model upright
+//       }
+//
+//       protected void ClearProbe()
+//       {
+//           m_Preview.SetItem(NULL);    // let go of the entity before it is deleted
+//           if (m_Probe)
+//           {
+//               GetGame().ObjectDelete(m_Probe);
+//               m_Probe = NULL;
+//           }
+//       }
+//
+//       override void OnShow()
+//       {
+//           super.OnShow();    // cursor and game focus on; OnHide undoes them in the same count
+//           // super.OnShow() does not stop movement or the camera, and GetMission() or GetHud() is
+//           // null while a death tears the mission down: locals, and test them.
+//           Mission mission = GetGame().GetMission();
+//           if (mission)
+//           {
+//               mission.AddActiveInputExcludes({"menu"});
+//               mission.AddActiveInputRestriction(EInputRestrictors.INVENTORY);
+//               Hud hud = mission.GetHud();
+//               if (hud)
+//               {
+//                   hud.ShowHudUI(false);
+//                   hud.ShowQuickbarUI(false);
+//               }
+//           }
+//       }
+//
+//       override void OnHide()
+//       {
+//           super.OnHide();
+//           ClearProbe();
+//           Mission mission = GetGame().GetMission();
+//           if (mission)
+//           {
+//               mission.RemoveActiveInputExcludes({"menu"}, true);    // true: force the release
+//               mission.RemoveActiveInputRestriction(EInputRestrictors.INVENTORY);
+//               Hud hud = mission.GetHud();
+//               if (hud)
+//               {
+//                   hud.ShowHudUI(true);
+//                   hud.ShowQuickbarUI(true);
+//               }
+//           }
+//       }
+//
+//       void ~MyMod_ItemPreviewMenu()
+//       {
+//           // The menu can die without an OnHide when the mission ends: never leak the probe.
+//           if (m_Probe && GetGame())
+//               GetGame().ObjectDelete(m_Probe);
+//       }
+//
+//       override void Update(float timeslice)
+//       {
+//           super.Update(timeslice);
+//           if (GetUApi().GetInputByID(UAUIBack).LocalPress())    // Esc, as in the vanilla menus
+//               Close();
+//       }
+//
+//       override bool OnClick(Widget w, int x, int y, int button)
+//       {
+//           if (super.OnClick(w, x, y, button))
+//               return true;
+//           if (button != MouseState.LEFT)
+//               return false;
+//           switch (w.GetUserID())
+//           {
+//               case MYMOD_BTN_LEFT:
+//                   SetYaw(m_Yaw - 15);
+//                   return true;
+//               case MYMOD_BTN_RIGHT:
+//                   SetYaw(m_Yaw + 15);
+//                   return true;
+//               case MYMOD_BTN_CLOSE:
+//                   Close();    // the safe way to close a menu, also from inside its own handler
+//                   return true;
+//           }
+//           return false;
+//       }
+//   }
+//
+//   modded class MissionGameplay
+//   {
+//       override UIScriptedMenu CreateScriptedMenu(int id)
+//       {
+//           UIScriptedMenu menu = super.CreateScriptedMenu(id);
+//           if (!menu && id == MYMOD_MENU_ITEM_PREVIEW)
+//           {
+//               menu = new MyMod_ItemPreviewMenu();
+//               menu.SetID(id);
+//           }
+//           return menu;
+//       }
+//   }
+//
+//   // Open it with EnterScriptedMenu, one frame after the trigger, when no other menu owns the
+//   // stack (menu_filter_list.layout explains why ShowScriptedMenu is the wrong call).
+//   void MyMod_OpenItemPreview(EntityAI item)
+//   {
+//       UIScriptedMenu menu = GetGame().GetUIManager().EnterScriptedMenu(MYMOD_MENU_ITEM_PREVIEW, NULL);
+//       MyMod_ItemPreviewMenu preview = MyMod_ItemPreviewMenu.Cast(menu);
+//       if (preview)
+//           preview.SetItem(item);
+//   }
+//   #endif
+
+FrameWidgetClass MyMod_ItemPreview {
+ position 0 0
+ size 420 440
+ halign center_ref
+ valign center_ref
+ hexactpos 1
+ vexactpos 1
+ hexactsize 1
+ vexactsize 1
+ priority 200
+ {
+  PanelWidgetClass Background {
+   ignorepointer 1
+   color 0.09 0.09 0.09 0.92
+   position 0 0
+   size 1 1
+   hexactpos 0
+   vexactpos 0
+   hexactsize 0
+   vexactsize 0
+   priority 1
+   style rover_sim_colorable
+  }
+  TextWidgetClass Title {
+   ignorepointer 1
+   color 1 1 1 1
+   position 16 12
+   size 388 28
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+   text "Item"
+   font "gui/fonts/sdf_MetronBook24"
+   "exact text" 1
+   "exact text size" 18
+   "text halign" left
+   "text valign" center
+  }
+  ItemPreviewWidgetClass Preview {
+   ignorepointer 1
+   clipchildren 1
+   position 16 48
+   size 388 330
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 2
+  }
+  ButtonWidgetClass BtnRotateLeft {
+   position 16 392
+   size 124 32
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 3
+   style Empty
+   userID 1
+   {
+    PanelWidgetClass RotateLeftBg {
+     ignorepointer 1
+     color 0.28 0.28 0.28 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 1
+     style rover_sim_colorable
+    }
+    TextWidgetClass RotateLeftCaption {
+     ignorepointer 1
+     color 1 1 1 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 2
+     text "Rotate left"
+     font "gui/fonts/sdf_MetronBook24"
+     "exact text" 1
+     "exact text size" 15
+     "text halign" center
+     "text valign" center
+    }
+   }
+  }
+  ButtonWidgetClass BtnRotateRight {
+   position 148 392
+   size 124 32
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 3
+   style Empty
+   userID 2
+   {
+    PanelWidgetClass RotateRightBg {
+     ignorepointer 1
+     color 0.28 0.28 0.28 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 1
+     style rover_sim_colorable
+    }
+    TextWidgetClass RotateRightCaption {
+     ignorepointer 1
+     color 1 1 1 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 2
+     text "Rotate right"
+     font "gui/fonts/sdf_MetronBook24"
+     "exact text" 1
+     "exact text size" 15
+     "text halign" center
+     "text valign" center
+    }
+   }
+  }
+  ButtonWidgetClass BtnClose {
+   position 280 392
+   size 124 32
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   priority 3
+   style Empty
+   userID 3
+   {
+    PanelWidgetClass CloseBg {
+     ignorepointer 1
+     color 0.28 0.28 0.28 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 1
+     style rover_sim_colorable
+    }
+    TextWidgetClass CloseCaption {
+     ignorepointer 1
+     color 1 1 1 1
+     position 0 0
+     size 1 1
+     hexactpos 0
+     vexactpos 0
+     hexactsize 0
+     vexactsize 0
+     priority 2
+     text "Close"
+     font "gui/fonts/sdf_MetronBook24"
+     "exact text" 1
+     "exact text size" 15
+     "text halign" center
+     "text valign" center
+    }
+   }
+  }
+ }
+}
