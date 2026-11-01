@@ -3,9 +3,10 @@
 Refusals are the defects the engine reports nowhere: a quote inside a text
 value hangs its layout parser (measured 2026-08-30 by bisecting a file), an
 unquoted multi-word key or an unknown class is ignored without a word, and an
-ItemPreviewWidget under a priority above 256 draws nothing (measured: 256
-draws, 300 does not). Warnings are the things the eyes (ui_preview) settle
-for certain but which are cheap to name here.
+ItemPreviewWidget whose own priority is 300 or more, or below 100 under an
+ancestor at 100 or more, draws nothing (measured 2026-11-01, 74 cells).
+Warnings are the things the eyes (ui_preview) settle for certain but which
+are cheap to name here.
 """
 from __future__ import annotations
 
@@ -15,9 +16,47 @@ from .layoutparse import LayoutNode, LayoutProp, LayoutSyntaxError, parse_layout
 from .layoutvocab import load_vocab
 from .lint import REFUSE, WARN, Finding
 
-#: Above this, ItemPreviewWidget silently draws nothing. Measured live 2026-08
-#: in a scripted menu: 256 draws, 300 does not; vanilla never goes above 151.
-PREVIEW_PRIORITY_MAX = 256
+#: ItemPreviewWidget and `priority`, measured 2026-11-01 on DayZ 1.30.164200 (74
+#: cells, skill gui-layouts.md §13): the preview's OWN priority decides. 201 drew
+#: under every root from 1 to 998 -- the vanilla tooltip is 952 > 0 > 201; 300 and
+#: above never drew, nor did anything under a middle frame at 300; below 100 it drew
+#: only while every ancestor was below 100; 100 drew under root 100 and under
+#: 150 > 5, not under roots 256 or 952. The 2026-08 rule, "nothing above 256 on the
+#: way to the preview", refused layouts that draw.
+PREVIEW_OWN_NEVER = 300
+PREVIEW_LOW_OWN = 100
+PREVIEW_SAFE_OWN = 201
+PREVIEW_HIGH_ROOT = 256
+
+
+def preview_priority_verdict(own: int, ancestors: list[int]) -> tuple[str, str, str] | None:
+    """(severity, message, hint) for an ItemPreviewWidget at priority `own` under
+    `ancestors` -- outermost first, the layout's root at [0] -- or None when the
+    measurement has nothing against it.
+
+    One layout file is all this sees: a root created inside another menu is a
+    middle frame in the engine's tree, so a chain spread over two files is
+    judged in halves.
+    """
+    hint = (f"give the preview itself priority {PREVIEW_SAFE_OWN} "
+            "(vanilla's tooltip: root 952 > frame 0 > preview 201)")
+    if own >= PREVIEW_OWN_NEVER:
+        return (REFUSE, f"its own priority {own} is {PREVIEW_OWN_NEVER} or more -- the model never "
+                        "drew there (measured)", hint)
+    middles = [p for p in ancestors[1:] if p >= PREVIEW_OWN_NEVER]
+    if middles:
+        return (REFUSE, f"a frame between the root and the preview sits at priority {max(middles)} -- "
+                        f"under a middle frame at {PREVIEW_OWN_NEVER} the model never drew (measured)",
+                hint)
+    top = max(ancestors, default=0)
+    if own < PREVIEW_LOW_OWN and top >= PREVIEW_LOW_OWN:
+        return (REFUSE, f"its own priority {own} is below {PREVIEW_LOW_OWN} under an ancestor at {top} "
+                        "-- that never drew (measured)", hint)
+    if own < PREVIEW_SAFE_OWN and top >= PREVIEW_HIGH_ROOT:
+        return (WARN, f"its own priority {own} under an ancestor at {top}: own 100 did not draw under "
+                      f"roots {PREVIEW_HIGH_ROOT} and 952, own {PREVIEW_SAFE_OWN} drew under every root "
+                      "measured", hint)
+    return None
 
 #: What may draw a frame behind an edit box.
 FRAMING_CLASSES = ("PanelWidgetClass", "ImageWidgetClass", "FrameWidgetClass")
@@ -48,7 +87,7 @@ def lint_layout(text: str, file: str = "", vocab: dict | None = None,
         _check_name(node, first_seen, file, out)
         _check_edit_boxes(node, file, out)
         _check_proportional_magnitude(node, file, out)
-    _check_preview_priority(root, 0, file, out)
+    _check_preview_priority(root, [], file, out)
     return out
 
 
@@ -249,19 +288,19 @@ def _check_proportional_magnitude(node: LayoutNode, file: str, out: list[Finding
                            file, node.line))
 
 
-def _check_preview_priority(node: LayoutNode, inherited: int, file: str, out: list[Finding]) -> None:
+def _check_preview_priority(node: LayoutNode, chain: list[int], file: str, out: list[Finding]) -> None:
+    mine = 0
     own = node.prop("priority")
-    current = inherited
     if own:
         try:
-            current = max(inherited, int(float(own[0])))
+            mine = int(float(own[0]))
         except ValueError:
             pass
-    if node.cls == "ItemPreviewWidgetClass" and current > PREVIEW_PRIORITY_MAX:
-        out.append(Finding("layout-preview-priority", REFUSE,
-                           f"ItemPreviewWidgetClass {node.name!r} sits under priority {current}, above "
-                           f"{PREVIEW_PRIORITY_MAX} -- the engine draws nothing there (measured)",
-                           "lower the priority of the preview widget and of every ancestor to 256 or less",
-                           file, node.line))
+    if node.cls == "ItemPreviewWidgetClass":
+        verdict = preview_priority_verdict(mine, chain)
+        if verdict:
+            severity, message, hint = verdict
+            out.append(Finding("layout-preview-priority", severity,
+                               f"ItemPreviewWidgetClass {node.name!r}: {message}", hint, file, node.line))
     for child in node.children:
-        _check_preview_priority(child, current, file, out)
+        _check_preview_priority(child, chain + [mine], file, out)

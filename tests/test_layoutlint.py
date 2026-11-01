@@ -97,14 +97,43 @@ def test_a_negative_size_is_refused_but_a_negative_position_is_fine():
     assert checks(wrap("  PanelWidgetClass P {\n   position -1 -1\n   size 10 10\n  }\n")) == []
 
 
-def test_an_item_preview_under_a_high_priority_is_refused():
-    text = ("FrameWidgetClass Root {\n priority 990\n {\n"
-            "  ItemPreviewWidgetClass P {\n   size 1 1\n  }\n }\n}\n")
-    f = one(text, "layout-preview-priority")
-    assert f.severity == REFUSE and "990" in f.message
-    fine = ("FrameWidgetClass Root {\n priority 200\n {\n"
-            "  ItemPreviewWidgetClass P {\n   size 1 1\n   priority 250\n  }\n }\n}\n")
-    assert checks(fine) == []
+def _preview(root: int, own: int | None, mid: int | None = None) -> str:
+    own_line = f"   priority {own}\n" if own is not None else ""
+    prev = f"  ItemPreviewWidgetClass P {{\n   size 1 1\n{own_line}  }}\n"
+    if mid is not None:
+        prev = (f"  FrameWidgetClass Mid {{\n   priority {mid}\n   {{\n"
+                + "".join("  " + line + "\n" for line in prev.splitlines()) + "   }\n  }\n")
+    return f"FrameWidgetClass Root {{\n priority {root}\n {{\n{prev} }}\n}}\n"
+
+
+def test_an_item_preview_low_under_a_high_root_is_refused():
+    # The 2026-08 symptom: a menu root at 990 over a preview at the default priority.
+    f = one(_preview(990, None), "layout-preview-priority")
+    assert f.severity == REFUSE and "990" in f.message and "201" in f.hint
+    assert one(_preview(100, 99), "layout-preview-priority").severity == REFUSE
+    assert one(_preview(5, 1, mid=150), "layout-preview-priority").severity == REFUSE
+    assert checks(_preview(99, 1)) == [] and checks(_preview(5, 1, mid=99)) == []
+
+
+def test_vanilla_tooltip_shape_and_201_under_any_root_pass():
+    # inventory_new/day_z_inventory_new_tooltip.layout: root 952 > frame 0 > preview 201.
+    assert checks(_preview(952, 201, mid=0)) == []
+    assert checks(_preview(998, 201)) == [] and checks(_preview(1, 201)) == []
+    assert checks(_preview(100, 100)) == [] and checks(_preview(50, 299)) == []
+
+
+def test_an_item_preview_at_300_or_under_a_300_frame_is_refused():
+    f = one(_preview(5, 300), "layout-preview-priority")
+    assert f.severity == REFUSE and "300 or more" in f.message
+    f = one(_preview(99, 150, mid=300), "layout-preview-priority")
+    assert f.severity == REFUSE and "middle frame" in f.message
+
+
+def test_a_preview_below_201_under_a_256_root_warns():
+    f = one(_preview(256, 100), "layout-preview-priority")
+    assert f.severity == WARN
+    assert one(_preview(952, 200), "layout-preview-priority").severity == WARN
+    assert checks(_preview(255, 100)) == []
 
 
 def test_a_scroll_widget_without_clipchildren_warns():

@@ -661,8 +661,10 @@ and a background panel made no difference), but three things held every time:
 So the rule this section opened with in 2026-08 -- "the preview or ANY ancestor at 300+
 kills it" -- is wrong: a 998 root over a 201 preview draws. The 2026-08 ladder below fits
 the own-priority rows if its root was below 100 (the root was not recorded), and the menu
-story after it fits the third rule. The `dayz` MCP's `mod_lint` check `layout-preview-priority` still encodes the old rule
-and refuses vanilla's tooltip shape (noted 2026-11-01).
+story after it fits the third rule. The `dayz` MCP's `mod_lint` check `layout-preview-priority`
+and its layout generator follow this table since 2026-11-01: they refuse an own priority of 300
+or more, a middle frame at 300 or more, and an own priority below 100 under an ancestor at 100
+or more, and warn below 201 under an ancestor at 256 or more; vanilla's tooltip shape passes.
 
 The 2026-08 ladder, one boot per rung, same item and same position, only the number
 changed:

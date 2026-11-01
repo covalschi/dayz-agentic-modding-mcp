@@ -790,12 +790,28 @@ def test_listbox_and_raw_pass_their_properties_through():
     assert clean(text) == []
 
 
-def test_a_preview_under_a_high_priority_is_refused():
-    with pytest.raises(LayoutGenError, match="priority 300 above 256 on the way to the preview"):
+def test_a_preview_follows_the_measured_priority_rule():
+    # skill gui-layouts.md §13, measured 2026-11-01: a middle frame at 300 and an own
+    # priority of 300 never drew; a low own priority under an ancestor at 100+ never drew.
+    with pytest.raises(LayoutGenError, match="middle frame at 300"):
         build(page({"frame": {"name": "Card", "size": [300, 300], "priority": 300, "children": [
-            {"preview": {"name": "ItemView", "size": [200, 200]}}]}}))
+            {"preview": {"name": "ItemView", "size": [200, 200], "priority": 201}}]}}))
+    with pytest.raises(LayoutGenError, match="300 or more"):
+        build(page({"preview": {"name": "ItemView", "size": [200, 200], "priority": 300}}))
+    high_root = {"frame": {"name": "MyPage", "size": [640, 518], "priority": 952}}
+    with pytest.raises(LayoutGenError, match="below 100 under an ancestor at 952"):
+        build(page({"preview": {"name": "ItemView", "size": [200, 200], "priority": 1}}, root=high_root))
+    # Vanilla's tooltip shape draws: root 952 > frame 0 > preview 201.
+    out = build(page({"frame": {"name": "Card", "size": [300, 300], "priority": 0, "children": [
+        {"preview": {"name": "ItemView", "size": [200, 200], "priority": 201}}]}}, root=high_root))
+    text = out.files["MyMod/gui/layouts/my_page.layout"]
+    assert "ItemPreviewWidgetClass ItemView {" in text and clean(text) == []
     out = build(page({"preview": {"name": "ItemView", "size": [200, 200], "priority": 256}}))
     assert "  ItemPreviewWidgetClass ItemView {\n   visible 1\n   position 20 20\n   size 200 200\n" in out.files["MyMod/gui/layouts/my_page.layout"]
+    # Doubtful, not refused: below 201 under an ancestor at 256 builds with a note.
+    out = build(page({"preview": {"name": "ItemView", "size": [200, 200], "priority": 100}},
+                     root={"frame": {"name": "MyPage", "size": [640, 518], "priority": 256}}))
+    assert any("own 100 did not draw" in n for n in out.notes)
 
 
 def test_stack_children_may_not_fill():
