@@ -1422,7 +1422,12 @@ authors of a stand mod's tree skins (2026-10-31; offline, not measured in the en
   monospace (the 12-px file: I 3, M 9, W 10 px). Its `.edds` atlases have NO
   mipmaps (mipcount 1, unlike a mod's own fonts from §30): take the file nearest
   the drawn size -- a big cell shrunk far may alias. Cap height .625, x-height
-  .479, baseline .775 of the cell. Its capital І still wants one look on screen.
+  .479, baseline .775 of the cell. Seen on screen 2026-11-01 (DayZ 1.30.164200, a stand
+  mod's `MultilineEditBox` with `"exact text" 1` at 3840x1600): typed on the Ukrainian
+  keyboard layout, `etelkatextpro14` drew "і І ї є Привіт" whole, where `MetronBook14` in the
+  same box had drawn the capital І blank -- the drop-in face for an edit box that takes
+  Ukrainian. Typing went through only with the game's language set to English: with
+  `language="Russian"` the same Ukrainian keystrokes arrived as Russian letters or broken.
 
 ## 26. OnDoubleClick DOES reach a ButtonWidgetClass row, via the owning menu (measured 2026-09-09)
 
