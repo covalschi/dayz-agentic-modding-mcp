@@ -1,6 +1,0 @@
-*.py     text eol=lf
-*.toml   text eol=lf
-*.md     text
-*.log    text eol=lf
-*.json   text eol=lf
-*.layout text eol=lf

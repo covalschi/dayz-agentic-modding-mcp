@@ -21,7 +21,16 @@ ALLOWED = {
     # one. Naming it here therefore does not make the server fit one project --
     # which is the only thing this guard exists to prevent.
     "@DZMCP_Bridge",
+    # Not a mod folder: Claude Code names a plugin `<plugin>@<marketplace>`, and
+    # this repository's marketplace is `dayz-agentic-modding` (README, Install).
+    "@dayz",
 }
+
+#: The skill this repository ships (skills/) is a reference on the DayZ
+#: ecosystem: naming third-party mods -- their folders, their classes -- is its
+#: content, not the server bending towards one project. The mod-folder sweep
+#: below therefore leaves it out; the owner-prefix sweep still covers it.
+KNOWLEDGE_DIRS = ("skills",)
 
 # A mod folder name. Case-INSENSITIVE on purpose: real mods are not all
 # capitalised. This machine's own modpack carries lowercase ones, and at least
@@ -106,10 +115,10 @@ OWNER_PREFIXES = (("Open", r"Zone\w*"), ("OZ", r"_\w+"), ("oz", r"_\w+"))
 OWNER_TOKEN = re.compile("|".join(r"\b" + head + tail for head, tail in OWNER_PREFIXES))
 #: Where the owner's prefixes are swept: the server, its tests, the bridge mod
 #: this server packs and ships (Enforce Script, not Python -- see the
-#: `@DZMCP_Bridge` allow-list entry above), and the one document that
-#: describes it to a stranger. Plan folders and notes are the owner's own
-#: workspace and name his projects on purpose.
-OWNER_SCOPE = ("src", "tests", "bridge", "README.md")
+#: `@DZMCP_Bridge` allow-list entry above), the one document that describes
+#: it to a stranger, and the skill it ships to strangers. Plan folders and
+#: notes are the owner's own workspace and name his projects on purpose.
+OWNER_SCOPE = ("src", "tests", "bridge", "README.md", "skills")
 
 
 def owner_tokens(text: str) -> set[str]:
@@ -143,6 +152,8 @@ def test_no_concrete_mod_names_anywhere():
     fixture is the first step towards a parser that only fits one project."""
     offenders = {}
     for path in iter_text_files():
+        if path.relative_to(ROOT).parts[0] in KNOWLEDGE_DIRS:
+            continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         found = offending_tokens(text, is_python=path.suffix.lower() == ".py")
         if found:
