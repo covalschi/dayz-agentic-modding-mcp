@@ -38,8 +38,8 @@ Notes:
 
   | Context | Prefix |
   |---|---|
-  | config.cpp (`displayName`, `descriptionShort`, ...) | `$STR_key` |
-  | scripts (`m_Text`, `SetText`, ...) and .layout files | `#STR_key` |
+  | config.cpp (`displayName`, `descriptionShort`, ...) | `$STR_name` |
+  | scripts (`m_Text`, `SetText`, ...) and .layout files | `#STR_name` |
   | inputs.xml `loc=` attribute | bare key, no prefix |
 
 - With no custom model, reuse vanilla `model=` paths (grep the extracted game data or the

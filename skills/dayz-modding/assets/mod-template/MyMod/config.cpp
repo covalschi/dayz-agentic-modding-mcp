@@ -42,7 +42,7 @@ class CfgVehicles
     class MyMod_Device : Inventory_Base
     {
         scope = 2;
-        // NOTE prefix contexts: config.cpp uses "$STR_key"; scripts/layouts use "#STR_key";
+        // NOTE prefix contexts: config.cpp uses "$STR_name"; scripts/layouts use "#STR_name";
         // inputs.xml loc= takes the bare key (verified against vanilla + production mods)
         displayName = "$STR_mymod_device";
         descriptionShort = "$STR_mymod_device_desc";

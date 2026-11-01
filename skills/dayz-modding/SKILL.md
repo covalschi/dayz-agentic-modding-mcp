@@ -189,7 +189,7 @@ modded class PlayerBase          // injected subclass; chains across mods
 | `CreateWidgets(path)` returns null on a bad path (the script log gets `Cannot load layout`, the caller only a null) | always null-check; the path starts at your mod's prefix |
 | `widget.SetHandler(h)` keeps ONE handler — last wins silently | give each widget one owner. `WidgetEventHandler.GetInstance().RegisterOnClick` is no way around it: it calls `SetHandler(this)` itself, displacing yours, and keeps one callback per widget and event (`map.Insert`: the first registration wins; widgeteventhandler.c:133-138) |
 | Hand-rolled ChangeGameFocus/ShowUICursor must balance open/close | imbalance freezes player input (#1 UI bug) |
-| config.cpp strings use `$STR_key`; scripts/layouts `#STR_key`; inputs.xml bare key | wrong prefix = raw key shown |
+| config.cpp strings use `$STR_name`; scripts/layouts `#STR_name`; inputs.xml the bare name | wrong prefix = the raw name shown |
 
 ## The dev loop
 

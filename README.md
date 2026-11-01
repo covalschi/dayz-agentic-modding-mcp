@@ -653,7 +653,7 @@ build takes is the size of the disk, not of the model:
 `subst`, starts `binarize` from it with the source named on the letter, and
 removes the letter when the process is gone. A letter whose root is the
 declared root *is* that root, so nothing about the artifact changes: C3 and C4,
-the two checks that only a correct working directory can pass, pass, and the
+the two checks that fail from a wrong working directory, both succeed, and the
 files come out the same size to within three bytes. The job's artifact records
 the directory the tool really ran from (`cwd`).
 
@@ -1034,8 +1034,8 @@ The plugin brings the server and the `dayz-modding` skill. In Claude Code:
     /plugin marketplace add covalschi/dayz-agentic-modding-mcp
     /plugin install dayz-agentic-modding@dayz-agentic-modding
 
-The plugin starts the server with `uv run --frozen`, so [uv](https://docs.astral.sh/uv/)
-must be on `PATH`; the first start builds the environment from `uv.lock` (seconds). A
+The plugin starts the server with `uv run --frozen`, so uv (Astral's Python package
+manager) must be on `PATH`; the first start builds the environment from `uv.lock` (seconds). A
 project still needs its `dayz-mcp.toml` and `dayz-mcp.local.toml` ("Why a profile"
 above). The gamepad stays optional: the plugin does not install the `client` extra.
 
