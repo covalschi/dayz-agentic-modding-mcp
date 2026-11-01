@@ -1,6 +1,6 @@
 {
   "name": "dayz",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agentic DayZ modding: an MCP server that lints, packs, signs, boots and judges a mod on a local stand, drives a live client and publishes to the Steam Workshop, plus the dayz-modding skill of measured engine facts.",
   "author": {
     "name": "Alexandru Covalschi",
@@ -13,7 +13,7 @@
   "mcpServers": {
     "dayz": {
       "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "dayz-mcp"]
+      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "dayz-mcp"]
     }
   }
 }

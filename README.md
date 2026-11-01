@@ -1031,10 +1031,31 @@ The plugin brings the server and the `dayz-modding` skill. In Claude Code:
     /plugin marketplace add covalschi/dayz-agentic-modding-mcp
     /plugin install dayz@dayz-agentic-modding
 
-The plugin starts the server with `uv run`, so [uv](https://docs.astral.sh/uv/) must be
-on `PATH`; the first start builds the environment (seconds). A project still needs its
-`dayz-mcp.toml` and `dayz-mcp.local.toml` ("Why a profile" above). The gamepad stays
-optional: the plugin does not install the `client` extra.
+The plugin starts the server with `uv run --frozen`, so [uv](https://docs.astral.sh/uv/)
+must be on `PATH`; the first start builds the environment from `uv.lock` (seconds). A
+project still needs its `dayz-mcp.toml` and `dayz-mcp.local.toml` ("Why a profile"
+above). The gamepad stays optional: the plugin does not install the `client` extra.
+
+### What the plugin runs, sends and fetches
+
+Everything runs on your machine, under your user, and only when a tool is called.
+
+- **Programs it starts:** DayZ Tools (FileBank, DSSignFile, CfgConvert, BankRev,
+  binarize, ImageToPAA), the DayZ server and client that the project's
+  `dayz-mcp.local.toml` names, and, only for the tools that need them, Blender and the
+  ViGEm virtual gamepad. The game's own server and client talk to Steam as DayZ always does.
+- **Input it sends:** keyboard, mouse and gamepad input to the DayZ client it started
+  (the `client_*` and `ui_*` tools).
+- **Files it writes:** the mod's packed and signed output, the stand's profiles and logs,
+  and its own state, the knowledge index included, in the project's `.dayz-mcp/` folder.
+- **Network:**
+  - `workshop_publish` uploads the mod's files and listing to the Steam Workshop through
+    the Steam client you are logged into (`steam_api64.dll` from the game folder);
+  - `workshop_status`, and `workshop_publish` when it reads an upload back, ask Steam's
+    public `ISteamRemoteStorage/GetPublishedFileDetails` endpoint for the item, without a key;
+  - `server_mods` sends A2S queries (UDP) to the game server address you give it.
+
+Nothing else leaves the machine: no telemetry, no other endpoint.
 
 ### By hand
 
