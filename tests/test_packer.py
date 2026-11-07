@@ -43,6 +43,81 @@ def test_filebank_command_shape():
     assert "-dst" in cmd
     assert "prefix=MyMod" in " ".join(cmd)
     assert cmd[-1].endswith("MyMod")
+    assert not any(a.startswith("version=") for a in cmd)
+
+
+def test_filebank_command_carries_the_version_property():
+    cmd = filebank_cmd(Path("C:/T/FileBank.exe"), "MyMod", Path("C:/r/MyMod"), Path("C:/r/@MyMod/addons"), "26110715")
+    i = cmd.index("version=26110715")
+    assert cmd[i - 1] == "-property"
+    assert "prefix=MyMod" in cmd
+    assert cmd[-1].endswith("MyMod")
+
+
+def test_pbo_version_is_an_hourly_utc_stamp():
+    from datetime import datetime, timezone
+
+    from dayz_mcp.packer import pbo_version
+    assert pbo_version(datetime(2026, 11, 7, 15, 59, tzinfo=timezone.utc)) == "26110715"
+    assert pbo_version().isdigit() and len(pbo_version()) == 8
+
+
+def test_pack_one_rewrites_a_pbo_newer_than_its_sources(tmp_path, monkeypatch):
+    # FileBank itself skips a pbo that looks up to date; pack_one moves the old
+    # one aside so the stub (like FileBank) has to write a new file.
+    import dayz_mcp.packer as packer
+    out = tmp_path / "@MyMod" / "addons"
+    out.mkdir(parents=True)
+    _mod_source(tmp_path)
+    (out / "MyMod.pbo").write_bytes(b"old build")
+    seen_before_pack = []
+
+    def run(cmd, cwd, log_path, timeout=None):
+        if cmd[0].endswith("FileBank.exe"):
+            seen_before_pack.append((out / "MyMod.pbo").exists())
+            (out / "MyMod.pbo").write_bytes(b"new build")
+        return 0, "ok"
+
+    monkeypatch.setattr(packer, "run_blocking", run)
+    res = pack_one("MyMod", tmp_path, _stub_filebank_tools(tmp_path), tmp_path / "log.txt")
+    assert not res.error, res.error
+    assert seen_before_pack == [False]
+    assert (out / "MyMod.pbo").read_bytes() == b"new build"
+    assert not (out / "MyMod.pbo.prev").exists()
+
+
+def test_pack_one_restores_the_previous_pbo_when_filebank_fails(tmp_path, monkeypatch):
+    import dayz_mcp.packer as packer
+    out = tmp_path / "@MyMod" / "addons"
+    out.mkdir(parents=True)
+    _mod_source(tmp_path)
+    (out / "MyMod.pbo").write_bytes(b"old build")
+
+    def run(cmd, cwd, log_path, timeout=None):
+        return (1, "FileBank broke") if cmd[0].endswith("FileBank.exe") else (0, "ok")
+
+    monkeypatch.setattr(packer, "run_blocking", run)
+    res = pack_one("MyMod", tmp_path, _stub_filebank_tools(tmp_path), tmp_path / "log.txt")
+    assert res.error
+    assert (out / "MyMod.pbo").read_bytes() == b"old build"
+    assert not (out / "MyMod.pbo.prev").exists()
+
+
+def test_pack_one_passes_a_version_to_filebank(tmp_path, monkeypatch):
+    import dayz_mcp.packer as packer
+    seen = []
+    inner = _pbo_writing_filebank(tmp_path)
+
+    def run(cmd, cwd, log_path, timeout=None):
+        seen.append(list(cmd))
+        return inner(cmd, cwd, log_path, timeout)
+
+    monkeypatch.setattr(packer, "run_blocking", run)
+    _mod_source(tmp_path)
+    res = pack_one("MyMod", tmp_path, _stub_filebank_tools(tmp_path), tmp_path / "log.txt")
+    assert not res.error, res.error
+    fb = [c for c in seen if c[0].endswith("FileBank.exe")][0]
+    assert any(a.startswith("version=") and a[len("version="):].isdigit() for a in fb)
 
 
 def test_sign_command_shape():

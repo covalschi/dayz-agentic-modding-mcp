@@ -28,6 +28,7 @@ import stat
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .paths import CFGCONVERT_REL, FILEBANK_REL, SIGNER_REL
@@ -71,8 +72,27 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
 ALWAYS_OMIT_FROM_STAGING: tuple[str, ...] = ("dayz-mcp.toml", "dayz-mcp.local.toml", ".dayz-mcp")
 
 
-def filebank_cmd(filebank: Path, name: str, src: Path, out_dir: Path) -> list[str]:
-    return [str(filebank), "-dst", str(out_dir), "-property", f"prefix={name}", str(src)]
+def pbo_version(now: datetime | None = None) -> str:
+    """The build stamp written into a pbo's header as `version`: YYMMDDHH, UTC.
+
+    The engine prints a pbo's `version` property beside it in the server's RPT
+    (`.../addons/MyMod.pbo - 26110715`). A pbo without one is listed as
+    `unknown` -- the only such lines in a list where vanilla and the usual
+    Workshop mods all carry a number (measured 2026-11-07, retail 1.30.164289,
+    Windows and Linux), which server owners read as a pbo that was never built.
+    The format follows the stamps other Workshop mods carry and stays below
+    2**31 as a number.
+    """
+    return (now or datetime.now(timezone.utc)).strftime("%y%m%d%H")
+
+
+def filebank_cmd(filebank: Path, name: str, src: Path, out_dir: Path, version: str = "") -> list[str]:
+    cmd = [str(filebank), "-dst", str(out_dir), "-property", f"prefix={name}"]
+    if version:
+        # FileBank takes -property more than once (checked 2026-11-07: the
+        # header then holds both prefix and version).
+        cmd += ["-property", f"version={version}"]
+    return cmd + [str(src)]
 
 
 def sign_cmd(signer: Path, private_key: Path, pbo: Path) -> list[str]:
@@ -386,12 +406,38 @@ def pack_one(
                 + ", ".join(reserved_out)
             )
 
+    pbo = out_dir / f"{name}.pbo"
+    # FileBank skips rewriting a pbo whose sources all look older than it, and
+    # still exits 0. A mod untouched since its last build therefore kept that
+    # build's header for good -- measured 2026-11-07: rebuilt with the version
+    # property, the unchanged mods came out with no `version` at all. Moving
+    # the old pbo aside makes every build a real write. It comes back when this
+    # build produces nothing, so a failed build still leaves the previous pbo
+    # where it was (the module's contract above).
+    previous = out_dir / f"{name}.pbo.prev"
+    moved_aside = False
+    if pbo.exists():
+        try:
+            previous.unlink(missing_ok=True)
+            pbo.replace(previous)
+            moved_aside = True
+        except OSError:
+            # Held open, usually by a running server: FileBank cannot write it
+            # either, and the stale-pbo check below says exactly that.
+            moved_aside = False
+
     try:
-        code, tail = run_blocking(filebank_cmd(filebank, name, pack_src, out_dir), root, log_path, timeout=1800)
+        code, tail = run_blocking(
+            filebank_cmd(filebank, name, pack_src, out_dir, pbo_version()), root, log_path, timeout=1800
+        )
+        if moved_aside:
+            if code == 0 and pbo.exists():
+                previous.unlink(missing_ok=True)
+            else:
+                previous.replace(pbo)
         if code != 0:
             return PackResult(name, error=f"FileBank exit {code}: {tail[-300:]}")
 
-        pbo = out_dir / f"{name}.pbo"
         if not pbo.exists():
             return PackResult(name, error=f"{pbo} was not produced")
 
