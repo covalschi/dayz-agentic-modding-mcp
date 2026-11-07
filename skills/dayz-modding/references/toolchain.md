@@ -31,8 +31,20 @@ TerrainProcessor, Workbench, WorkDrive.
 With the `dayz` MCP: sources live in the mod's repository, and
 `mod_build` packs them with FileBank and signs them with DSSignFile
 (`project_open` -> `mod_lint` -> `mod_build` -> `server_start` -> `log_verdict`). FileBank
-does not binarize and does not parse `config.cpp`. The generic loop, for a machine with a
-working Addon Builder:
+does not binarize and does not parse `config.cpp`. Two FileBank facts measured 2026-11-07:
+
+- `-property name=value` may be given more than once; every pair lands in the pbo header.
+  The header's `version` is what a server's RPT prints beside each pbo it loads
+  (`.../addons/MyMod.pbo - 26110715`); a pbo without one is listed as `unknown`, the only
+  such lines among vanilla and the usual Workshop mods (retail 1.30.164289, Windows and
+  Linux), which server owners read as a pbo that was never built. `mod_build` writes a
+  YYMMDDHH (UTC) build stamp there.
+- FileBank silently skips rewriting a pbo whose source files are all older than it, and
+  still exits 0. Changing only the command line (a new `-property`) therefore changes
+  nothing until the old pbo is gone; `mod_build` moves it aside before packing and puts it
+  back if the pack fails.
+
+The generic loop, for a machine with a working Addon Builder:
 
 1. Sources at `<work>\MyMod\` (or `P:\MyMod`): `config.cpp` + `scripts\...`.
 2. Pack once with **Addon Builder**: source dir `MyMod`, output `<work>\@MyMod\addons\`.

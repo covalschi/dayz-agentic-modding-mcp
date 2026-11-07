@@ -1805,6 +1805,28 @@ byte-identical between client and server. Experimental got the same build on 202
   menu scene); `set:dayz_gui image:externallink` and `PluginConfigDebugProfile is not
   Registred` were already there on 164078.
 
+## DayZ 1.30 hotfix 1.30.164289 (stable 2026-11-04; measured 2026-11-07)
+
+- The client and DayZDiag went to `1.30.164289.70` on 2026-11-04, `dta/scripts.pbo` version
+  127855 (164200: 127662). On the same machine the Steam dedicated server app was still
+  164200 three days later with its update pending, so a stand that boots the retail server
+  and one that boots DayZDiag can sit on different builds. Read the `Version` line of each RPT.
+- A mod set built and published for 164200 (FileBank pbos with a text `config.cpp`, ODOL
+  models, CF and VPPAdminTools beside it) compiled and booted unchanged on diag 164289:
+  server and client, client without `-filePatching`, models and textures drawn. The same on
+  the retail `DayZServer_x64.exe` 164289 (defines `RELEASE`, no `DIAG`) with `verifySignatures
+  = 2` and the mods' `.bikey` files in the server's `keys`, joined by the retail client through
+  `DayZ_BE.exe`: no kick, no script error, models drawn. A script mod that was clean on 164200
+  has no reason found here to rebuild for 164289.
+- Diag client with VPPAdminTools, holding an item: VM exceptions `NULL pointer to instance`
+  in `DayZPlayerInventory.HandleHandEvent` (`dayzplayerinventory.c:4549`, `GetPlugin()` in the
+  stack) and `OnHandleStoredJunctureData` (`:670`), reached through VPP's modded
+  `PlayerBase.CommandHandler`. No mod class in the stack; diag-only noise. Whether it needs
+  VPP was not checked.
+- `ENGINE (E): Can't load settings ./$CurrentDir:DayZSetting.xml` on a diag server is vanilla
+  noise (every boot on 164200 and 164289), as are `Unknown object class 'thing'` warnings for
+  vanilla `dz\structures\...` models: several hundred per boot on both builds.
+
 ## DayZ 1.30: radio and underground, what script can reach (read 2026-10-23, 1.30.164200 scripts)
 
 Read out of `scripts.pbo` while answering "can the radio lose range or crackle underground";
