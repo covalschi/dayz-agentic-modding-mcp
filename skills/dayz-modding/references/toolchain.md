@@ -740,7 +740,14 @@ and `verifySignatures = 2`: `BattlEye Server: Initialized (v1.220, DayZ 1.29.163
 SteamGameServer_Init(...)`, the mods' ready lines 22 s after start, `Mission read.` at 40 s (fresh
 Chernarus, empty storage), rss about 5 GB, 31 threads, UDP on the port, port+2 and steamQueryPort.
 Mixed-case mod folders and pbo names (`@MyMod_Radio/addons/MyMod_Radio.pbo`) load from ext4
-as they are. SIGINT in the main loop is a clean stop in 12-19 s (`--- Termination successfully
+as they are, and so do folder names with spaces (`"-mod=@CF;@My Mod"`, 1.30.164289). ABSOLUTE
+paths in `-mod` are skipped without a word (`-mod=/mnt/e/.../1559212036;...` added no package at
+all, measured 2026-11-08): name the mods relative to the server folder; a symlink there to a
+folder elsewhere loads fine (68 Workshop folders on a Windows drive under `/mnt/e`, linked as
+`@w01_<id>`..., all mounted). A DayZDiag server, unlike retail, stops at a third-party config
+warning with a MODAL dialog (`'Static_' prefix is reserved for classes in 'CfgNonAIVehicles'`)
+and waits for OK, so a big foreign mod set is checked on the retail or Linux server, which only
+logs it. SIGINT in the main loop is a clean stop in 12-19 s (`--- Termination successfully
 completed ---`, exit status 255); a SIGINT sent during start-up (7 s in) is ignored and NOT
 remembered, so a supervisor has to send it again or kill. Without game data the bare binary prints
 `No entry '.CfgVoiceTypes'.` and segfaults (it then tries to run `./CrashReporter`, which the
