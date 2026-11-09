@@ -785,3 +785,31 @@ From Git Bash prefix a `wsl.exe` call with `MSYS_NO_PATHCONV=1`. A full twelve-f
 of its own on 2026-10-05 with 0 script errors; VPP writes its own profile tree. A bare folder
 (binary + library only, no game data) is enough for a two-second self-test of the library, if
 the library carries one.
+
+**Joining a WSL server from the same Windows host** (measured 2026-11-08: retail client
+1.30.164289 through BattlEye, `DayZServer` 1.30.164289, WSL2 in NAT mode). The client reaches the
+distro's address (`netcrypt::connected::server`), but the server sees it as the NAT gateway
+(`172.x.x.1:<port>`) and kicks it after exactly 10 s: `kicked from server: 49 (Login timed out.
+(WaitAuthPlayerLoginState))`, although the server is `Connected to Steam` with a `Steam policy
+response` and its BattlEye is initialised. A UDP relay on the Windows side (client to
+`127.0.0.1:2302`, relay to the distro) changes nothing: what decides is the address the SERVER
+sees. A relay INSIDE the distro, from `<distro address>:2402` to `127.0.0.1:2302`, makes the
+client a loopback peer, and the same login passes at once (`WaitPlayerAssignedLoginState`,
+`BattlEye Server: Connected to BE Master`, uid assigned); chain the Windows-side relay
+(`127.0.0.1:2302` -> `<distro address>:2402`) in front of it and the client keeps
+`-connect=127.0.0.1 -port=2302`. Each relay is a few dozen lines of Python: a listening socket per
+port, one upstream socket per client address (bound to 127.0.0.1 when the target is loopback),
+replies sent back through the listening socket; on Windows swallow `ConnectionResetError` from
+`recvfrom` (an ICMP port-unreachable surfaces there). Mirrored networking was not tried. The
+quirk belongs to this NAT hop, not to the Linux server: hosted Linux servers authenticate their
+players normally.
+
+**A crash after a clean stop.** One SIGINT sent about a second after `Connected to Steam`
+(1.30.164289, measured 2026-11-08) printed `--- Termination successfully completed ---` and then
+`Application crashed! Generated memory dump: profiles/<name>.mdmp` (the server then tries
+`./CrashReporter`, which the depot does not ship). The dump is a Breakpad minidump; streams 6
+(exception record and context), 4 (modules), 3 (threads with their stack memory) and 0x47670003
+(`/proc` status of the crashing thread) read with a page of Python: SIGSEGV at address 0x10 in
+the thread `IPC:CSteamEngin`, RIP and every frame of a stack scan inside `steamclient.so`, no
+frame of the server or of a preloaded library. The four other stops of that set, two of them
+with a player in the world, were clean: a shutdown race in Steam's client library, not a mod's.

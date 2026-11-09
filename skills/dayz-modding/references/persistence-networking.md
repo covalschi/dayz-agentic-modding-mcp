@@ -1720,6 +1720,18 @@ entity.
   registers in the stand-in test). Anonymous steamcmd refuses app 1042420 ("Missing
   configuration"); a logged-in Steam client's console `download_depot 1042420 1042422` fetched the
   4-file, 33 MB Linux depot into `steamapps/content/app_1042420/depot_1042422`.
+- The stable Linux server 1.30.164289 (depot 223352 of app 223350, measured 2026-11-08)
+  carries the same two shapes, moved: in a preload library's offsets from the image base, the
+  leaf at +0xD7A6E0 (46 bytes, index in `esi`), the table at +0x1B34060 (three references:
+  the leaf, the inlined copy, one data word), the inlined copy at +0xD7A75A. A library that
+  finds them through the table, unchanged since 164014, patched both on first contact; the
+  mod's probe measured 400 frequencies, and in a retail client's hands a fresh radio of the
+  mod showed 136.000 MHz (the inlined path) and stepped down from channel 1 to channel 400.
+- The stable Windows server 1.30.164289 (`DayZServer_x64.exe` 1.30.164.289, measured
+  2026-11-09) carries the same two shapes as 164200, moved by about 0x800: the leaf at
+  +0x938A40 (50 bytes), the table at +0x16541B0, the inlined copy at +0x938977 (164200:
+  +0x9382A0, +0x16531B0, +0x9381D7). The same proxy binary that served 164200 found and
+  patched both on first contact and reported 400 channels; nothing to rebuild for the hotfix.
 - The LINUX 1.30 server checks script-instance leaks at shutdown (SIGINT): stopping with live
   singletons it prints `SCRIPT (E): Leaked '<Class>' script instance (1x)!` per class and
   `==== Total Leaks (N)! ====`, and the Linux build then exits through the assertion
@@ -1737,6 +1749,10 @@ entity.
   - Vanilla 1.30 leaks by itself: `Leaked 'BunkerBroadcastManager' script instance (1x)!`
     (diag 1.30.164078 in a second report block, Linux 1.30.164014 alone), and the Linux
     assertion fires on that one too. A clean Linux 1.30 shutdown is out of a mod's reach.
+    On 1.30.164289 (stable, Linux, measured 2026-11-08) five SIGINT stops of a set with CF,
+    a framework mod and a radio mod, two of them after a player had spent minutes in the
+    world, printed no leak report and no assertion: the vanilla leak is gone there, or does
+    not arise in that set.
   - Every `RestCallback` handed to `RestContext.POST/GET` stays referenced by the engine
     until the process ends: see section 9.
 

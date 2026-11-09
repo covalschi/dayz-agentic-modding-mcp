@@ -252,6 +252,16 @@ inside PBOs, see persistence-networking.md "File I/O"): a script reader of the
 Vanilla's ITEM names are NOT in `dta/languagecore` (7247 lines of UI/tutorial text); the
 engine resolves them from tables the script cannot open.
 
+`Widget.TranslateString(a) + F()` LOSES `a` WHEN `F` TRANSLATES TOO (measured 2026-11-09,
+retail client 1.30.164289, a stand mod's admin pane). `Tr("#STR_MYMOD_ADMIN_ONLY") + Secs(t)`,
+where `Tr` returns `Widget.TranslateString(key)` and `Secs` returns
+`t.ToString() + " " + Tr("#STR_MYMOD_SEC")`, put the SECOND key's text where the first should be
+("s10 s" instead of "Admin only: 10 s"), in both client languages; the key was fine and moving its
+row in the table changed nothing. A chain that translates left to right is fine --
+`Tr(a) + x + "\n" + Tr(b)` printed both texts, each `+` copies before the next call -- so the trap
+is only a translation on the LEFT of a `+` whose RIGHT operand translates again. Compute the
+right part first: `string secs = Secs(t); string line = Tr("#STR_MYMOD_ADMIN_ONLY") + secs;`.
+
 ## Overriding vanilla configs
 
 Redeclare the class with the changed properties (config merge is per-property):

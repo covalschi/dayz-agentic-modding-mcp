@@ -1918,3 +1918,80 @@ retail client at 3840x1600 (UA) and 1920x1080 (EN).
   the fog's fade and the opaque fog under it). Each rectangle rounds to whole pixels on its own,
   and one row of what lies beneath showed between them at 3840x1600 (about 10 % at 1080). Lay the
   later widget one unit over the earlier one where both are opaque there.
+
+## 34. A VPP submenu window: order, drag, maximize, resize (measured 2026-11-09)
+
+Measured on 1.30.164289, diag stand, 3840x1600 window, VPP Admin Tools as published in 2026-11 and a
+stand mod's `AdminHudSubMenu` with an exact-size root (1000x620 units) and fixed-size panes.
+
+- **Create the root with the base `AdminHudSubMenu.CreateWidgets(path)`.** It parents the layout to
+  VPP's `Panel_Content` (inside `hud_root`, priority 85) and records `m_SizeW/m_SizeH`. A root created
+  at the workspace root with its own `SetSort(1000)` loses its first click when another VPP window is
+  open: the base `OnMouseButtonDown` calls `VPPAdminHud.SetWindowPriorty`, which sorts every
+  submenu's root `SetSort(Count - index)`. At the workspace level that drops the window under
+  `hud_root`, and from then on `GetWidgetUnderCursor` over it answers `hud_root` until the window
+  is reopened. Inside `Panel_Content` the same sort is plain VPP window order: click-to-front worked
+  both ways against Player Manager.
+- **A fresh submenu opens under the windows already open.** `CreateSubMenu` runs `ShowSubMenu`
+  (whose `SetWindowPriorty` looks the menu up in `M_SUB_MENUS`) before `M_SUB_MENUS.Insert`, so the
+  first raise finds nothing. VPP patches this for its changelog only: `OpenChangelog` calls
+  `SetWindowPriorty` right after `CreateSubMenu`. For your own window do the same in a
+  `modded class VPPAdminHud`: note `fresh = !GetSubMenuByType(t)`, call `super.CreateSubMenu(t)`, and
+  when `fresh && t == MyMod_Menu` call `SetWindowPriorty(GetSubMenuByType(t))`. `VPPButton.OnClick`
+  is the only caller of `CreateSubMenu`.
+- **Drag needs `WidgetFlags.DRAGGABLE` on `m_TitlePanel`**, and `SetFlags(WidgetFlags.DRAGGABLE)`
+  at runtime is enough: the base `OnDrag/OnDragging/OnDrop` fired and a 200x200 px drag moved the
+  window by 199x200 px. Keep the close button above a full-width title panel (higher `priority`,
+  a sibling rather than a child of a lower header frame), or the title panel takes its clicks.
+- **The base `ResizeWindow` works in fractions**: `SetSize(0.848, 1.0)` to maximize, back to
+  `m_SizeW/m_SizeH` to restore -- right for a proportional root, under a pixel for an exact one.
+  Override it: save `GetPos`/`GetSize` (pixels on an exact widget), `SetPos(0, 0)`, and size to
+  0.848 x 1.0 of the parent's `GetScreenSize` -- 3256 x 1600 at 3840 x 1600, VPP's toolbar stays
+  visible on the right. Double-click on `m_TitlePanel` toggles it through `m_WindowExpanded`.
+- **A layout written with `"fill"` does not follow a runtime resize.** `layout_build` resolves
+  `"fill"` to exact sizes at build time (the window's background is `size 1000 620`,
+  `hexactsize 1`), so the script resizes the chrome itself: background, border, header, tab strip,
+  pane roots. Children anchored right or bottom (`halign right_ref`) follow on their own.
+- **A resize grip** is one more draggable widget, anchored bottom-right; handle it in your own
+  `OnDrag/OnDragging/OnDrop` before `super`. The engine moves the dragged widget with the mouse, so
+  put it back with `SetPos(0, 0)` after each resize. `x, y` in these events are screen pixels, the
+  same space as `GetScreenPos`: size = mouse + grab offset - window origin. Record the grab offset
+  (mouse to the window's corner) in `OnDrag`, or the corner jumps under the mouse -- half the grip,
+  13 px at 3840 x 1600.
+- **Clipped content does not catch the cursor.** With a pane wider than a shrunken window, the
+  cursor beside the window -- over the unclipped rectangle of the pane's edit box -- was over
+  `hud_root`. (Frames and panels clip by default, §31.)
+- **The window hides and returns with the toolbar.** VPP hides its HUD with `HideScriptedMenu`;
+  children of its root keep their own visibility and come back with it, at the same place and size.
+  A watchdog that hides the window when the toolbar closes -- needed while it lived on the workspace
+  root -- makes it the one window that does not come back.
+- **Esc on the VPP HUD** closes it and opens the game's pause menu with the same press; Home does
+  nothing until the pause menu is closed again.
+- **`"size": "fill"` and `"w"/"h": "fill"` are not the same in `layout_build`.** A child declared
+  `"size": "fill"` is written as a PROPORTIONAL `size 1 1` (`hexactsize 0`), so it follows a parent
+  resized at runtime; `"w": "fill"` / `"h": "fill"` in a vbox/hbox is resolved to an exact size at
+  build time and stays there. Use the first for anything that must grow with a resizable window
+  (a lines canvas over its content, a nodes frame).
+- **Text that starts with `#` is a stringtable key to `SetText`**, also in an edit box:
+  `SetText("#7CB342")` showed `7CB342`, and an edit made afterwards read the value back without the
+  `#`. Show such values without it (a colour as six hex digits) and add it back when storing.
+- **A `TextListboxWidget` in style `NoScrollBar` draws no row highlight**: the default style's
+  scrollbar is a full-height bar (red in vanilla colours) even for a list that fits, but a list in
+  `NoScrollBar` shows nothing for the selected row, `"highlight row"` notwithstanding. Mark the row
+  in its text (a `> ` prefix) when the selection must be visible.
+- **A full gameplay menu opens OVER the VPP HUD with the HUD as its parent**:
+  `ui.EnterScriptedMenu(MYMOD_MENU_X, ui.GetMenu())` from a click in a submenu window, with no
+  deferral, returned the menu, ran its `Init`/`OnShow` and gave it the cursor and the keyboard -- the
+  vanilla idiom for a menu over a menu (`writtennotedata.c`, a note over the inventory). Esc in the
+  child (`Close()` from its own `OnKeyPress`) closed only the child: `GetMenu()` was `VPPAdminHud`
+  again, the submenu window kept its state, and no pause menu opened -- unlike Esc on the HUD
+  itself. §5's "returns NULL while another menu owns the stack" is about a NULL parent.
+- **`AdminHudSubMenu.OnUpdate(float)` runs every frame**, hidden window or not: `VPPAdminHud.Update`
+  calls it for every submenu in `M_SUB_MENUS` (VPP's own comment says so). It is the place for
+  next-frame work in a submenu -- laying out rows once their texts have a width, polling the mouse.
+- **Dragging a widget inside a submenu without `DRAGGABLE`**: remember the press in
+  `OnMouseButtonDown` (call `super` -- the base raises the window and returns true, and the button's
+  `OnClick` still comes on release), then poll `GetMousePos` and
+  `GetMouseState(MouseState.LEFT) & 0x80000000` from `OnUpdate`, move the widget with the delta and
+  act on release. A press released without moving still clicks; ignore the `OnClick` that arrives
+  with the release after a real drag (a flag kept for two or three frames covers either order).
