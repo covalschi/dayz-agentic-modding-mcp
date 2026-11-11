@@ -840,6 +840,77 @@ Standing idle, with empty hands and with a held item alike:
 false, the hand state machine idle (state 1 with empty hands, 2 holding). None of the
 busy states was measured.
 
+### A built-in part is an attachment in a slot the game does not show (measured 2026-11-11)
+
+Some weapons carry parts the player never sees as parts. A revolver (`Magnum`) lists
+`Magnum_Ejector` and `Magnum_Cylinder` among its attachments
+(`GetInventory().GetAttachmentFromIndex`): `DummyItem`s the weapon creates for itself
+(magnum.c:189-194), with no script gate of their own. What marks them is the slot:
+`EntityAI.CanDisplayAttachmentSlot(slotId)`, the test the inventory screen draws slots by
+(entityai.c:1788; by default `InventorySlots.GetShowForSlotId`), said no for both, and yes
+for the five parts of a fitted AKM and for a plate carrier's pouches and holster.
+
+**Do:** when a script walks a thing's attachments to take them off, store them or price
+them, skip an attachment whose slot the host does not display. The synchronous move above
+asks no release gate: it would hand the player a revolver's cylinder as an item.
+
+### Off the thing and onto the ground, or wherever the engine likes (measured 2026-11-11)
+
+Two more destinations took the same synchronous move. Each was tried on the three parts of
+a slung rifle, with the rifle deleted right after in the same call, and the client's
+inventory was the server's afterwards:
+
+- the engine's own choice: `player.GetInventory().FindFreeLocationFor(part,
+  FindInventoryLocationType.CARGO, loc)` named a cargo cell, `LocationCanAddEntity(loc)`
+  agreed, and the part stood there;
+- the ground: `GameInventory.SetGroundPosByOwner(player, part, loc)` fills a ground
+  location at the player's feet (what `GameInventory.DropEntity` uses, inventory.c:1214);
+  `LocationSyncMoveEntity(src, loc)` and `SendServerMove` put the part there, and the
+  client's own inventory screen listed it nearby. `LocationCanAddEntity` was not asked for
+  the ground location: the base `TakeToDst(SERVER)` does not ask it either.
+
+The same move took a part off a weapon held in the hands, and the weapon was deleted out
+of the hands in the same call: the hand state machine read 1 again on both sides.
+
+### Asking about an item that exists: the item itself in the location (measured 2026-11-11)
+
+`LocationCanAddEntity(dst)` with the real item in `dst` (`dst.SetCargo(holder, item, 0,
+row, col, flip)`) answers for that item as it is, with what is in it and on it, while it
+still hangs elsewhere. Asked for parts still attached to a worn vest: pouches with one
+item in their cargo, and a holster with a pistol on it, were each accepted at a free cell
+of worn trousers, and the move that followed landed there. A plan that places several
+such items keeps its own map of the cells it has given out: the engine answers about the
+inventory as it is.
+
+### Rounds carry their own damage (measured 2026-11-11)
+
+- A magazine's rounds: `Magazine.GetCartridgeAtIndex(i, out dmg, out type)` for `i` below
+  `GetAmmoCount()`; `SetCartridgeDamageAtIndex(i, dmg)` sets one (30 of 30 answered true).
+  `dmg` is 0 for a new round. `type` is the cartridge (`Bullet_...`); the pile it lies in
+  when loose is `CfgAmmo <type> spawnPileType`, and a full pile holds
+  `CfgMagazines <pile> count` rounds.
+- A weapon's rounds, per muzzle: the chamber (`IsChamberEmpty(m)`, `IsChamberFiredOut(m)`,
+  `GetCartridgeInfo(m, out dmg, out type)`) and the internal magazine
+  (`GetInternalMagazineCartridgeCount(m)`, `GetInternalMagazineCartridgeInfo(m, i, out dmg,
+  out type)`). A revolver read six muzzles with a chamber each and nothing internal; a
+  bolt-action rifle after `FillInnerMagazine` and `FillChamber` read one muzzle, the
+  chamber loaded and four rounds internal; an AKM one chamber and nothing internal (its
+  rounds are its magazine's).
+- Wearing a magazine wears its rounds: `Magazine.EEHealthLevelChanged` rewrites every
+  round's damage to `1 - GetHealthLevelValue(newLevel) + 0.001` (magazine.c:408). A
+  magazine set to health 0.6 held thirty rounds of the worn level right after. So a
+  round's damage is set AFTER the health, as `Ammunition_Base.SetFromProjectile` says of
+  itself.
+- A pile that carries worn rounds: create it, `ServerSetAmmoCount(n)`,
+  `SetHealth01("", "", h)`, then `SetCartridgeDamageAtIndex(i, 1 - h)` for every round. It
+  read the health level of `h` on both sides.
+
+### The order `EnumerateInventory(PREORDER)` gives (measured 2026-11-11)
+
+Depth first: a worn thing, what hangs on it and what lies in it, before the next worn
+thing. A magazine lying in a backpack came before the magazine of a rifle worn after the
+backpack. A script that means "the nth item of a class" has to say which.
+
 ## Verify every `model=` path before shipping — a missing model CRASHES the client
 
 An item whose `model` points at a non-existent p3d spawns fine and looks fine in config, but
