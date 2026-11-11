@@ -2118,3 +2118,23 @@ inside `ScrollWidget`s; real mouse input in a 1600x900 window).
   column", and three builds went into the menu before the desktop was asked. Move the window
   clear (`SetWindowPos` with `SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE`) before the first
   click.
+- **The game's own inspect helpers fill any window that names its widgets their way.**
+  `InspectMenuNew.UpdateItemInfoWeight(root, item)` and `UpdateItemInfoDamage(root, item)`
+  are static (inspectmenunew.c:487, :190): they set the text of `ItemWeightWidget` and
+  `ItemDamageWidget` found under the root they are given and show and colour
+  `ItemWeightWidgetBackground` and `ItemDamageWidgetBackground` (`WidgetTrySetText`, :592). A
+  mod's item card with those four widgets says weight ("about 1 kg") and condition
+  ("pristine", on the game's green chip) in the game's words, in the client's language, for
+  a real item and for a client-local one alike.
+- **Rows that size themselves to their text share a line in a WrapSpacer.** Two short
+  self-sizing rows (a GridSpacer of two labels each) stood side by side in a card's vertical
+  stack. A row as wide as the spacer (a frame holding a left-aligned key and a right-aligned
+  value) stands alone.
+- **A tooltip's height from its content**: lay it out off the screen (`SetPos(-4000, 0)`,
+  shown, `spacer.Update()`), and two frames later the spacer's `GetScreenSize` is the height
+  of the wrapped texts in it; then size the root and move it beside its tile. Spacers take the
+  pointer unless flagged `IGNOREPOINTER`; a tooltip must not.
+- **A window moved off the desktop is still captured.** A 3840x1600 client window moved to
+  x = 3900 on a 3840-wide desktop the moment it existed (`SetWindowPos`, no activation) kept
+  rendering, and the capture of it was a full live frame. A size as large as the screen can
+  be looked at without covering the screen; real input still needs the window on it.
