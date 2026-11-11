@@ -189,6 +189,25 @@ and runway concrete; its third parameter `RoadSurfaceDetection rsd` defaults to 
 `(x, z)` still works) before the call. Yaw in `SetOrientation` is degrees clockwise from north:
 `"1 0 1".VectorToAngles()` is `<45,0,0>` (1_core/proto/enconvert.c:346).
 
+**For a building-class object `ECE_PLACE_ON_SURFACE` gives two different places** (measured
+2026-11-11, diag 1.30.164289: a vanilla kiosk, `Land_City_Stand_Grocery`, created by a stand mod
+with `CreateObjectEx(type, pos, ECE_PLACE_ON_SURFACE | ECE_NOLIFETIME | ECE_NOPERSISTENCY_WORLD)`
+at `<4690, 339, 10190>` on runway concrete at 339.0, then `SetOrientation`). Created while the
+mission started, the kiosk stood correctly on the ground with its origin at
+`<4690.19, 340.77, 10192.47>`: lifted 1.77 m, because a building's origin is inside its model
+and not at its foot, and moved 2.5 m aside of the asked point (the same numbers in four boots).
+Deleted with `ObjectDelete` and created again by the same line in the running mission, it stood
+at exactly the asked point, origin at ground level, half buried (eighteen times over four
+boots). So this flag cannot place a building predictably. `ClippingInfo(minMax)` does not give
+the lift either: its box reached 3.57 m below the origin, because a building's model carries a
+foundation under the ground line, and a kiosk raised by that much stood with the foundation in
+the air. What gave one place at the start and after every re-creation (four boots, eight
+re-creations): the object spawner's own way (3_game/objectspawner.c:33), the exact position of
+the origin with `ECE_SETUP | ECE_UPDATEPATHGRAPH | ECE_CREATEPHYSICS | ECE_NOLIFETIME` and
+`RF_IGNORE` as the fourth argument, then `SetOrientation`. The position read back was the one
+asked, to float rounding (`340.77` came back as `340.769989`). Take a building's position from
+a placed object or an editor export, where it is the origin, not from where a player stands.
+
 Ownership checks for `ActionCondition` ("is the input item inside THIS device?"):
 `item.GetHierarchyRootPlayer()` — owning player or null (3_Game/Entities/EntityAI.c:882 in 1.30),
 `item.GetHierarchyParent()` — direct container entity (:885). Both proto native.
@@ -776,6 +795,18 @@ engine's item check refused), and yes on a free one; the gates-only
 `LocationTestAddEntity` was yes on a taken slot and no on the wrong slot. For the hands,
 `HumanInventory.CanAddEntityInHands(e)` was yes with free hands (for a barrel too) and
 no with busy ones.
+
+### Many creations in one call, on a map the caller keeps itself (measured 2026-11-11)
+
+The same stand, one step further: a commit that deletes with `ObjectDelete`, changes stack
+amounts and then creates several items with `LocationCreateEntity` at cells taken from the
+caller's own occupancy map, all in one script call. Fourteen such commits and three direct
+tries ended with the client's inventory equal to the server's (up to three deletions and five
+creations in one call); no creation returned null. Places freed inside the call were used in
+it: a 2x2 item over the cells of two 1x2 items deleted a line earlier, four 1x1 items over the
+cells of a deleted 2x2, an item worn on a free character slot, an item in free hands. The map
+has to leave out what the call deletes and mark what it creates: no engine query can answer
+for several items that do not exist yet.
 
 ### The cell an item left for the hands is not taken for the server
 
