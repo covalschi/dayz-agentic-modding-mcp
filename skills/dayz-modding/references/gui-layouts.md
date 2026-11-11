@@ -2066,3 +2066,55 @@ A slot a mod adds with `playerSlots[] += {...}` is in the list, with its icon.
 A real mouse drag for such a test: the MCP has no tool for it. A short script on its window
 helpers does it (move, button down, moves with pauses between them, button up); it needs the
 client window in front.
+
+### §35 built into a real menu: what the first builds got wrong (measured 2026-11-11, later the same day)
+
+A stand mod's trade screen (a `UIScriptedMenu`; tiles made from a generated layout into frames
+inside `ScrollWidget`s; real mouse input in a 1600x900 window).
+
+- **The pressed widget must be the draggable one.** A tile whose root was flagged `DRAGGABLE`
+  could be selected and not dragged: its `ItemPreviewWidget` child took the pointer (a layout
+  generator's preview node writes no `ignorepointer`), so the press landed on a widget that is
+  not draggable, and the menu's own parent walk hid that for clicks. With `ignorepointer 1` on
+  the picture the same tile dragged.
+- **`OnMouseButtonDown` answering `true` for the tile stops the drag** before it starts: the
+  tile is pressed, `OnDrag` never comes. Answer `false` (or `super`) for a widget the engine
+  is to drag.
+- **A ghost under the cursor must ignore the pointer with everything in it.** The ghost panel
+  did; its picture did not, lay under the cursor and was named as the `reciever` of every
+  drop.
+- **A menu's own drag asks for none of this** and was kept: on the press remember the tile and
+  the mouse position, each frame read `GetMousePos` and `GetMouseState(MouseState.LEFT) &
+  0x80000000`, start the ghost after a few pixels of travel, and at the release take
+  `GetWidgetUnderCursor()` and walk its parents to the panel it lies in. The press may answer
+  `true`.
+- **The engine tells a double click twice.** On a FrameWidget tile the second press arrived as
+  `OnMouseButtonDown` and `OnDoubleClick` arrived with it (the same millisecond in the log). A
+  menu that listens to both must take one gesture once.
+- **An item's picture is drawn over its low siblings, whatever their order.** Labels at
+  priorities 3 to 7 beside a picture at 1 (same parent) were hidden wherever the model
+  reached; at 610 they draw over it. Vanilla's icon: picture 151, count panel 606, marks 999
+  (`gui/layouts/inventory_new/medium/icon.layout`).
+- **A dialog that covers pictures and holds one** cannot be a part of the menu's layout: a
+  picture under a middle frame at 300 or more is not drawn (§13). A layout of its own on the
+  workspace in the tooltip's shape (root 952, a frame, the picture at 201), made with
+  `CreateWidgets(path)` and no parent, drew its picture and covered the tiles' pictures with
+  its box. It is not the menu's widget: give its root a `ScriptedWidgetEventHandler`
+  (`root.SetHandler(this)`; `OnClick` of its buttons and `OnChange` of its `SliderWidget`
+  arrived there) and unlink it when the menu hides. Seen once, not chased: a translucent
+  panel filling that root dimmed the menu's panels and its `PlayerPreviewWidget` and left the
+  tiles' item pictures at full brightness.
+- **`RichTextWidget.SetColor` after `SetText` showed on the NEXT text**: the widget kept the
+  colour it had when the text was set. Set the colour first. (Seen in two screenshots; the
+  swapped order was not run.)
+- **A `PlayerPreviewWidget` narrowed with `SetSize`** kept the whole character in view.
+- A `SliderWidget` (`style Default`, `"fill in" 1`, `"listen to input" 1`) takes
+  `SetMinMax(1, n)`, `SetStep(1)`, `SetCurrent`; a click on its bar jumps to that value and
+  tells `OnChange`.
+- **Before a real click, ask what lies under the point** (`WindowFromPoint`). A client window
+  that opens in the corner of a desktop whose taskbar stands at that edge lies partly under
+  the taskbar, which is topmost: real clicks in that strip went to the taskbar. From the
+  game's side it read as "one press of a double click is lost for every tile in the first
+  column", and three builds went into the menu before the desktop was asked. Move the window
+  clear (`SetWindowPos` with `SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE`) before the first
+  click.
