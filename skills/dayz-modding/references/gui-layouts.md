@@ -2138,3 +2138,9 @@ inside `ScrollWidget`s; real mouse input in a 1600x900 window).
   x = 3900 on a 3840-wide desktop the moment it existed (`SetWindowPos`, no activation) kept
   rendering, and the capture of it was a full live frame. A size as large as the screen can
   be looked at without covering the screen; real input still needs the window on it.
+- **A client-local copy of the character at the player's own place** (the placing whose face
+  is natural, above), built into a menu's "try it on": made at the player's position and
+  orientation with its simulation on, dressed, given to the `PlayerPreviewWidget`, deleted
+  when the trying ends. The face was natural, the player's position on the server was the
+  same half a minute later, and after the menu closed with the copy still up (deleted in
+  `OnHide`, the widget handed the real player first) the world held no second character.
