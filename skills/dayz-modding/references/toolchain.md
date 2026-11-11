@@ -543,6 +543,17 @@ creation time ≈ `GetGame().GetTime()` zero). Persistent HUD widgets (minimap, 
 HUD) capture fine in the same shots. Verify transient overlays by engine-side logging
 (arm/show/hide transitions) or human eyes — not by window captures.
 
+## A window capture is black while the monitor is switched off (measured 2026-11-11)
+
+With the machine's only monitor powered off (`Get-PnpDevice -Class Monitor` listed every
+monitor as not present) a windowed diag client went on simulating and rendering: its 3D
+engine use stayed near 10 %, and Windows still reported the desktop mode. Every capture of
+its window came back fully black, the HUD and an open inventory included, the same few
+kilobytes each time. The session was neither locked nor disconnected. With the monitor
+switched on again the next capture was live. A black frame from a client that answers is the
+capture path, not the game: check the monitor before debugging the mod, and take the proof
+from data (inventory dumps, logs) meanwhile.
+
 ## Loose prefix folders in the game root leak into a retail client (measured 2026-09-09)
 
 A folder in the game directory named like a pbo prefix (`DayZ\MyMod_PDA` -- a junction to a

@@ -808,6 +808,23 @@ cells of a deleted 2x2, an item worn on a free character slot, an item in free h
 has to leave out what the call deletes and mark what it creates: no engine query can answer
 for several items that do not exist yet.
 
+A place the same call frees can also be a character slot or the hands (later the same day). A
+backpack, a helmet and a rifle were each deleted from their worn slot with `ObjectDelete` and
+a new item was created on that slot a line later; the same with the item in the hands while
+every cargo was full. Four places, twice each, and the client's inventory equalled the
+server's every time. Asked while the old item still stood there, the gates-only tests said
+yes (`GameInventory.LocationTestAddEntity(loc, false, true, false, false, true, false)` for
+the slot, `HumanInventory.TestAddEntityInHands(e, false, true, false, false, true)` for the
+hands), where `CanAddAttachmentEx` and `CanAddEntityInHands` say no. The hand state machine
+(`GetDayZPlayerInventory().GetCurrentStateID()`, read on the server and on the client) stayed
+at 2 through the replacement and went on working: 1 after the held item was deleted in a
+later call, 2 after the next creation in the hands.
+
+A magazine created with `LocationCreateEntity` holds all its rounds (`ammo 30/30` for a
+30-round magazine). Code that hands out an empty one calls `ServerSetAmmoCount(0)` on it in
+the same call; it was empty on both sides. A rifle created the same way has nothing in it: no
+attachment, no round in the chamber.
+
 ### The cell an item left for the hands is not taken for the server
 
 `ItemBase.EEItemLocationChanged` reserves the old location when an item is taken into
