@@ -1995,3 +1995,74 @@ stand mod's `AdminHudSubMenu` with an exact-size root (1000x620 units) and fixed
   `GetMouseState(MouseState.LEFT) & 0x80000000` from `OnUpdate`, move the widget with the delta and
   act on release. A press released without moving still clicks; ignore the `OnClick` that arrives
   with the release after a real drag (a flag kept for two or three frames covers either order).
+
+## 35. Drag and drop, previews and client-local entities in a menu of one's own (measured 2026-11-11, 1.30.164289)
+
+Measured with a stand mod's own `UIScriptedMenu` on a live multiplayer diag client (a 1600x900
+window), driven by real mouse input.
+
+**Drag and drop needs no handler and no registry.** A widget made draggable
+(`SetFlags(WidgetFlags.DRAGGABLE)` at run time; the layout property is `draggable 1`) and a menu
+that overrides the events are enough. One drag told the menu, in this order:
+`OnMouseButtonDown(w)`; `OnDrag(w, x, y)` once, at the point of the press;
+`OnDraggingOver(w, x, y, reciever)` and `OnDragging(w, x, y, reciever)` once per mouse move;
+`OnMouseButtonUp(w)` with the widget under the cursor; `OnDropReceived(w, x, y, reciever)`;
+`OnDrop(w, x, y, reciever)`. In the drag events `w` is the dragged widget and `reciever` the
+widget under the cursor that takes the pointer: the layout root when there is no other (never
+null), another draggable tile when released over one. `x, y` are screen pixels. An
+`ItemPreviewWidget` can itself be the dragged widget. What the events return made no
+difference.
+
+- The engine moves a free dragged widget with the cursor (its top left corner at the cursor)
+  and puts it back when the button is released. A widget that a spacer lays out (a child of a
+  `WrapSpacerWidget`) is not moved at all: it stays in its cell, and the events still come. So
+  draw the thing under the cursor yourself: a widget with `ignorepointer`, moved in
+  `OnDragging`.
+- `WidgetEventHandler.RegisterOnDrag / RegisterOnDrop / RegisterOnDraggingOver /
+  RegisterOnDropReceived` call `SetHandler` on the widget, so its events leave the menu: the
+  source's `OnDrag` and `OnDrop` go to the registered functions (they get `Param3`, so the
+  drop has no receiver), and `OnDraggingOver` and `OnDropReceived` go to the function
+  registered on the RECEIVER. Over a widget that is not registered the menu is still told, and
+  `OnDragging` always reaches the menu.
+- Without the flag: `OnMouseButtonDown` on the tile, the button followed with
+  `GetMouseState(MouseState.LEFT) & 0x80000000`, and at the release both
+  `GetWidgetUnderCursor()` and the menu's own `OnMouseButtonUp(w)` name the widget under the
+  cursor.
+
+**Previews.** `PlayerPreviewWidget.SetPlayer(GetGame().GetPlayer())` with
+`SetModelPosition("0 0 0.605")` shows the player with everything worn;
+`SetModelOrientation(Vector(0, yaw, 0))` turns it. `GetModelOrientation()` does not return
+what was set (after `(0, 90, 0)` it gave `-90 0 0`). `GetDummyPlayer()` is a local stand-in
+whose inventory counts no attachment, and an attachment created on it is not drawn.
+`ItemPreviewWidget.SetForceFlipEnable(true)` with `SetForceFlip(true)` draws the item turned a
+quarter and fitted to the widget, the way a turned item lies in a cargo.
+
+**Client-local entities for pictures** (`CreateObjectEx(type, pos, ECE_LOCAL)`, one class
+each): 60 took 84 ms; 150 took 186 ms the first time and 15 ms when made again (the cost is
+the first load of a class and its model); 300 took 201 ms. One slow frame each time, then the
+frame time as before (150 pictures cost about 0.3 ms a frame). `DisableSimulation(true)`
+changed neither number. The server saw none of them. At the player's feet they lie in the
+world, the action cursor names them and the vanilla inventory lists them in VICINITY, clothes
+with their cargo grids open: keep them far from players ("0 0 0" is where the game's own
+script console keeps its preview entity). A local item takes local attachments with
+`GetInventory().CreateAttachment` and shows them three levels deep (a vest, its holster, a
+pistol in it); a magazine on a local weapon is drawn only after `Weapon_Base.ShowMagazine()`
+or `ForceSyncSelectionState()`.
+
+**A client-local character.** `CreateObjectEx(<survivor class>, pos, ECE_LOCAL)` with gear
+made by `GetInventory().CreateAttachmentEx(type, slotId)` (14 things in 5-10 ms) is shown by
+`SetPlayer` and costs nothing per frame. It does not fall. It is one more entry of
+`ClientData.m_PlayerBaseList` until a frame after its deletion. Its face was natural only at
+the player's feet with its simulation on; in every other placing tried (far, above, below,
+simulation off: eleven of them) it was pale grey, and waiting did not help.
+
+**The slot list** as the vanilla inventory reads it works in any menu:
+`ConfigGetTextArray("CfgVehicles SurvivorBase InventoryEquipment playerSlots", names)`, then
+for each `CfgSlots <name>` its `name` and `ghostIcon`, `InventorySlots.GetSlotIdFromString(name)`,
+`InventorySlots.GetSlotDisplayName(id)`, and
+`ImageWidget.LoadImageFile(0, StaticGUIUtils.VerifyIconImageString(StaticGUIUtils.IMAGESETGROUP_INVENTORY, icon))`.
+A slot a mod adds with `playerSlots[] += {...}` is in the list, with its icon.
+
+A real mouse drag for such a test: the MCP has no tool for it. A short script on its window
+helpers does it (move, button down, moves with pauses between them, button up); it needs the
+client window in front.
