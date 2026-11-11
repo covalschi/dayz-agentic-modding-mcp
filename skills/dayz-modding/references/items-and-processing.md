@@ -421,7 +421,10 @@ and lands on a later command-handler frame, later still when the machine is busy
 `HandEventMoveTo`; 1.30 removed those overrides, and the hands path is now
 `HumanInventory.TakeToDst` → `RedirectToHandEvent` (humaninventory.c:243-251, :200-241:
 `HandEventMoveTo` from hands, `HandEventTake` into hands); `TakeEntityToInventory` still
-redirects the same way (:254). The timing has not been re-measured on 1.30. Judge a move by
+redirects the same way (:254). On 1.30.164289 (measured 2026-11-11, a
+living player's own items) a move into cargo landed 126-131 ms after the call and a move into
+the hands 437-439 ms after it; "A living player's inventory, changed by the server" below has
+the rest, and the call that IS synchronous. Judge a move by
 re-reading the location on a later tick with a bounded wait, never by the call's bool: with a
 full inventory the call answers `false` and the item simply stays where it was.
 
@@ -487,6 +490,11 @@ destination the engine has not approved.
 Asked for 6,4 turned, in a box where 6,4 was empty, it made the item at 6,3 --
 and the next item then landed on top of it. Read the location back after every
 creation and correct it.
+
+On 1.30.164289 (2026-11-11), in a worn container of a living player with a client
+connected, the same call honoured the cell and the turn in all three tries, one of them a
+chosen cell that was not the first free one, and returned null for a taken cell; the
+misplacement above was on an unannounced container on the retail build.
 
 ### The two slot tables, and why a container refuses every attachment
 
@@ -602,6 +610,187 @@ released at the end of a session produced 121 phantom take events in the admin
 history (measured 2026-09-25, storage stand mod). Set a "this is a teardown"
 flag on the container before deleting it and check it in the audit hook — the
 same shape as the `m_Restoring` flag most mods already have for the fill side.
+
+## A living player's inventory, changed by the server (measured 2026-11-11, 1.30.164289)
+
+Measured on a diag server with one client connected, by a stand mod that runs one
+operation per bridge command on the character of that client. Every result was read on
+the server inside the script call that caused it and on the frames after it, and the
+client's inventory was written out and compared with the server's line by line (network
+ids, places, sizes, amounts). The server idled at about 2000 frames a second, so "one
+frame" below is half a millisecond. Each paragraph says how often a thing was tried.
+
+### Creating at a planned place works, and a place that is not free gives null
+
+`GameInventory.LocationCreateEntity(loc, type, ECE_IN_INVENTORY, RF_DEFAULT)` with
+`loc.SetCargo(holder, null, 0, row, col, flip)` put the item at exactly that cell and
+turn, in the same call, in worn clothing, a backpack and the pouches of a vest (12
+creations, among them a turned item and a chosen cell that was not the first free one).
+`CreateEntityInCargoEx(type, 0, row, col, flip)` did the same (3 tries). On the top-left
+cell of another item, with a 1x3 item at the bottom-right cell, and with a rectangle
+whose first cell was free and whose third was taken, both calls returned **null and
+created nothing**: nothing was dropped on the ground and nothing landed elsewhere (3
+cases, both calls). With `loc.SetAttachment(player, null, slot)` an item was created worn
+on a free character slot, a vanilla one and one a mod had added; on a taken slot the call
+returned null. `CreateAttachmentEx(type, slot)` made a part on a part three levels below
+the character (a battery in goggles on a worn helmet), and `CreateAttachment` made
+attachments on an item that itself lay in a backpack's cargo.
+`HumanInventory.CreateInHands(type)` and `LocationCreateEntity` with
+`loc.SetHands(player, null)` put an item into free hands in the same call (a 10x15 barrel
+too) and returned null with busy hands. The config `itemSize` of a class was the size of
+its entity for all eleven classes tried, under `CfgVehicles`, `CfgWeapons` and
+`CfgMagazines`. The client held every created item at the server's place a few seconds
+later, with no extra message.
+
+**Do:** treat null as "the plan was wrong" and stop; there is no stray item to look for.
+
+### A creation asks the holder's script gate, and the engine has no depth rule of its own
+
+`LocationCreateEntity` of a class the holder's `CanReceiveItemIntoCargo` refuses returned
+null. A holder declared as an `Inventory_Base` with a cargo, whose gate names the classes
+it takes and never asks its parent class (`MyMod_Wallet` taking `MyMod_Note`), took its
+notes while lying in the cargo of a jacket and of a backpack, where
+`AreChildrenAccessible()` is false: by `LocationCreateEntity`, `CreateEntityInCargoEx`
+and `CreateEntityInCargo` alike. `CreateAttachmentEx` filled the slot of a holder lying
+in a cargo too. A vanilla protector case lying in the same backpack refused a sheet of
+paper: that refusal is the case's own script gate ("Nesting containers" below), not the
+engine.
+
+### `ObjectDelete` frees the place within the call; `Delete()` and `DeleteSafe()` do not
+
+| call | the item in the same call | its cell asked in the same call | a creation there in the same call | the entity is gone |
+|---|---|---|---|---|
+| `GetGame().ObjectDelete(e)` | reference valid, `IsPendingDeletion()` and `ToDelete()` true, **no inventory location any more**, the holder's cargo counts one fewer | free (`LocationCanAddEntity` and the occupancy test) | works, and the new item stays | next frame (1-3 ms) |
+| `e.Delete()` | still at its cell; `IsSetForDeletion()` true, the other two false | taken | null | next frame |
+| `e.DeleteSafe()` | still at its cell; all three false | taken | null, and null one frame later too | 23-128 ms later (7 tries): a round trip through the client |
+
+Three tries per row on a cargo cell. The first row also held for a worn item replaced on
+its slot, for the held item replaced in the hands, and for a weapon with five
+attachments: the attachments went with the parent at the same frame, and another item was
+created in the weapon's cells right after the call. The client ended with exactly the
+server's items every time.
+
+**Do:** delete with `ObjectDelete` when the same call needs the room; never count on
+`DeleteSafe()` having happened by any particular frame.
+
+### `SetQuantity`'s bool means "destroyed"; zero frees the cell a frame late; an ammo pile at zero stays
+
+`ItemBase.SetQuantity(n)` and `AddQuantity(d)` return true only when the call destroyed
+the item: false for every change that worked (7 tries). A value above the maximum is
+clamped without a word (500 asked of a stack of 99 gave 99; `ServerSetAmmoCount(45)` on
+a pile of 20 gave 20). `SetQuantity(0)` on a class with `varQuantityDestroyOnMin` goes
+through `Delete()`: the entity still reads quantity 0 at its cell for the rest of the
+call and is gone a frame later. An ammunition pile set to 0 rounds with
+`ServerSetAmmoCount(0)` **stays**, as an empty pile, on both sides. The client followed
+every number.
+
+**Do:** a stack that is spent whole and whose cell is needed now: `ObjectDelete` it
+instead of setting it to zero; delete an emptied pile yourself.
+
+### A magazine attached behind the weapon's back leaves its state machine without one
+
+After `Weapon_Base.SpawnAttachedMagazine(type, WeaponWithAmmoFlags.NONE)` a rifle stood
+in stable state 4 (`GetCurrentStableStateID()`). After a bare `CreateAttachment(magType)`
+on a rifle of the same class, `GetMagazine()` returned the magazine and the state machine
+stayed in stable state 1, where it had stood with no magazine at all:
+`Weapon_Base.EEItemAttached` does nothing about a magazine. The other direction repairs
+itself: when a magazine left a weapon by a server move, `EEItemDetached` ran
+`ValidateAndRepair()` and the weapon read its no-magazine state at once (3 weapons).
+
+**Do:** give a weapon its magazine through `SpawnAttachedMagazine`, or call
+`RandomizeFSMState()` and `Synchronize()` yourself after attaching.
+
+### A living player's `ServerTakeToDst` is a juncture: late, gate-bound, and it can desynchronise
+
+`DayZPlayerInventory.TakeToDst(InventoryMode.SERVER, ...)` moves nothing by itself: for a
+living character it serialises the move and sends a sync juncture
+(dayzplayerinventory.c:3728 in 1.30). So `player.ServerTakeToDst(src, dst)` and
+`ServerTakeEntityToTargetCargoEx(cargo, item, row, col)` answered true, left the item
+where it was for the rest of the call, and landed it at the asked cell 126-131 ms later
+(3 moves of attachments into cargo); `ServerTakeEntityToHands(item)` landed after
+437-439 ms (2 moves). Three consequences, each measured:
+
+* the item it sat on, deleted in the same call or one frame later, took the "moved" part
+  with it: the part was destroyed (2 tries);
+* a magazine whose weapon's `CanReleaseAttachment` said no (the weapon was not in the
+  hands) never moved on the SERVER, and the CLIENT moved it: from then on the two sides
+  held different inventories (2 weapons, one slung and one in a holster);
+* for the attachments of an item lying in a backpack (the release gate says no there
+  too) the call answered true and neither side moved anything.
+
+**Do:** never judge these calls by their bool, and do not use them for anything that
+must be true before the call returns.
+
+### The synchronous server move: `LocationSyncMoveEntity`, then `SendServerMove`
+
+What the base `GameInventory.TakeToDst(InventoryMode.SERVER, ...)` does when the holder
+is not a living character (inventory.c:1057) also worked on a living player's items:
+
+```c
+if (GameInventory.LocationCanAddEntity(dst))    // occupancy and the destination's gates
+{
+    if (GameInventory.LocationSyncMoveEntity(src, dst))
+        InventoryInputUserData.SendServerMove(null, InventoryCommandType.SYNC_MOVE, src, dst);
+}
+```
+
+The item stood at the asked cell **in the same call** and the client followed (7 moves:
+attachments of a slung rifle, the magazine of that rifle and of a holstered pistol three
+levels below the character, the attachments of a pistol lying in a backpack, an item
+from cargo into the hands). It does not ask the release gates: a magazine left a weapon
+that was not in the hands, and the weapon settled into its no-magazine state by itself.
+A part moved this way **survived** the deletion of its former parent in the same call,
+on both sides. Into the hands, the hand state machine followed
+(`GetDayZPlayerInventory().GetCurrentStateID()` went from 1 to 2, and back to 1 when the
+item was deleted). `LocationSyncMoveEntity` **without** `SendServerMove` moved the item
+on the server and told nobody: the client kept the part on its old parent and lost it
+altogether when that parent was deleted.
+
+**Do:** ask `LocationCanAddEntity(dst)` first and never move where it said no
+("`FindFirstFreeLocationForNewEntity` proposes a cell that is not one" above). It said no
+for a taken cell and for a holder whose script gate refuses the class.
+
+### Asking "may this go there" for a class that does not exist yet
+
+Every engine question needs an entity. One made with
+`CreateObjectEx(type, pos, ECE_LOCAL)` served: it has no network id, the client never saw
+it (23 of them, a barrel and rifles among them, left the two inventories equal and
+nothing in the world), and making or deleting it took under a millisecond. The flags of
+`TestAddEntityInCargoEx(e, idx, row, col, flip, do_resevation_check, do_item_check,
+do_lock_check, do_occupancy_test, do_script_check, do_script_load_check)` mean what
+their names say:
+
+* `(..., false, true, false, false, true, false)`, the item check and the script check
+  without occupancy: yes on a taken cell and on a rectangle hanging over the edge, and
+  exactly the holder's `CanReceiveItemIntoCargo` otherwise (14 cases). 0.9 microseconds
+  a call (200 000 in a row). `GameInventory.LocationTestAddEntity(loc, ...)` with the
+  same six flags answered the same.
+* `(..., false, false, false, true, false, false)`, occupancy alone: it agreed with a
+  map built from each item's own `GetCurrentInventoryLocation` on every cell of every
+  cargo a dressed character carried (26 walks of 149-173 cells, never a difference).
+* `LocationCanAddEntity(loc)` and `CanAddEntityInCargoEx` are both together.
+
+For a slot, `CanAddAttachmentEx(e, slot)` was no on a taken slot and on a slot the item
+does not belong to (a backpack on the hips: both script gates said yes there, the
+engine's item check refused), and yes on a free one; the gates-only
+`LocationTestAddEntity` was yes on a taken slot and no on the wrong slot. For the hands,
+`HumanInventory.CanAddEntityInHands(e)` was yes with free hands (for a barrel too) and
+no with busy ones.
+
+### The cell an item left for the hands is not taken for the server
+
+`ItemBase.EEItemLocationChanged` reserves the old location when an item is taken into
+the hands. With the item in the hands the occupancy test showed that cell free, and
+`LocationCreateEntity` created another item there; the client only draws the held item's
+shadow in the cell.
+
+### What "the player is doing nothing with their things" read
+
+Standing idle, with empty hands and with a held item alike:
+`GetDayZPlayerInventory().IsProcessing()` false, `PlayerBase.CanDeleteItems()` true,
+`GetActionManager().GetRunningAction()` null, `g_Game.HasInventoryJunctureItem(held)`
+false, the hand state machine idle (state 1 with empty hands, 2 holding). None of the
+busy states was measured.
 
 ## Verify every `model=` path before shipping — a missing model CRASHES the client
 
@@ -782,4 +971,11 @@ written into a record right after the call). `EntityAI.Delete()` sets `m_Pending
 and then queues `g_Game.ObjectDelete` through the system call queue (entityai.c:779 in 1.30,
 object.c:82), so `IsSetForDeletion()` is true from the next line on. Delete mid-operation
 entities with `e.Delete()` when anything in the same frame walks the tree.
+
+On 1.30.164289 (2026-11-11, a diag server, a networked item in a living player's inventory)
+`ObjectDelete` did more than schedule: within the same call `IsPendingDeletion()` and
+`ToDelete()` read true, the item had no inventory location any more and its holder's cargo
+counted one item fewer ("`ObjectDelete` frees the place within the call" above), while after
+`Delete()` the item still stood at its cell. The walk that still met the entity was on the
+retail build of 2026-09, on an unannounced container.
 
