@@ -777,6 +777,30 @@ look each value up into a local first (`int h = Handle(...); int ph = ParentHand
 Describe(e, h, ph, r);`). The same shape was fine in a loop that computed the parent's number
 into a local one statement earlier, which is how the fault hid for a week.
 
+## A recursive call that passes an object's array field overwrites the caller's array parameter (measured 2026-11-12)
+
+On a 1.30.164289 diag server, a function walking a tree of items --
+`Check(array<ref MyMod_Item> items)` looping `for (i...) { MyMod_Item it = items[i]; ...;
+Check(it.Inside); }` -- came back from the inner call with ITS OWN `items` pointing at the
+item's `Inside` list: the next iteration read the inner list (count 0 or 1), so every item
+after the first nested one was reported missing. The loop's locals (`i`, `it`) were intact.
+Isolated in one boot, each variant recursing from inside its loop:
+
+| the function | the argument of the recursive call | the caller's parameter afterwards |
+|---|---|---|
+| a method, `array<ref T>` parameter | an element's array field, `it.Inside` | overwritten (count 1 of 3) |
+| static, the same | `it.Inside` | overwritten (count 1 of 3) |
+| static, `array<int>` parameter | a fresh local array (`array<int> inner = new ...`) | kept |
+| static, an object parameter `it` | an element of its field, `it.Inside[i]` | kept |
+| static or a method, `string` parameter | another string literal | kept |
+
+The same family as "two calls of one function in a single argument list" above: a value the
+engine passes through a slot the next call of the same function reuses. Rule: never recurse
+with an object's array field while the caller still needs its own array parameter; walk a
+tree with a work list instead (`array<ref array<ref T>> lists`, push `it.Inside`, loop until
+the list is done) -- measured to work. Recursing per ELEMENT, with an object parameter
+(`Put(child)` for `child` in `it.Inside`), is the safe recursive shape.
+
 ## An instance method that shares its name with a static method of the calling class is never reached (measured 2026-09-27)
 
 Inside `static void Step(int budget)` of class A, `job.Step(budget)` on an object of class B
