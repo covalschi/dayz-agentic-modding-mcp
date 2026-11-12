@@ -667,6 +667,16 @@ without a migration. The key stays in existing files as dead text until
 something else rewrites them (a version bump, a quarantine, or any code path
 that saves), and then it silently disappears.
 
+## What JsonFileLoader writes: a bool as 1 or 0, a null object as `{}`
+
+Measured 2026-11-12 on 1.30. `SaveFile` writes a `bool` member as `1` / `0`, not
+`true` / `false` (a third-party trader mod's own files, saved by `JsonSaveFile`, hold
+`"AcceptWorn": 1`), and `LoadFile` reads `1` / `0` back into a `bool` member: a record
+class of your own with `bool` members reads such files as they are. A `ref` object
+member that is null is written as `{}`; read back, that is an allocated object with
+every member zero ("A `ref` member the JSON does not mention" below), so "null means
+off" survives a save and a load only when all zeros mean off too.
+
 The reverse case -- a field the class declares and the JSON lacks -- loads
 without an error too, and what the field then holds depends on WHO ALLOCATED
 the object. In an object your code made with `new` and handed to `LoadFile` /

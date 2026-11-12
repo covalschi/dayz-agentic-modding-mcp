@@ -691,6 +691,17 @@ Cost this twice in one session on the same file. Anything that reads like an
 `owned`, `private`, `class` — wants a different name. `line`, `text`,
 `result` all work.
 
+### `set` and `owned` do not name a variable either (measured 2026-11-12)
+
+```c
+MyMod_Settings set = new MyMod_Settings();   // refused at the declaration
+bool owned = false;                          // refused at the declaration
+```
+
+`set` is the engine's template type (`set<T>`, as `array<T>` and `map<K,V>`), and
+`owned` is a modifier keyword (`proto native owned string ...`). Both failed the
+module's compile on a 1.30 diag stand; `cfg` and `granted` in their places compiled.
+
 ## Strings are byte arrays: Substring can cut a UTF-8 character in half
 
 `string.Length()` and `Substring()` count BYTES, and player text is UTF-8 —

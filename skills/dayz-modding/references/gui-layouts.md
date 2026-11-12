@@ -454,6 +454,12 @@ the panel closes. Drag-rotate (vanilla pattern, inspectmenunew.c:78-101): in
 `UpdateRotation(int mouse_x, int mouse_y, bool is_dragging)`; apply delta via
 `SetModelOrientation`. See `assets/layout-examples/item_preview.layout`.
 
+A client-local probe takes `SetHealth01("", "", h)`, and the preview draws it in that
+condition (the worn and damaged textures; measured 2026-11-12), so a shelf can show goods
+in the condition they come in. `SetAlpha` on the `ItemPreviewWidget` itself does NOT dim
+the 3D item (measured the same day): mark a preview as unavailable with a widget beside it
+(a corner, a muted price) instead.
+
 `RichTextWidget` inline tags (community-confirmed vanilla usage):
 `<image set="dayz_gui" name="icon_pin" scale="1.2" />`, `</br>` line break (note the
 closing-tag spelling), `<h scale="0.8">heading</h>`. Keybind icon markup:
