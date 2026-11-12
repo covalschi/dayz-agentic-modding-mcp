@@ -825,6 +825,31 @@ A magazine created with `LocationCreateEntity` holds all its rounds (`ammo 30/30
 the same call; it was empty on both sides. A rifle created the same way has nothing in it: no
 attachment, no round in the chamber.
 
+### A swap of parts asks only the part that arrives (measured 2026-11-12, 1.30 diag)
+
+`GameInventory.LocationTestAddEntity(loc, false, true, false, false, true, false)` for a
+part in a weapon's slot runs the rules of arrival -- the host's `CanReceiveAttachment`, the
+part's `CanPutAsAttachment` -- and nothing about the part it replaces or the parts that
+stay. Vanilla keeps the rest on the way off: `AK_RailHndgrd` and `M4_RISHndgrd` refuse
+`CanDetachAttachment` while the weapon holds anything in `weaponFlashlight`
+(ak_railhndgrd.c, m4_rishndgrd.c); `AtlasBipod.CanDetachAttachment` is always false;
+`BurlapSackCover` never comes off its wearer and `MouthRag` only through its own action;
+`UniversalLight.CanPutAsAttachment` wants a handguard with `hasRailFunctionality` in the
+slots it checks. Measured on a stand: on an AKM carrying a rail handguard and a light, the
+test said yes to a wooden handguard in the handguard slot (a stand mod's own move then left
+the light on the wooden handguard -- a rifle the game never makes), and no to a light on an
+AKM with a wooden handguard.
+
+Code that takes parts off by its own moves (a trader, a crafting station) asks the pair of
+removal itself -- `part.CanDetachAttachment(host)` and `host.CanReleaseAttachment(part)`, the
+pair `ActionDetach` and `ActionTakeItem` ask -- and asks it in an order, because one part
+off first can free another: the light off, then the rail. A local twin of the host
+(`CreateObjectEx(type, pos, ECE_LOCAL)` with copies of the parts still on it) answered as the
+real rifle would, rebuilt for each step. Two rules belong to the situation, not to what is
+attached: `Weapon_Base.CanReleaseAttachment` lets a magazine out only of a weapon in its
+player's hands (a twin never is), and `ItemBase.CanReleaseAttachment` asks
+`AreChildrenAccessible`, which is false for anything that lies, at any depth, in a cargo.
+
 ### The cell an item left for the hands is not taken for the server
 
 `ItemBase.EEItemLocationChanged` reserves the old location when an item is taken into
