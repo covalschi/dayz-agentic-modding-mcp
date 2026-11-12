@@ -445,6 +445,21 @@ so the account shows "in game" only for the upload. Steam client must be running
 logged in; the MCP never sees credentials. SteamCMD `workshop_build_item` would work too
 but needs its own password + Steam Guard login -- rejected for that reason.
 
+### Subscribing to an item from a script (measured 2026-11-12)
+
+The same `steam_api64.dll` route subscribes the running client's account and downloads a
+Workshop item without the launcher or a browser: `SteamAPI_Init` (env `SteamAppId=221100`),
+then per item `SteamAPI_ISteamUGC_SubscribeItem(ugc, id)` -- a call whose result is
+`RemoteStorageSubscribePublishedFileResult_t` (callback `k_iSteamRemoteStorageCallbacks + 13`
+= 1313; `{EResult, PublishedFileId_t}`, 16 bytes under pack 8) -- and
+`SteamAPI_ISteamUGC_DownloadItem(ugc, id, true)`; poll `GetItemState` (`k_EItemState*`:
+1 subscribed, 4 installed, 8 needs update, 16 downloading, 32 pending) until installed and not
+downloading, and `GetItemInstallInfo` names the folder. Two items of 81 and 186 MB were on disk
+within a minute. The content lands in `steamapps\workshop\content\221100\<id>\` (an `addons\`
+of signed pbos and a `keys\`); the `<DayZ>\!Workshop\@Name` links appear only when the DayZ
+launcher runs, so a stand points at the content folder itself. Ask the person first: it is
+their account, and the download is theirs.
+
 ## Mission-side files (server content config)
 
 Mission = `mpmissions\<template>\`. Relevant to mods:
