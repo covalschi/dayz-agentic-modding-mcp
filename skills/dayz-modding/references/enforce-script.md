@@ -777,7 +777,7 @@ look each value up into a local first (`int h = Handle(...); int ph = ParentHand
 Describe(e, h, ph, r);`). The same shape was fine in a loop that computed the parent's number
 into a local one statement earlier, which is how the fault hid for a week.
 
-## A recursive call that passes an object's array field overwrites the caller's array parameter (measured 2026-11-12)
+## A recursive call handed an object's field overwrites the caller's parameter (measured 2026-11-12)
 
 On a 1.30.164289 diag server, a function walking a tree of items --
 `Check(array<ref MyMod_Item> items)` looping `for (i...) { MyMod_Item it = items[i]; ...;
@@ -793,6 +793,22 @@ Isolated in one boot, each variant recursing from inside its loop:
 | static, `array<int>` parameter | a fresh local array (`array<int> inner = new ...`) | kept |
 | static, an object parameter `it` | an element of its field, `it.Inside[i]` | kept |
 | static or a method, `string` parameter | another string literal | kept |
+
+The same day, a second boot asked the other kinds (each function recursing once from inside a
+loop over a LOCAL array of two nodes, the outer frame reading its parameter after each inner
+call; unchanged would read the first value twice):
+
+| the parameter | the argument of the recursive call | the outer frame's parameter after the two calls |
+|---|---|---|
+| `string host` ("top") | a node's string field, `k.Name` | "top.0", then "top.1" -- overwritten |
+| `int num` (100) | a node's int field, `k.Num` | 101, then 102 -- overwritten |
+| an object (`root`) | a node's object field, `k.Kid` | root.0, then root.1 -- overwritten |
+| `string host` ("top") | a local copy, `string sub = k.Name;` then `(sub)` | "top", "top" -- kept |
+
+So the trigger is the argument, not the parameter's type: a field read straight into the
+recursive call's argument list. It is not caught by anything: in a mod it showed as a strip of
+a weapon's parts in which every slot after a fitted scope was read as the scope's own, and a
+magazine slot found nothing to fit. Copy the field into a local and hand the local.
 
 The same family as "two calls of one function in a single argument list" above: a value the
 engine passes through a slot the next call of the same function reuses. Rule: never recurse
