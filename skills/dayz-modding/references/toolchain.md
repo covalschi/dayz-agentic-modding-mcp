@@ -618,10 +618,14 @@ What the binary actually supports (string table of `DayZServer_x64.exe`, same da
 - The tick target is a fixed 30 Hz; 25-30 is healthy, 15-25 players feel desync, below 15
   is unplayable.
 
-Server FPS is readable from script: `proto native float GetFps()` on `CGame`
-(`3_game/global/game.c:867`, 1.30.164200), plus `World.GetServerFpsWarningThreshold()` /
-`GetServerFpsCriticalThreshold()` (`3_game/global/world.c:202,207`). Log it next to the
-player count for a permanent per-instance health number.
+`CGame.GetFps()` (`proto native float GetFps()`, `3_game/global/game.c:867`) does NOT give a
+dedicated server's frame rate: it read 0 on a 1.30 diag server (measured 2026-11-12, a stand
+mod's admin overview). Count the frames yourself: a `modded class MissionServer` override of
+`OnUpdate(float timeslice)` adds one frame and `timeslice` seconds, and every few seconds frames /
+seconds is the FPS (an idle diag server with no frame cap counted about 1460).
+`World.GetServerFpsWarningThreshold()` / `GetServerFpsCriticalThreshold()`
+(`3_game/global/world.c:202,207`) are the engine's own marks to compare it with. Log it next to
+the player count for a permanent per-instance health number.
 
 Cross-instance play (moving a character between servers) has no engine support: there is
 no redirect/migrate proto. The only working shape is snapshot → RPC with the target

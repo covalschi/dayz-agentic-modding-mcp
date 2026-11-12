@@ -788,6 +788,25 @@ look each value up into a local first (`int h = Handle(...); int ph = ParentHand
 Describe(e, h, ph, r);`). The same shape was fine in a loop that computed the parent's number
 into a local one statement earlier, which is how the fault hid for a week.
 
+## A `static const int` set by a function call read 0 in a Mission-module class (measured 2026-11-12)
+
+Five colour classes of a stand mod's admin glue, all compiled in `5_Mission` (inside `#ifdef`
+guards), declared `static const int TEXT = ARGB(255, 224, 223, 218);` or `= ARGBF(...)`. At run
+time every one of them read 0: `SetColor(MyMod_Metal.TEXT)` made the text fully transparent, list
+rows coloured with `SetItemColor` vanished, and a guard `if (color != 0)` skipped its work without
+a word. The same form in a `3_Game` class of the same mod set reads right. Not isolated further
+(module, guard or load order). Write colour constants as literals, as vanilla does
+(`1_core/constants.c`: `const int COLOR_RED = 0xFFF22613;`), e.g.
+`static const int TEXT = 0xFFE0DFDA;`; a call inside a method body (`int ink = ARGB(...);`) runs
+at run time and is fine. Symptom to recognise: a widget's text exists (`GetTextSize` is not zero)
+and nothing is drawn.
+
+Bytes over 0x7F (measured the same night): `string.ToAscii()` of a one-byte `Substring` reads
+such a byte (a negative result is the byte - 256), and `int.AsciiToString()` makes one from
+0x80..0xFF. A check that a two-byte UTF-8 letter reads as its two bytes and is equal to the
+string made from them passed, and a cp1251 <-> UTF-8 recoder built on the two carried an 8.5 KB
+Cyrillic file both ways through the clipboard (gui-layouts.md, the clipboard).
+
 ## A recursive call handed an object's field overwrites the caller's parameter (measured 2026-11-12)
 
 On a 1.30.164289 diag server, a function walking a tree of items --

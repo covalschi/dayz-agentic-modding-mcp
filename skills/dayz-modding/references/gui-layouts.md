@@ -1087,6 +1087,18 @@ typing is NOT capped at 512 bytes -- 279 Cyrillic characters (519 bytes) and 512
 characters with four line breaks (516 bytes) arrived whole in `GetText()`; the paste was not
 re-measured.
 
+**The clipboard is the system's ANSI text** (measured 2026-11-12, 1.30 diag client on a Windows
+whose ANSI code page is cp1251). `GetGame().CopyFromClipboard(out string)` returns the clipboard
+in that code page: a UTF-8 file pasted from an editor arrived with every Cyrillic letter as one
+cp1251 byte, and an edit box given that string drops everything from the first byte that is not
+valid UTF-8 (73 bytes of an 8.5 KB file showed). `CopyToClipboard(string)` puts the script's
+UTF-8 bytes there as ANSI text, which other programs read as mojibake. Inside the game a copy
+and a paste round-trip fine. A script that moves text to and from other programs has to recode:
+cp1251 -> UTF-8 on the way in unless the text already reads as UTF-8, UTF-8 -> cp1251 on the way
+out (byte access: enforce-script.md, "Strings, math, random"). On a Windows with another ANSI
+code page Cyrillic cannot travel this way at all. The script read is not held to the 512-byte
+paste cap: an 8.5 KB file arrived whole and recoded.
+
 ## 23. The player equipment grid ignores `attachments[]` (measured 2026-08-28)
 
 Adding a slot to `SurvivorBase { attachments[] += {...} }` makes the slot
