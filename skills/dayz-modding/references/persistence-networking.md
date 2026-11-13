@@ -825,6 +825,20 @@ parts landed in one buffer and both bodies died (measured 2026-08-30, a
 three-part config read beside a second read of the same config). Ordering is
 safe: guaranteed RPCs arrive in send order on the same connection.
 
+How fast such a message arrives (measured 2026-11-13, diag 1.30 server and
+client on one machine, one player; all parts sent in one server frame, the
+receiver appending each part as it lands; timed from the server's log line
+after the send to the client's line after the envelope): 6.6 KB (8 parts) in
+47 ms, 27 KB (31) in 0.5 s, 52 KB (59) in 1.1 s, 124 KB (138) in 3.0-3.2 s on
+every try; 520 KB (578) in 8.4 s the first time, 3.0-4.6 s when sent again a
+few seconds later. A 2 KB reply comes back 14-30 ms after the ask. So the pace
+of a burst of guaranteed messages is the engine's, about 45-50 KB/s for the
+first hundred kilobytes and faster under a sustained stream; the script waits
+for nothing and the server is free meanwhile, but the player waits. Bytes are
+the lever: the same 3404 records as one short delimited string each instead of
+a JSON object went from 520 to 124 KB, and a change of a few records sent as
+those records alone is a 2 KB reply.
+
 ## Entity storage: strings die at 1024 bytes, the blob does not (measured 2026-08-28)
 
 Probed on a diag stand (1.29 DIAG, CF v5 ModStorage, data-carrier test items with
