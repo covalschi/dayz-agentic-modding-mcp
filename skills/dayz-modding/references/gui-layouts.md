@@ -2270,3 +2270,29 @@ was measured while building it, on a diag client at 1920x1080 (a unit is a pixel
   at 1920x1080 (`ui_find`, 2026-11-13). A square icon comes out a quarter wider than high:
   draw it in a 5:4 canvas. `set:<imageset> image:<name>` works once the mod lists its
   imageset in `CfgMods`; a coloured image keeps its colours, at 78 % alpha.
+
+## 37. A list of suggestions under an edit box (measured 2026-11-13, diag client 1.30)
+
+A stand mod's admin window put a script-made list under a focused `EditBoxWidget` and filtered
+it while the box's text changed (a search of class names):
+
+- **The arrows move the focus.** Up and Down pressed while an `EditBoxWidget` has the focus move
+  the engine's focus to the next widget (menu navigation): the box loses it, and a list that
+  closes when its box loses the focus closed at the first arrow. What worked: read the arrows and
+  Enter with `KeyState(KeyCode.KC_UP / KC_DOWN / KC_RETURN / KC_NUMPADENTER)` from the menu's
+  per-frame update, edge-detected, and while the list is open and the focus has left the box
+  with one of those keys down, `SetFocus(box)` back and handle the key. A 120 ms tap was taken
+  once.
+- **Follow the box from the frame update, not from `OnChange`,** when other mods' panes answer
+  their boxes' `OnChange` and return true without calling super: a handler lower in the modded
+  chain never hears those boxes. `GetFocus()` and `EditBoxWidget.GetText()` compared with the
+  text seen last, every frame, cost nothing worth measuring.
+- **A press on a row of the list takes the focus off the box** before the click lands: keep the
+  list while `GetWidgetUnderCursor()` is inside it, and `SetFocus(box)` after the pick. A pick
+  that should count as typing calls the menu's own `OnChange(box, 0, 0, false)`, so the panes
+  that keep a draft from it see the new text.
+- **Speed.** The client walking `CfgVehicles`, `CfgWeapons` and `CfgMagazines` (14 895 classes
+  of a big mod set: scope, `ConfigGetFullPath` for the kind, `displayName` as text and as key)
+  and reading 15 `stringtable.csv` files took 633-670 ms of script work, done 3 ms a frame over
+  some 210 frames. `string.IndexOf` of a two-letter text over 13 788 prepared strings in a
+  script loop: 1.5 ms; a text that only grew, looked for in the last hits only: 0.04-0.25 ms.
