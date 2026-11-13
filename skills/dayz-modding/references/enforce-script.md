@@ -284,7 +284,10 @@ foreach (string k, int v : points) { }           // map: key + value
 - More array API: `IsValidIndex(i)`, `Sort(true)` = descending, `GetRandomElement()` /
   `GetRandomIndex()` (UNIFORM: `Math.RandomInt(0, Count())`, enscript.c:567-571 — build any
   weighted drop roll yourself), `Reserve(n)`, `Resize(n)`, `InsertAll(other)`,
-  `Copy(other)`.
+  `Copy(other)`. `InsertAll` between two arrays of `ref` does NOT compile:
+  `a.InsertAll(b)` with both `array<ref MyMod_Row>` stops the module with `Types
+  'array<@MyMod_Row>' and 'array<MyMod_Row>' are unrelated` (measured 2026-11-13, diag
+  1.30); copy them one by one with `Insert`. Arrays of strings and numbers take it.
 - Static arrays `int arr[5]` are fixed-size; out-of-bounds is UB (no runtime check).
   Trap: assigning a complex expression directly into a static-array element can segfault —
   compute into a local first (community-reported).
@@ -701,6 +704,27 @@ bool owned = false;                          // refused at the declaration
 `set` is the engine's template type (`set<T>`, as `array<T>` and `map<K,V>`), and
 `owned` is a modifier keyword (`proto native owned string ...`). Both failed the
 module's compile on a 1.30 diag stand; `cfg` and `granted` in their places compiled.
+
+### A method named like a game class is called as its constructor (measured 2026-11-13)
+
+```c
+class MyMod_Answer
+{
+    static MyMod_Res Head(PlayerBase p) { ... }   // declares fine
+    static void Use(PlayerBase p)
+    {
+        MyMod_Res r = Head(p);   // Method 'Object' is private -- the module refuses
+    }
+}
+```
+
+Vanilla declares `class Head` (an entity, `Object` underneath), and an unqualified call
+`Head(p)` inside the class is read as `new Head(p)`, whose constructor is `Object`'s,
+private. The same trap the SKILL.md table names for another mod's class, here with the
+game's own and a different message. `HeadOf` compiled. Before naming a method or a field,
+grep the game's scripts for `class <Name>`: `Head`, `Hud`, `Step` and `Debug` are classes
+there, and so is `Player` (a field of that name was renamed before it was ever compiled, so
+whether it fails as `Hud` does is not measured).
 
 ## Strings are byte arrays: Substring can cut a UTF-8 character in half
 

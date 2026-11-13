@@ -839,6 +839,19 @@ the lever: the same 3404 records as one short delimited string each instead of
 a JSON object went from 520 to 124 KB, and a change of a few records sent as
 those records alone is a 2 KB reply.
 
+Pages help on both ends (same stand, the same 126 KB as 35 messages of about
+3.6 KB, each its own envelope with its own parts, sent from a per-frame tick at a
+byte rate): the first page was on the client 40-110 ms after the ask, so a screen
+can show goods at once and fill the rest as it comes; and the whole arrived
+sooner than as one message: 2.88 s paced at 40 KB/s, 2.69 s at 60, 2.15 s at 150,
+1.94 s at 400 (against 3.0 s for one message of 138 parts). Past about 60 KB/s
+the pages wait in the engine's queue rather than on the server, and an answer
+the player asks meanwhile waits behind them; a slow pace keeps that queue
+empty. The worked pattern -- a head with the count, pages, the last page saying
+so, changes that come meanwhile held until it -- is the storage-box stream of a
+proxy design; nothing in the engine numbers or orders the messages for you
+beyond guaranteed delivery in send order.
+
 ## Entity storage: strings die at 1024 bytes, the blob does not (measured 2026-08-28)
 
 Probed on a diag stand (1.29 DIAG, CF v5 ModStorage, data-carrier test items with
