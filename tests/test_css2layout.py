@@ -292,3 +292,14 @@ def test_a_tick_boxs_parts_are_named_and_a_radio_is_round(tmp_path):
     assert "PanelWidgetClass TickEdge {" in text and "PanelWidgetClass TickBg {" in text and "ImageWidgetClass TickMark {" in text
     assert "ImageWidgetClass PickEdge {" in text and "ImageWidgetClass PickBg {" in text
     assert "visible 1" in widget(text, "TickMark") and "visible 0" in widget(text, "PickMark")
+
+
+def test_a_caption_may_name_its_own_key(tmp_path):
+    p = Page()
+    word = p.text("Node", lambda w, h: [10, 10, 40, 15])
+    span = p.el("span", lambda w, h: [10, 10, 40, 15], [word], dz={"str": "STR_MY_NODE"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [span], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path, {"STR_OTHER_NODE": ("Node", "Node")})
+    conv, files = convert(cfg, p.probe(root))
+    assert 'text "#STR_MY_NODE"' in files["mymod_page.layout"]
+    assert not conv.rep.captions

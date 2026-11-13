@@ -185,6 +185,7 @@ function walk(el, win, under, pass, rects) {
       if (tag === 'select') n.inp.opts = Array.from(el.options).map(o => o.textContent.trim());
       if (tag === 'select' && el.selectedIndex >= 0) n.inp.value = el.options[el.selectedIndex].textContent.trim();
       if (el.checked) n.inp.on = 1;
+      if (cs.accentColor && cs.accentColor !== 'auto') { const ac = col(cs.accentColor, mine); if (ac) n.inp.accent = ac; }
       const phc = col(win.getComputedStyle(el, '::placeholder').color, mine);
       if (phc) n.inp.phc = phc;
       if (tag === 'input' && el.type === 'range') { n.inp.min = el.min; n.inp.max = el.max; }

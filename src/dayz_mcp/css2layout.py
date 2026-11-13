@@ -50,6 +50,8 @@ half's `Paint(root, "<Name>Bg", colour)` colours a part with its ends:
     data-dz-empty           the element's content is left out (a host other layouts go into)
     data-dz-skip            the element and its content are left out
     data-dz-align="right"   a text's alignment when the page cannot tell (left, center, right)
+    data-dz-str="STR_KEY"   the caption's stringtable key, when the words alone would find
+                            another key (two keys with the same words) or none
 
 The config (JSON; `extends` names another config to lay this one over):
 
@@ -946,6 +948,9 @@ class Converter:
             marks = self.cfg.get("marks") or {}
             edge = marks.get("on" if on else "off", "#a09f99")
             fill = marks.get("fill_on" if on else "fill", n.get("eb", st["under"]))
+            accent = self.col(inp.get("accent"), st["fades"])
+            if on and accent:
+                edge = fill = accent
             # its frame and its ground, in that order (a script that colours them by place
             # keeps working), named when the box is: <Name>Edge, <Name>Bg
             def part(suffix: str) -> str:
@@ -1156,7 +1161,8 @@ class Converter:
             w.text = text.upper() if f.get("tt") == "uppercase" else text
             self.rep.named.append(f"{w.name}  {'RichText' if wrapped else 'TextWidget'} (filled by script)")
         else:
-            w.text = self.caption(text, f)
+            forced = dz.get("str") if owner and self.first_run(owner, False) is k else None
+            w.text = ("#" + forced.lstrip("#")) if forced else self.caption(text, f)
             if label_name:
                 self.rep.named.append(f"{w.name}  {'RichText' if wrapped else 'TextWidget'} (a caption: recolour only)")
         if f.get("td"):
@@ -1168,7 +1174,7 @@ class Converter:
         nearest ancestor that carries one of them, reached through bare wrappers only."""
         for el in reversed(st["anc"]):
             dz = el.get("dz") or {}
-            if "text" in dz or "label" in dz or "icon" in dz or "align" in dz:
+            if "text" in dz or "label" in dz or "icon" in dz or "align" in dz or "str" in dz:
                 return el
             if dz or el.get("bg") or el.get("bd"):
                 return None
