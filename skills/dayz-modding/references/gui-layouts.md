@@ -2247,6 +2247,10 @@ was measured while building it, on a diag client at 1920x1080 (a unit is a pixel
   legend. Written as the box says, the frame stood 7 units too high and ran through the
   caption. The frame is written from the legend's middle and the legend gets the ground it
   stands on (a panel in the colour behind it), which breaks the line.
+- **In a layout's text a `#` starts a stringtable key wherever it stands**, not only as the
+  first character: `text "#"`, `"##"` and `" #"` drew nothing, `"#a"` and `"##a"` drew `a`
+  (a trial layout in a preview). A stringtable VALUE with `#` in it is drawn as it is. So a
+  caption that shows the sign (a colour field's `#`, `#RRGGBB`) has to come from a key.
 - **What has no answer**: rounded corners other than a full pill, dashed borders, soft
   shadows, gradients, letter spacing (§32: bake it into a face -- extra advance per glyph),
   a native checkbox, select or slider (drawn as a box with a mark, a button with a caption,

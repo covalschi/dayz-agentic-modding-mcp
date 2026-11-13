@@ -1085,7 +1085,13 @@ class Converter:
         k = self.strings.key_of(t)
         if k:
             return k
-        if re.search(r"[^\W\d_]", t):
+        if "#" in t:
+            # in a layout's text a # starts a stringtable key wherever it stands: the rest of
+            # the word is looked up and, not being a key, drawn without the sign (or not at all)
+            note = f'a "#" in the caption «{t}» will not be drawn as written: give the caption a stringtable key'
+            if note not in self.rep.notes:
+                self.rep.notes.append(note)
+        if re.search(r"[^\W\d_]", t) or "#" in t:
             self.rep.captions[t] = self.rep.captions.get(t, 0) + 1
         return t
 
