@@ -264,3 +264,31 @@ def test_an_edit_box_keeps_its_inputs_alignment(tmp_path):
     assert '"text halign" right' in widget(files["mymod_page.layout"], "Amount")
     assert '"text halign" right' in widget(files["mymod_page.layout"], "AmountPh")
     assert 'text "42"' in widget(files["_demo_mymod_page.layout"], "Amount")
+
+
+def test_an_edit_boxs_sample_cannot_break_the_layout(tmp_path):
+    p = Page()
+    box = p.el("textarea", lambda w, h: [10, 10, 300, 100], inp={"type": "textarea", "value": '{\n  "a": "b"\n}', "ph": ""},
+               f=dict(TEXT), dz={"name": "Editor"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [box], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    _conv, files = convert(cfg, p.probe(root), demo=True)
+    line = next(ln for ln in files["_demo_mymod_page.layout"].split("\n") if ln.strip().startswith("text ") and "a" in ln)
+    assert line.strip() == """text "{ 'a': 'b' }\""""
+
+
+def test_a_tick_boxs_parts_are_named_and_a_radio_is_round(tmp_path):
+    p = Page()
+    tick = p.el("input", lambda w, h: [10, 10, 13, 13], inp={"type": "checkbox", "value": "on", "ph": "", "on": 1},
+                f=dict(TEXT), dz={"name": "Tick"})
+    radio = p.el("input", lambda w, h: [40, 10, 13, 13], inp={"type": "radio", "value": "on", "ph": ""},
+                 f=dict(TEXT), dz={"name": "Pick"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [tick, radio], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    cfg["icons"]["disc"] = "disc"
+    cfg["glyphs"]["\u2713"] = {"icon": "check", "scale": 0.9}
+    _conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    assert "PanelWidgetClass TickEdge {" in text and "PanelWidgetClass TickBg {" in text and "ImageWidgetClass TickMark {" in text
+    assert "ImageWidgetClass PickEdge {" in text and "ImageWidgetClass PickBg {" in text
+    assert "visible 1" in widget(text, "TickMark") and "visible 0" in widget(text, "PickMark")

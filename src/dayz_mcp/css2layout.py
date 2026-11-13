@@ -946,8 +946,22 @@ class Converter:
             marks = self.cfg.get("marks") or {}
             edge = marks.get("on" if on else "off", "#a09f99")
             fill = marks.get("fill_on" if on else "fill", n.get("eb", st["under"]))
-            box.kids.append(self.panel(self.fresh(pool), rect.copy(), edge))
-            box.kids.append(self.panel(self.fresh(pool), rect.inset(1, 1, 1, 1), fill))
+            # its frame and its ground, in that order (a script that colours them by place
+            # keeps working), named when the box is: <Name>Edge, <Name>Bg
+            def part(suffix: str) -> str:
+                if dz.get("name") and name + suffix not in pool:
+                    return self.claim(name + suffix, pool)
+                return self.fresh(pool)
+            disc = (self.cfg.get("icons") or {}).get("disc")
+            if inp["type"] == "radio" and disc and self.icons.set:
+                for suffix, r_, hx in (("Edge", rect.copy(), edge), ("Bg", rect.inset(1, 1, 1, 1), fill)):
+                    round_ = Wd("ImageWidgetClass", part(suffix), r_)
+                    round_.color = hx
+                    round_.set("image0", f'"set:{self.icons.set} image:{disc}"').set("mode", "blend").set(key("src alpha"), "1")
+                    box.kids.append(round_)
+            else:
+                box.kids.append(self.panel(part("Edge"), rect.copy(), edge))
+                box.kids.append(self.panel(part("Bg"), rect.inset(1, 1, 1, 1), fill))
             glyph = (self.cfg.get("glyphs") or {}).get("\u2713" if inp["type"] == "checkbox" else "\u25cf")
             if glyph and self.icons.set:
                 mark = Wd("ImageWidgetClass", self.claim(name + "Mark", pool), rect.inset(2, 2, 2, 2))
@@ -958,7 +972,8 @@ class Converter:
                     mark.props.append(("_demo_hidden", "1"))
                 box.kids.append(mark)
             if dz.get("name"):
-                self.rep.named.append(f"{name}  ButtonWidget (a {inp['type']}); its mark is {name}Mark: show it when on")
+                self.rep.named.append(f"{name}  ButtonWidget (a {inp['type']}; parts: {name}Edge, {name}Bg); its mark is "
+                                      f"{name}Mark: show it when on")
             else:
                 self.rep.unnamed_inputs += 1
             return out + [box]
@@ -1424,6 +1439,8 @@ class Converter:
             out.append(f"{p}userID {FLEX_FLAG}")
         if w.text is not None:
             text = "" if (w.dyn and not demo) else w.text
+            # a double quote or a line break inside a value hangs the engine's layout parser
+            text = " ".join(text.replace('"', "'").split())
             out.append(f'{p}text "{text}"')
         for k, v in w.props:
             if k.startswith("_"):
