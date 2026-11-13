@@ -632,6 +632,20 @@ class Converter:
             return self.emit_select(n, st)
 
         d = self.decor(n, fades)
+        # A fieldset draws its border from the middle of its legend down and breaks it under
+        # the legend. The browser's box of the fieldset starts at the legend's top: the
+        # border is drawn lower, and the legend gets the ground it stands on, so the line
+        # stops under its words.
+        drect = rect
+        if tag == "fieldset":
+            lg = next((k for k in (n.get("k") or []) if k.get("t") == "legend"), None)
+            if lg is not None and (d["uniform"] or d["lines"]):
+                la = self.a[lg["i"]]
+                drop = (la[1] + la[3] / 2) - rect.a[1]
+                if drop > 0.5:
+                    drect = rect.inset(0, rnd(drop), 0, 0)
+                    if not lg.get("bg"):
+                        lg["bg"] = {"c": n.get("eb", st["under"])}
         kind = dz.get("kind", "")
         has_field = self.holds(n, ("input", "textarea", "select"))
         is_btn = kind == "button" or tag == "button" or (tag == "a" and n.get("click")) or \
@@ -700,7 +714,7 @@ class Converter:
             box = Wd("ButtonWidgetClass", self.claim(named, pool) if named else self.fresh(pool), rect)
             box.ignore = None
             box.set("text", '""')
-            self.fill_decor(box, d, rect, pool, n, box.name if named else "")
+            self.fill_decor(box, d, drect, pool, n, box.name if named else "")
             if named:
                 parts = [k.name for k in box.kids]
                 self.rep.named.append(f"{box.name}  ButtonWidget" + (f" (parts: {', '.join(parts)})" if parts else ""))
@@ -708,10 +722,11 @@ class Converter:
                 self.rep.unnamed_buttons += 1
             inner = dict(st, in_click=True)
         else:
-            if named and decorated:
+            if (named and decorated) or (decorated and drect is not rect):
                 # a named box keeps one shape whatever it draws: a frame holding its parts
-                box = Wd("FrameWidgetClass", self.claim(named, pool), rect)
-                self.fill_decor(box, d, rect, pool, n, box.name)
+                # (and so does a fieldset, whose border is not its own box)
+                box = Wd("FrameWidgetClass", self.claim(named, pool) if named else self.fresh(pool), rect)
+                self.fill_decor(box, d, drect, pool, n, box.name if named else "")
             elif decorated and (n.get("rad") or 0) >= rect.a[3] / 2 - 1 and (self.cfg.get("icons") or {}).get("disc") \
                     and 6 <= rect.a[3] <= 48:
                 box = Wd("FrameWidgetClass", self.fresh(pool), rect)
@@ -989,6 +1004,9 @@ class Converter:
         if multi:
             lh = f.get("lh") or px * 1.3
             edit.set("lines", fmt(max(1, int(inner.a[3] // lh))))
+        halign = {"right": "right", "end": "right", "center": "center"}.get(f.get("ta", ""), "")
+        if halign and not multi:
+            edit.set(key("text halign"), halign)
         edit.text = inp.get("value", "")
         edit.dyn = True
         if dz.get("name"):
@@ -1000,7 +1018,7 @@ class Converter:
             ph = Wd("TextWidgetClass", self.claim(name + "Ph", pool), inner.copy())
             ph.color = self.col(inp.get("phc") or {"c": "#5c5a58"}, st["fades"])
             self.font_props(ph, f)
-            ph.set(key("text halign"), "left").set(key("text valign"), "center")
+            ph.set(key("text halign"), halign or "left").set(key("text valign"), "center")
             ph.text = self.caption(inp["ph"], f)
             ph.note = "placeholder"
             if inp.get("value"):

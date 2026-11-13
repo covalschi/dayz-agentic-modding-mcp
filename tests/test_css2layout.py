@@ -232,3 +232,35 @@ def test_what_a_scroll_holds_past_the_pages_edge_is_kept(tmp_path):
     assert any("off the page" in note for note in conv.rep.notes)
     # the scrolled frame is as tall as what it holds
     assert f"size {W} {H + 140}" in widget(text, "AreaBody")
+
+
+def test_a_fieldsets_border_starts_at_its_legends_middle(tmp_path):
+    p = Page()
+    word = p.text("MAIN", lambda w, h: [30, 40, 40, 14])
+    legend = p.el("legend", lambda w, h: [24, 40, 52, 14], [word], pad=[0, 6, 0, 6])
+    inside = p.text("inside", lambda w, h: [30, 70, 40, 15])
+    group = p.el("fieldset", lambda w, h: [10, 40, w - 20, 100], [legend, inside],
+                 bd=[{"s": s, "w": 1, "st": "solid", "col": {"c": "#3c3c3a"}} for s in "trbl"], dz={"name": "Group"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [group], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    _conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    edge = widget(text, "GroupEdge")
+    assert "position 0 7" in edge and "size 380 93" in edge      # the frame begins 7 units down: the legend's middle
+    assert "position 10 40" in widget(text, "Group") and "size 380 100" in widget(text, "Group")   # the box is still the fieldset's
+    # the legend stands on the page's ground, so the border stops under it
+    assert text.index("GroupEdge") < text.index('text "MAIN"')
+    assert text.count("color 0.047 0.047 0.047 1") >= 3           # root, the fieldset's fill, the legend's ground
+
+
+def test_an_edit_box_keeps_its_inputs_alignment(tmp_path):
+    p = Page()
+    box = p.el("input", lambda w, h: [10, 10, 80, 30], inp={"type": "text", "value": "42", "ph": "0"},
+               f=dict(TEXT, ta="right"), dz={"name": "Amount"},
+               bd=[{"s": s, "w": 1, "st": "solid", "col": {"c": "#3c3c3a"}} for s in "trbl"])
+    root = p.el("div", lambda w, h: [0, 0, w, h], [box], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    _conv, files = convert(cfg, p.probe(root), demo=True)
+    assert '"text halign" right' in widget(files["mymod_page.layout"], "Amount")
+    assert '"text halign" right' in widget(files["mymod_page.layout"], "AmountPh")
+    assert 'text "42"' in widget(files["_demo_mymod_page.layout"], "Amount")
