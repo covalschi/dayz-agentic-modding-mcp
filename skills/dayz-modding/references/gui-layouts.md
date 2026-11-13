@@ -2221,6 +2221,18 @@ was measured while building it, on a diag client at 1920x1080 (a unit is a pixel
 - **Colours.** The UI blends in linear light (§32), so every see-through colour of the page
   is written as the opaque colour it comes to over what is under it; grounds then match the
   browser to a level or two.
+- **A frame inside a button takes the click meant for the button.** A `FrameWidget` with no
+  `ignorepointer` line is hit by the pointer: a named badge and the clipping frames of a pill
+  inside a row that is a `ButtonWidget` got the click, and the menu's `OnClick` was handed the
+  frame instead of the row. A widget that ignores the pointer does not hide its children from
+  it (a button under an ignoring panel or frame is clicked as before), so every frame of a
+  generated page may ignore it; only the page's root keeps the pointer.
+- **A strip laid over a page must live beside the page.** A confirm strip created under the
+  window's root with `SetSort(20)` was shown (`IsVisible`, the right rectangle in the tree)
+  and never drawn: the page, a child of the window's content frame, has a root of priority
+  100 and covered it, although the strip's parent-level sibling (the content frame itself)
+  has priority 5. Moved into the content frame (`AddChild`) with `SetSort(200)` it stands
+  over the page. Give what overlays a page the page's own parent and a higher sort.
 - **What has no answer**: rounded corners other than a full pill, dashed borders, soft
   shadows, gradients, letter spacing (§32: bake it into a face -- extra advance per glyph),
   a native checkbox, select or slider (drawn as a box with a mark, a button with a caption,

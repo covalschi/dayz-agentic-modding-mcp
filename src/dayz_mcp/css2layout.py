@@ -1369,7 +1369,12 @@ class Converter:
         if demo and ("_demo_hidden", "1") in w.props:
             hidden = True
         out.append(f"{p}visible {'0' if hidden else '1'}")
-        if w.ignore and w.cls != "FrameWidgetClass":
+        # A frame takes the pointer unless told not to, and a frame inside a button then
+        # swallows the click meant for the button (measured 2026-11-13: a named badge in a
+        # row). No widget written here needs a frame's own pointer, and a widget that
+        # ignores it does not hide its children from it: every frame but the page's root
+        # ignores the pointer.
+        if (w.ignore and w.cls != "FrameWidgetClass") or (w.cls == "FrameWidgetClass" and parent is not None):
             out.append(f"{p}ignorepointer 1")
         if w.color:
             out.append(f"{p}color {color_text(w.color)}")
