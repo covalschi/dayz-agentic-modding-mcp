@@ -315,3 +315,74 @@ def test_a_round_dot_is_one_disc(tmp_path):
     text = files["mymod_page.layout"]
     assert 'ImageWidgetClass DotBg {' in text and 'image:disc' in widget(text, "DotBg")
     assert "DotBgL" not in text
+
+
+def test_the_root_names_its_ground_and_lines(tmp_path):
+    p = Page()
+    label = p.text("Apply?", lambda w, h: [24, 20, 80, 17])
+    root = p.el("div", lambda w, h: [0, 0, w, h], [label], bg={"c": "#251413"},
+                bd=[{"s": "t", "w": 1, "st": "solid", "col": {"c": "#e0524a"}}])
+    _conv, files = convert(config(tmp_path), p.probe(root))
+    text = files["mymod_page.layout"]
+    assert "PanelWidgetClass PaneTestBg {" in text
+    # the ground and the top line, both named after the root, so a script can repaint them
+    named = [line.strip() for line in text.split("\n") if "PanelWidgetClass PaneTest" in line]
+    assert len(named) == 2, named
+
+
+
+def test_a_button_paints_nothing_of_its_own(tmp_path):
+    p = Page()
+    label = p.text("Go", lambda w, h: [20, 12, 30, 17])
+    btn = p.el("button", lambda w, h: [10, 10, 120, 38], [label], bg={"c": "#1e1e1d"}, dz={"name": "BtnGo"}, click=True)
+    root = p.el("div", lambda w, h: [0, 0, w, h], [btn], bg={"c": "#0c0c0c"})
+    _conv, files = convert(config(tmp_path), p.probe(root))
+    body = widget(files["mymod_page.layout"], "BtnGo")
+    assert "ButtonWidgetClass BtnGo {" in body
+    assert "style Empty" in body
+
+
+
+def test_a_legend_has_room_for_its_longest_language(tmp_path):
+    p = Page()
+    word = p.text("Мітки", lambda w, h: [26, 4, 40, 15])
+    legend = p.el("legend", lambda w, h: [20, 4, 52, 15], [word], dz={"name": "Lg"})
+    field = p.el("fieldset", lambda w, h: [10, 4, 300, 100], [legend],
+                 bd=[{"s": s, "w": 1, "st": "solid", "col": {"c": "#3c3c3a"}} for s in "trbl"])
+    root = p.el("div", lambda w, h: [0, 0, w, h], [field], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path, strings={"STR_MARKS": ("Мітки", "Map markers")})
+    _conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    # 5 letters measured 40 px; 11 in English: about 40 * 11 / 5 * 1.08 = 95
+    body = widget(text, "LgBg")
+    size = next(line for line in body.split("\n") if line.strip().startswith("size "))
+    assert int(float(size.split()[1])) >= 90, size
+
+
+
+def test_a_caption_laid_over_a_border_has_room_too(tmp_path):
+    p = Page()
+    word = p.text("Ефір", lambda w, h: [32, 0, 32, 15])
+    cap = p.el("span", lambda w, h: [26, 0, 44, 15], [word], pos="absolute", bg={"c": "#131312"},
+               dz={"name": "Leg", "label": "LegText"})
+    box = p.el("div", lambda w, h: [10, 8, 300, 100], [cap],
+               bd=[{"s": s, "w": 1, "st": "solid", "col": {"c": "#3c3c3a"}} for s in "trbl"])
+    root = p.el("div", lambda w, h: [0, 0, w, h], [box], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path, strings={"STR_ETHER": ("Ефір", "The ether")})
+    _conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    size = next(line for line in widget(text, "LegBg").split("\n") if line.strip().startswith("size "))
+    assert int(float(size.split()[1])) >= 60, size
+
+
+def test_a_paragraph_keeps_room_for_the_engines_wider_lines(tmp_path):
+    p = Page()
+    para = p.text("one two three four five six seven", lambda w, h: [20, 20, 400, 36])
+    para["lines"] = [[20, 20, 400, 17], [20, 37, 300, 17]]
+    box = p.el("div", lambda w, h: [10, 10, 420, 60], [para], dz={"name": "Note"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [box], bg={"c": "#0c0c0c"})
+    _conv, files = convert(config(tmp_path), p.probe(root))
+    text = files["mymod_page.layout"]
+    body = next(b for b in text.split("RichTextWidgetClass")[1:])
+    size = next(line for line in body.split("\n") if line.strip().startswith("size "))
+    assert float(size.split()[1]) <= 410 * 0.98 + 0.5, size

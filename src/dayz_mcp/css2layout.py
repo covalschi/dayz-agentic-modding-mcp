@@ -356,6 +356,7 @@ class Strings:
 
     def __init__(self, cfg: dict):
         self.by_text: dict[str, str] = {}
+        self.longest: dict[str, int] = {}   # key -> letters of its longest language
         st = cfg.get("strings") or {}
         self.fold = st.get("fold") or {}
         column = st.get("column", "original")
@@ -375,6 +376,10 @@ class Strings:
                 if len(row) <= ci or not row[0].strip():
                     continue
                 self.by_text.setdefault(self.norm(row[ci]), row[0].strip())
+                letters = [len(self.norm(v)) for v in row[1:] if v.strip()]
+                if letters:
+                    k = row[0].strip()
+                    self.longest[k] = max(self.longest.get(k, 0), max(letters))
         for f in st.get("pending", []):
             path = cfg_path(cfg, f)
             if not path.exists():
@@ -383,6 +388,9 @@ class Strings:
             for k, pair in json.loads(path.read_text(encoding="utf-8")).items():
                 if isinstance(pair, list) and len(pair) > which:
                     self.by_text.setdefault(self.norm(pair[which]), k)
+                    letters = [len(self.norm(v)) for v in pair if isinstance(v, str) and v.strip()]
+                    if letters:
+                        self.longest[k] = max(self.longest.get(k, 0), max(letters))
 
     def norm(self, text: str) -> str:
         t = " ".join(text.replace("\u00a0", " ").split())
@@ -393,6 +401,15 @@ class Strings:
     def key_of(self, text: str) -> str | None:
         k = self.by_text.get(self.norm(text))
         return "#" + k if k else None
+
+    def widest(self, text: str) -> float:
+        """How much longer the caption's longest language is than these words (1: no longer,
+        or no key), by its letters."""
+        k = self.by_text.get(self.norm(text))
+        n = len(self.norm(text))
+        if not k or n == 0:
+            return 1.0
+        return max(1.0, self.longest.get(k, n) / n)
 
 
 class Icons:
@@ -609,6 +626,9 @@ class Converter:
             return []
         pool = st["pool"]
         tag = n["t"]
+        if n.get("pos") == "absolute" and tag not in ("button", "input", "select", "textarea"):
+            # a caption laid over a border (a group's caption span): room for every language
+            self.room_for_words(n)
         rect = self.r3(n)
         fades = st["fades"]
         if n.get("op") is not None:
@@ -641,6 +661,8 @@ class Converter:
         drect = rect
         if tag == "fieldset":
             lg = next((k for k in (n.get("k") or []) if k.get("t") == "legend"), None)
+            if lg is not None:
+                self.room_for_words(lg)
             if lg is not None and (d["uniform"] or d["lines"]):
                 la = self.a[lg["i"]]
                 drop = (la[1] + la[3] / 2) - rect.a[1]
@@ -715,7 +737,7 @@ class Converter:
         if is_btn:
             box = Wd("ButtonWidgetClass", self.claim(named, pool) if named else self.fresh(pool), rect)
             box.ignore = None
-            box.set("text", '""')
+            box.set("text", '""').set("style", "Empty")
             self.fill_decor(box, d, drect, pool, n, box.name if named else "")
             if named:
                 parts = [k.name for k in box.kids]
@@ -952,7 +974,7 @@ class Converter:
             name = self.claim(dz["name"], pool) if dz.get("name") else self.fresh(pool, "tick")
             box = Wd("ButtonWidgetClass", name, rect)
             box.ignore = None
-            box.set("text", '""')
+            box.set("text", '""').set("style", "Empty")
             on = bool(inp.get("on"))
             marks = self.cfg.get("marks") or {}
             edge = marks.get("on" if on else "off", "#a09f99")
@@ -1007,7 +1029,7 @@ class Converter:
             knob = Wd("ButtonWidgetClass", self.claim(name + "Knob", pool),
                       rect.each(lambda r: [r[0] + (r[2] - 14) * part, r[1] + r[3] / 2 - 7, 14, 14]))
             knob.ignore = None
-            knob.set("text", '""')
+            knob.set("text", '""').set("style", "Empty")
             knob.kids.append(self.panel(self.fresh(pool), knob.rect.copy(), marks.get("on", "#e8782b")))
             box.kids.append(knob)
             self.rep.named.append(f"{name}  Frame (a slider {inp.get('min')}..{inp.get('max')}): {name}Track, {name}Fill and "
@@ -1066,7 +1088,7 @@ class Converter:
         name = self.claim(dz["name"], pool) if dz.get("name") else self.fresh(pool, "pick")
         box = Wd("ButtonWidgetClass", name, rect)
         box.ignore = None
-        box.set("text", '""')
+        box.set("text", '""').set("style", "Empty")
         self.fill_decor(box, d, rect, pool, n)
         pad = n.get("pad") or [0, 8, 0, 8]
         bw = d["uniform"][0] if d["uniform"] else 0
@@ -1147,7 +1169,12 @@ class Converter:
             def para(which):
                 tr = getattr(rect, which)
                 hi = self.limits(room, which)[1] if room else tr[0] + tr[2]
-                return [tr[0], tr[1] + dy, max(tr[2], hi - tr[0]), tr[3] + 4]
+                wide = max(tr[2], hi - tr[0])
+                # the engine lays a broken line out up to ~1 % wider than the widget it broke
+                # it for, and the widget cuts the overhang (measured 2026-11-13: 830 px of text
+                # in an 824 px RichText, a word's last letter gone): 2 % of room in reserve
+                wide -= max(4.0, wide * 0.02)
+                return [tr[0], tr[1] + dy, wide, tr[3] + 4]
             w.rect = R3.of(para)
             w.set("wrap", "1").set(key("size to text h"), "0").set(key("size to text v"), "0")
             w.set(key("text halign"), {"center": "center", "right": "right", "end": "right"}.get(f.get("ta", ""), "left"))
@@ -1477,6 +1504,47 @@ class Converter:
             out.append(f"{p}}}")
         out.append(f"{pad}}}")
 
+    def room_for_words(self, el: dict) -> None:
+        """A legend's box, or a caption's laid over a border (and so the ground it stands on),
+        as wide as its caption's longest language would draw: the board's words are measured,
+        another language's are counted (letters, 8 % to spare). Only one caption run, found
+        through wrappers of one child, set from the left; never a script's text."""
+        path = [el["i"]]
+        node = el
+        while True:
+            dz = node.get("dz") or {}
+            if "text" in dz or dz.get("align") in ("center", "right"):
+                return               # a script's text, or one set from its middle or right
+            kids = node.get("k") or []
+            runs = [k for k in kids if "text" in k]
+            boxes = [k for k in kids if "t" in k]
+            if len(runs) == 1 and not boxes:
+                t = runs[0]
+                break
+            if len(boxes) == 1 and not runs:
+                node = boxes[0]       # a wrapper of one child: look inside
+                path.append(node["i"])
+                continue
+            return
+        if (t.get("f") or {}).get("ta", "") in ("center", "right", "end"):
+            return
+        ratio = self.strings.widest(t["text"])
+        if ratio <= 1.0:
+            return
+        grow = rnd(self.a[t["i"]][2] * (ratio * 1.08 - 1))
+        if grow < 1:
+            return
+        seen = set()
+        for arr in (self.a, self.b, self.c, self.d):
+            if id(arr) in seen:
+                continue
+            seen.add(id(arr))
+            for i in [t["i"]] + path:
+                arr[i] = list(arr[i])
+                arr[i][2] += grow
+        for line in t.get("lines") or []:
+            line[2] += grow
+
     # ---- the page
 
     def build(self, mode: str) -> Wd:
@@ -1491,7 +1559,9 @@ class Converter:
         root.ignore = None
         root.flex = False
         d = self.decor(tree, [])
-        self.fill_decor(root, d, root.rect, self.names, tree)
+        # the root's ground and lines are named after it, as a named box's are: a script
+        # repaints a strip or a card from its own name (<root>Bg, <root>Line ...)
+        self.fill_decor(root, d, root.rect, self.names, tree, stem=root_name)
         root.kids += self.emit_kids(tree, st)
         for extra in self.lift(root):
             root.kids.append(extra)
