@@ -1,0 +1,280 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wait</title>
+<body style="margin:0;background:#000">
+<iframe id="f" style="border:0;display:block"></iframe>
+<pre id="out"></pre>
+<script>
+// css2layout probe. Loads one page in a frame and writes what the browser laid out, as JSON
+// into #out: every box with its rectangle, colours, borders and layout facts, every run of
+// text with its line boxes and font, every svg with its markup -- at the design size, and
+// the rectangles again with the page made larger by one, two and three steps, so the reader
+// can tell what stretches, what follows an edge and what stays (three steps: one of them may
+// hold a jump -- a line of text that unwraps, a box that moves up a row -- and two agree).
+//
+// Query: page (url, same origin), w, h (design size), dw, dh (the step of the two other
+// sizes), glyphs (characters to cut out of text runs: they become icons), root (a CSS
+// selector of the page's own box; default: the first box of the design size).
+const q = new URLSearchParams(location.search);
+const W = +q.get('w') || 1360, H = +q.get('h') || 812;
+const DW = +q.get('dw') || 240, DH = +q.get('dh') || 160;
+const GLYPHS = q.get('glyphs') || '';
+const f = document.getElementById('f');
+f.style.width = W + 'px';
+f.style.height = H + 'px';
+f.src = q.get('page');
+
+function rgba(c) {
+  const m = c.match(/rgba?\(([^)]+)\)/);
+  if (!m) return null;
+  const p = m[1].split(',').map(s => parseFloat(s));
+  return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+}
+function hex(p) {
+  return '#' + p.slice(0, 3).map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+}
+function over(top, under) {
+  const a = top[3];
+  return [top[0] * a + under[0] * (1 - a), top[1] * a + under[1] * (1 - a), top[2] * a + under[2] * (1 - a), 1];
+}
+function col(c, under) {
+  // a colour as drawn: c as written, a its alpha, on = what it comes to over what is under it
+  const p = rgba(c);
+  if (!p || p[3] === 0) return null;
+  const o = {c: hex(p)};
+  if (p[3] < 1) { o.a = +p[3].toFixed(3); o.on = hex(over(p, under)); }
+  return o;
+}
+function r2(v) { return Math.round(v * 100) / 100; }
+function box(b) { return [r2(b.left), r2(b.top), r2(b.width), r2(b.height)]; }
+function font(cs, under) {
+  const o = {fam: cs.fontFamily.split(',')[0].replace(/["']/g, '').trim(), all: cs.fontFamily, px: parseFloat(cs.fontSize), w: +cs.fontWeight};
+  const c = col(cs.color, under);
+  if (c) o.col = c;
+  if (cs.letterSpacing !== 'normal' && parseFloat(cs.letterSpacing)) o.ls = parseFloat(cs.letterSpacing);
+  if (cs.lineHeight !== 'normal') o.lh = parseFloat(cs.lineHeight);
+  if (cs.textAlign !== 'start' && cs.textAlign !== 'left') o.ta = cs.textAlign;
+  if (cs.textTransform !== 'none') o.tt = cs.textTransform;
+  if (cs.fontStyle !== 'normal') o.st = cs.fontStyle;
+  if (cs.textDecorationLine !== 'none') o.td = cs.textDecorationLine;
+  if (cs.whiteSpace !== 'normal') o.ws = cs.whiteSpace;
+  if (cs.textOverflow !== 'clip') o.to = cs.textOverflow;
+  return o;
+}
+const GL = new Set(Array.from(GLYPHS));
+
+// The runs of one text node: plain stretches and the glyphs cut out of them, each with its
+// own line boxes. Offsets are in the node's raw text.
+function runs(c) {
+  const raw = c.textContent;
+  const parts = [];
+  let start = 0;
+  const chars = Array.from(raw);
+  let off = 0;
+  const cuts = [];
+  for (const ch of chars) {
+    if (GL.has(ch)) cuts.push([off, off + ch.length, ch]);
+    off += ch.length;
+  }
+  let at = 0;
+  for (const [a, b, ch] of cuts) {
+    if (a > at) parts.push([at, a, '']);
+    parts.push([a, b, ch]);
+    at = b;
+  }
+  if (at < raw.length) parts.push([at, raw.length, '']);
+  const out = [];
+  for (const [a, b, g] of parts) {
+    const t = raw.slice(a, b).replace(/\s+/g, ' ');
+    if (!t.trim()) continue;
+    const rg = c.ownerDocument.createRange();
+    // leave the leading and trailing white space out of the measured stretch
+    let a2 = a, b2 = b;
+    while (a2 < b2 && /\s/.test(raw[a2])) a2++;
+    while (b2 > a2 && /\s/.test(raw[b2 - 1])) b2--;
+    rg.setStart(c, a2);
+    rg.setEnd(c, b2);
+    const rects = Array.from(rg.getClientRects()).filter(x => x.width > 0 && x.height > 0);
+    if (!rects.length) continue;
+    const lines = [];
+    for (const x of rects) {
+      const L = lines.find(l => Math.abs(l[1] - x.top) < 2);
+      if (L) {
+        const right = Math.max(L[0] + L[2], x.right);
+        L[0] = Math.min(L[0], x.left);
+        L[2] = right - L[0];
+        L[3] = Math.max(L[3], x.height);
+      } else lines.push([x.left, x.top, x.width, x.height]);
+    }
+    out.push({text: t.trim(), lines: lines.map(l => l.map(r2)), g: g});
+  }
+  return out;
+}
+
+let COUNT = 0;
+// pass 0 builds the tree; later passes only collect rectangles in the same order
+function walk(el, win, under, pass, rects) {
+  const cs = win.getComputedStyle(el);
+  if (cs.display === 'none' || cs.visibility === 'hidden') return null;
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'meta' || tag === 'title' || tag === 'head') return null;
+  const b = el.getBoundingClientRect();
+  const i = COUNT++;
+  rects.push(box(b));
+  const n = pass === 0 ? {i: i, t: tag, r: box(b)} : null;
+  const bgp = rgba(cs.backgroundColor);
+  let mine = under;
+  if (bgp && bgp[3] > 0) {
+    if (n) n.bg = col(cs.backgroundColor, under);
+    mine = bgp[3] < 1 ? over(bgp, under) : bgp;
+  }
+  if (n) {
+    n.eb = hex(mine);
+    if (cs.backgroundImage && cs.backgroundImage !== 'none') n.bgi = cs.backgroundImage.slice(0, 400);
+    const bd = [];
+    for (const s of ['Top', 'Right', 'Bottom', 'Left']) {
+      const w = parseFloat(cs['border' + s + 'Width']);
+      if (w > 0 && cs['border' + s + 'Style'] !== 'none') {
+        const c = col(cs['border' + s + 'Color'], mine);
+        if (c) bd.push({s: s[0].toLowerCase(), w: w, st: cs['border' + s + 'Style'], col: c});
+      }
+    }
+    if (bd.length) n.bd = bd;
+    if (cs.boxShadow && cs.boxShadow !== 'none') n.sh = cs.boxShadow;
+    if (parseFloat(cs.borderTopLeftRadius) > 0) n.rad = parseFloat(cs.borderTopLeftRadius);
+    if (parseFloat(cs.opacity) < 1) n.op = parseFloat(cs.opacity);
+    if (cs.overflowY !== 'visible' || cs.overflowX !== 'visible') {
+      n.of = [cs.overflowX, cs.overflowY];
+      n.sc = [el.scrollWidth, el.scrollHeight, el.clientWidth, el.clientHeight];
+    }
+    const pad = ['Top', 'Right', 'Bottom', 'Left'].map(s => parseFloat(cs['padding' + s]) || 0);
+    if (pad.some(v => v)) n.pad = pad;
+    if (cs.position !== 'static') n.pos = cs.position;
+    if (cs.display.indexOf('flex') >= 0) {
+      n.fx = cs.flexDirection;
+      const g = parseFloat(cs.columnGap) || 0, g2 = parseFloat(cs.rowGap) || 0;
+      if (g || g2) n.gap = [g, g2];
+      if (cs.justifyContent !== 'normal') n.jc = cs.justifyContent;
+      if (cs.alignItems !== 'normal') n.ai = cs.alignItems;
+    } else if (cs.display.indexOf('grid') >= 0) n.fx = 'grid';
+    if (parseFloat(cs.flexGrow) > 0) n.fg = parseFloat(cs.flexGrow);
+    if (cs.cursor === 'pointer') n.click = 1;
+    if (el.disabled) n.dis = 1;
+    const dz = {};
+    let any = false;
+    for (const a of el.attributes) {
+      if (a.name === 'data-dz') { dz.name = a.value; any = true; }
+      else if (a.name.indexOf('data-dz-') === 0) { dz[a.name.slice(8)] = a.value; any = true; }
+    }
+    if (any) n.dz = dz;
+    if (el.title) n.title = el.title;
+    const al = el.getAttribute('aria-label');
+    if (al) n.aria = al;
+  }
+  if (tag === 'svg') {
+    if (n) {
+      n.svg = el.outerHTML;
+      const c = col(cs.color, mine);
+      if (c) n.col = c;
+    }
+    return n || true;
+  }
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+    if (n) {
+      n.inp = {type: el.type || '', value: el.value || '', ph: el.placeholder || ''};
+      if (tag === 'select') n.inp.opts = Array.from(el.options).map(o => o.textContent.trim());
+      if (tag === 'select' && el.selectedIndex >= 0) n.inp.value = el.options[el.selectedIndex].textContent.trim();
+      if (el.checked) n.inp.on = 1;
+      const phc = col(win.getComputedStyle(el, '::placeholder').color, mine);
+      if (phc) n.inp.phc = phc;
+      if (tag === 'input' && el.type === 'range') { n.inp.min = el.min; n.inp.max = el.max; }
+      n.f = font(cs, mine);
+    }
+    return n || true;
+  }
+  const kids = [];
+  for (const c of el.childNodes) {
+    if (c.nodeType === 3) {
+      for (const run of runs(c)) {
+        const j = COUNT++;
+        const ls = run.lines;
+        const x0 = Math.min(...ls.map(l => l[0])), y0 = Math.min(...ls.map(l => l[1]));
+        const x1 = Math.max(...ls.map(l => l[0] + l[2])), y1 = Math.max(...ls.map(l => l[1] + l[3]));
+        rects.push([r2(x0), r2(y0), r2(x1 - x0), r2(y1 - y0)]);
+        if (n) {
+          const k = {i: j, text: run.text, lines: ls, f: font(cs, mine)};
+          if (run.g) k.g = run.g;
+          kids.push(k);
+        }
+      }
+    } else if (c.nodeType === 1) {
+      const k = walk(c, win, mine, pass, rects);
+      if (k && n) kids.push(k);
+    }
+  }
+  if (el.shadowRoot) {
+    for (const c of el.shadowRoot.children) {
+      const k = walk(c, win, mine, pass, rects);
+      if (k && n) kids.push(k);
+    }
+  }
+  if (n && kids.length) n.k = kids;
+  return n || true;
+}
+
+function findRoot(d) {
+  const sel = q.get('root');
+  if (sel) return d.querySelector(sel);
+  // the first box of the design size; among the boxes of that size nested in it, the one
+  // that names its size in pixels itself (a mockup's artboard) is the page
+  const queue = [d.body];
+  let first = null;
+  while (queue.length) {
+    const el = queue.shift();
+    const b = el.getBoundingClientRect();
+    if (el !== d.body && Math.abs(b.width - W) < 1 && Math.abs(b.height - H) < 1) {
+      if (!first) first = el;
+      if (/px/.test(el.style.width || '') && /px/.test(el.style.height || '')) return el;
+    }
+    for (const c of el.children) queue.push(c);
+  }
+  return first || d.body;
+}
+
+function measure(root, win, pass, w, h, fixed) {
+  f.style.width = w + 'px';
+  f.style.height = h + 'px';
+  if (fixed) {
+    root.style.width = w + 'px';
+    root.style.height = h + 'px';
+  }
+  void root.offsetHeight;
+  COUNT = 0;
+  const rects = [];
+  const tree = walk(root, win, [0, 0, 0, 1], pass, rects);
+  return {tree: tree, rects: rects};
+}
+
+function dump() {
+  const d = f.contentDocument, win = f.contentWindow;
+  const root = findRoot(d);
+  // a page that names its own size in pixels is given the new size itself; one that fills
+  // its window follows the frame
+  const fixed = /px/.test(root.style.width || '') || /px/.test(root.style.height || '');
+  const a = measure(root, win, 0, W, H, fixed);
+  const b = measure(root, win, 1, W + DW, H + DH, fixed);
+  const c = measure(root, win, 2, W + 2 * DW, H + 2 * DH, fixed);
+  const e = measure(root, win, 3, W + 3 * DW, H + 3 * DH, fixed);
+  measure(root, win, 4, W, H, fixed);
+  const out = {size: [W, H], step: [DW, DH], fixed: fixed, tree: a.tree, a: a.rects, b: b.rects, c: c.rects, d: e.rects};
+  if (a.rects.length !== b.rects.length || a.rects.length !== c.rects.length || a.rects.length !== e.rects.length)
+    out.warn = 'the page changed its structure with its size: ' + a.rects.length + ' / ' + b.rects.length + ' / ' + c.rects.length + ' / ' + e.rects.length + ' boxes';
+  document.getElementById('out').textContent = JSON.stringify(out);
+  document.title = 'done';
+}
+f.onload = () => {
+  const d = f.contentDocument;
+  (d.fonts ? d.fonts.ready : Promise.resolve()).then(() => setTimeout(dump, 3500));
+};
+</script>
+</body>

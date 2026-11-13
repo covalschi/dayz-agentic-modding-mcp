@@ -2162,3 +2162,69 @@ inside `ScrollWidget`s; real mouse input in a 1600x900 window).
   when the trying ends. The face was natural, the player's position on the server was the
   same half a minute later, and after the menu closed with the copy still up (deleted in
   `OnHide`, the widget handed the real player first) the world held no second character.
+
+## 36. A mockup in HTML and CSS becomes the layout: `layout_convert` (measured 2026-11-13)
+
+The `dayz` MCP's `layout_convert` (CLI: `python -m dayz_mcp.css2layout <config.json> [page]
+[--demo]`) has Chrome lay a web page out and writes `.layout` files from what the browser
+measured: a `PanelWidget` per ground and border, a `TextWidget` per run of text in the
+project's own font, an `ImageWidget` per icon, a `ButtonWidget` per button, edit boxes, lists
+as a `ScrollWidget` with a `WrapSpacer` and a row template per kind of row. The page says
+what a script must reach in `data-dz` attributes of its own markup (the module's docstring
+lists them); the config maps CSS font families and weights to `.fnt` faces and sizes. What
+was measured while building it, on a diag client at 1920x1080 (a unit is a pixel there):
+
+- **How close it comes.** A page of 148 widgets (tiles, cards, a table of seven rows) drawn
+  by the engine against the browser's picture of the same page, both 1360x812, blurred 2 px:
+  mean difference 1.4 of 100, worst cell 6. The same page laid out by hand from a design
+  description had been 13.8.
+- **A text widget takes the browser's line box as it is.** A `TextWidget` whose rectangle is
+  the text's line box in the browser (`Range.getClientRects()`: for a face with ascent .935
+  and descent .265 it is 1.2 em high) with `"text valign" center` puts an FNT3 baseline
+  within a quarter pixel of the browser's (the FNT3 line is S high with its baseline at .8 S).
+- **A bitmap face drawn below its cell is lighter than a browser's text.** A 28-px cell at
+  `"exact text size"` 14 (the engine samples the box-filtered mip) carried .71 to .77 of the
+  ink of the same 13 px text in Chrome; a 44-px cell at 19 to 27, .88. Curving the atlas's
+  coverage `a * (K + 1) / (a * K + 1)` before the mips are made brings it back: K = 8 gave
+  .95 to 1.04 for the regular weight from the 28-px cell, K = 2 for the 44-px cell. A cell
+  drawn at its own size (14 at 14) was as light as the downscaled one until curved (K = 1.5:
+  .91) and is the sharpest of all at that one screen scale, blurred at any other.
+- **`GetPos` and `GetSize` answer at once.** A widget of exact position and size read in the
+  same call that created its layout (`CreateWidgets`, no frame in between) answered its
+  declared numbers times the unit scale (`1166 13`, `170 36`). It is the SCREEN rectangle
+  that needs a layout pass (§23a). So a script may take a layout's geometry as its base the
+  moment it exists.
+- **`userID` carries a number per widget from the layout to the script** (`userID N` in the
+  layout, `GetUserID()`; nothing in the engine reads it). The converter writes the resize
+  rule there: bit 16, then four nibbles of twelfths -- the share of the parent's growth that
+  goes to x, y, width and height. A page of 120 widgets followed its window from 1600x900 to
+  1628x1080 by one recursive pass that reads them (`SetPos`/`SetSize` per widget that has a
+  share, children of a widget only when its size changed), with no layout code of the page.
+- **The rule comes from three steps, not one.** The browser was asked for the design size
+  and three sizes larger; where the three steps disagree (a paragraph that unwraps and pulls
+  what is under it up, a box that joins the row above) the middle value is the even rule and
+  the page keeps its drawn shape there. One step alone bends the rule at every such jump:
+  on a form of 260 widgets it put a button 420 units off at the third size.
+- **A script-created child lies UNDER its host's own drawn children unless it has a
+  priority.** Rows created into a frame whose layout holds a ground panel (`priority 1`) and
+  a page created into a frame with a ground were invisible: their roots had no `priority`
+  line (0). A root written with `priority 100` shows; so does `SetSort` after creation.
+- **`AddChild` moves a widget under another parent** with its children, names and handler
+  reach intact (`FindAnyWidget` from the old ancestor still finds what is inside): a page
+  created under a window's root was moved into the window's content frame and clipped there.
+- **A box rounded all the way has round ends from one sprite.** The engine has no rounded
+  corner. A pill is a middle panel and, at each end, a frame half the height wide with
+  `clipchildren 1` holding an `ImageWidget` of a full disc (a square sprite, `mode blend`,
+  `"src alpha" 1`, tinted by `color`); a framed pill is the same twice, the inner one a unit
+  smaller. Twelve such ends on a page drew clean at 1920x1080. Recolouring a pill is three
+  `SetColor` calls (middle and two ends).
+- **Colours.** The UI blends in linear light (§32), so every see-through colour of the page
+  is written as the opaque colour it comes to over what is under it; grounds then match the
+  browser to a level or two.
+- **What has no answer**: rounded corners other than a full pill, dashed borders, soft
+  shadows, gradients, letter spacing (§32: bake it into a face -- extra advance per glyph),
+  a native checkbox, select or slider (drawn as a box with a mark, a button with a caption,
+  a track with a knob: the script moves them). An edit box draws a bitmap face at the
+  atlas's own size whatever `"exact text size"` says (§30): one atlas per size it is used at.
+- **Below its design size a page is not laid out again.** The rule is measured growing. A
+  window smaller than the page clips it (`clipchildren` on what holds it).

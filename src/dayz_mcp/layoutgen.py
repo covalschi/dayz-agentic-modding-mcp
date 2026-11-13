@@ -704,7 +704,10 @@ def _b_panel(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
         ex = x if ha == "center_ref" else x - 1
         ey = y if va == "center_ref" else y - 1
         place(edge, ex, ey, width + 2, height + 2, anchor=anchor)
-        rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
+        # `edge: true` is the palette's edge; a token names another colour (a window in
+        # its own palette beside the series' one, both in one tokens file).
+        edge_token = attrs["edge"] if isinstance(attrs.get("edge"), str) else "$edge"
+        rgba, _ = ctx.tokens.color_of(edge_token, ctx.file, path)
         edge.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
         out.append(edge)
     inset = ctx.tokens.number(attrs.get("inset", 0), ctx.file, path, "inset")
@@ -1001,12 +1004,15 @@ def _b_field(attrs, ctx, box, path, x, y, forced, anchor, priority) -> list[W]:
     if not (hx and vx):
         raise LayoutGenError("field needs an exact size", ctx.file, path)
     place(frame, x, y, width, height, anchor=anchor)
-    rgba, _ = ctx.tokens.color_of("$edge", ctx.file, path)
+    # `edge` and `fill` name the box's two colours; the palette's edge and panel otherwise.
+    edge_token = attrs["edge"] if isinstance(attrs.get("edge"), str) else "$edge"
+    rgba, _ = ctx.tokens.color_of(edge_token, ctx.file, path)
     frame.set("color", color_prop(rgba)).set("priority", fmt(priority)).set("style", PANEL_STYLE)
     fill = W("PanelWidgetClass", ctx.claim(name + "Fill", path))
     fill.set("visible", "1").set("ignorepointer", "1")
     place(fill, 1, 1, width - 2, height - 2)
-    rgba, _ = ctx.tokens.color_of("$panel", ctx.file, path)
+    fill_token = attrs["fill"] if isinstance(attrs.get("fill"), str) else "$panel"
+    rgba, _ = ctx.tokens.color_of(fill_token, ctx.file, path)
     fill.set("color", color_prop(rgba)).set("priority", "0").set("style", PANEL_STYLE)
     lines = attrs.get("lines")
     edit = W("MultilineEditBoxWidgetClass" if lines else "EditBoxWidgetClass", name)

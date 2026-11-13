@@ -89,6 +89,7 @@ for _fn in (
     tools.ui_text,
     tools.ui_load, tools.ui_unload, tools.ui_preview, tools.ui_gallery,
     tools.layout_build,
+    tools.layout_convert,
     # The active mod set. It stands after the search tools because it changes
     # what they answer: knowledge_scope declares the subset a server runs, and
     # server_mods proposes one from a live address without applying it. Nothing

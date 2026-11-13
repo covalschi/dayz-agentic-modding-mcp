@@ -9,7 +9,7 @@ from .client import (
 from .jobs_api import job_artifacts, job_status, job_wait
 from .lint import mod_lint
 from .ui import (
-    layout_build, ui_click, ui_cursor, ui_find, ui_gallery, ui_load, ui_menu, ui_preview,
+    layout_build, layout_convert, ui_click, ui_cursor, ui_find, ui_gallery, ui_load, ui_menu, ui_preview,
     ui_text, ui_tree, ui_unload,
 )
 from .knowledge import (
@@ -53,5 +53,6 @@ __all__ = [
     "ui_menu", "ui_tree", "ui_find", "ui_click", "ui_cursor", "ui_text",
     "ui_load", "ui_unload", "ui_preview", "ui_gallery",
     "layout_build",
+    "layout_convert",
     "workshop_publish", "workshop_status",
 ]

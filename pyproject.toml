@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dayz_mcp = ["data/*.json"]
+dayz_mcp = ["data/*.json", "data/*.html", "data/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

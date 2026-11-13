@@ -1237,3 +1237,51 @@ def layout_build(mod: str = "") -> Result:
         return fail(f"refused: {exc}", hint="fix the description under ui/; nothing was written")
     return ok({"written": report.written, "unchanged": report.unchanged, "notes": report.notes,
                "descriptions": sorted(set(report.sources.values()))})
+
+def layout_convert(config: str = "ui/css2layout.json", pages: str = "", demo: bool = False,
+                   reuse: bool = False, icons: bool = False, clean_demo: bool = False) -> Result:
+    """Convert a web page -- a mockup in HTML and CSS -- into `.layout` files the
+    engine draws the same way, and that follow a resize.
+
+    Chrome lays each page out at its design size and three steps larger; the
+    tool writes what it measured: every box, run of text, icon, button, edit
+    box and list as widgets at the measured places, in the measured colours and
+    the project's fonts, and in every widget's `userID` how it follows its
+    parent's size (stays, moves with an edge, stretches, takes a share). The
+    script half -- `<Prefix>Flex` and `<Prefix>FlexRows`, written into the
+    project by the config's `runtime` key -- applies that rule when a window is
+    resized and keeps lists of rows made from row templates.
+
+    `config` is the project-relative path of the conversion's JSON config (the
+    fonts for each CSS family and weight, the characters drawn as icons, the
+    icon set, the stringtable captions are looked up in, the pages with their
+    layout and root names); `pages` is a comma-separated list of the config's
+    page names, empty for all. `demo=True` also writes `_demo_<layout>.layout`
+    with the page's own sample texts and rows in place -- the file to give
+    `ui_preview` and hold against the mockup; `clean_demo=True` removes those
+    files again (they must never be packed). `reuse=True` converts from the
+    last measurement instead of asking the browser; `icons=True` draws the
+    pages' svg icons as PNGs for an imageset.
+
+    What a page says about itself is in `data-dz` attributes of its own markup
+    (names, texts a script fills, rows of a list, canvases): the module's
+    docstring (`python -m dayz_mcp.css2layout`) lists them, and each page's
+    report under the config's `report` folder lists what a script can reach,
+    the captions with no stringtable key and the CSS the engine has no answer
+    for (rounded corners, dashed borders, soft shadows).
+    """
+    guard = require_project()
+    if guard:
+        return guard
+    from .. import css2layout
+    prof = session.profile()
+    path = (prof.root / config).resolve()
+    if not path.exists():
+        return fail(f"no conversion config at {path}",
+                    hint="write ui/css2layout.json: see `python -m dayz_mcp.css2layout` for its keys")
+    names = [n.strip() for n in pages.split(",") if n.strip()]
+    try:
+        res = css2layout.run(path, names, demo=demo, reuse=reuse, icons=icons, clean_demo=clean_demo)
+    except css2layout.ConvertError as exc:
+        return fail(f"refused: {exc}", hint="nothing of the failing page was written")
+    return ok(res)

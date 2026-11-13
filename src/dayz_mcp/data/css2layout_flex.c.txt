@@ -1,0 +1,356 @@
+// WRITTEN by dayz-mcp css2layout -- the script half of a converted page. Do not edit: the
+// tool writes this file again from its template (config key "runtime").
+//
+// A layout made by css2layout carries, in every widget's userID, how the widget follows its
+// parent's size: the browser laid the page out at three sizes and the tool kept the rule.
+// MyMod_Flex applies it: give a page's root a new size and everything under it moves and
+// stretches as it did in the browser. MyMod_FlexRows keeps a list of rows made from a row
+// template as wide as its list.
+//
+// userID: bit 16 marks a widget that follows; four nibbles under it are twelfths -- how much
+// of the parent's change in width goes to x (bits 0-3) and to the width (bits 8-11), how
+// much of its change in height goes to y (bits 4-7) and to the height (bits 12-15).
+// Positions and sizes are screen pixels on exact widgets (a layout unit is screen height /
+// 1080 pixels): MyMod_Flex.Scale().
+
+class MyMod_FlexRec
+{
+    float X;
+    float Y;
+    float W;
+    float H;
+}
+
+class MyMod_Flex
+{
+    static const int FLAG = 65536;
+
+    // A widget as its layout declared it, in pixels: read the first time the widget is met,
+    // before anything here has moved it.
+    protected ref map<Widget, ref MyMod_FlexRec> m_Recs;
+    protected ref array<Widget> m_Seen;
+
+    void MyMod_Flex()
+    {
+        m_Recs = new map<Widget, ref MyMod_FlexRec>();
+        m_Seen = new array<Widget>();
+    }
+
+    // Screen pixels in a layout unit (the engine's own idiom: screen height over 1080).
+    static float Scale()
+    {
+        int w;
+        int h;
+        GetScreenSize(w, h);
+        if (h <= 0)
+            return 1;
+        float f = h;
+        return f / 1080.0;
+    }
+
+    // CreateWidgets with the check a client needs: the engine has handed one path another
+    // file's widgets (the path with backslashes gets the right file). rootName is the name
+    // the layout's root must have; "" skips the check.
+    static Widget Create(string layout, Widget parent, string rootName)
+    {
+        Widget w = GetGame().GetWorkspace().CreateWidgets(layout, parent);
+        if (!w || rootName == "" || w.GetName() == rootName)
+            return w;
+
+        w.Unlink();
+        string alt = layout;
+        alt.Replace("/", "\\");
+        return GetGame().GetWorkspace().CreateWidgets(alt, parent);
+    }
+
+    // The root takes w x h pixels and everything under it follows. baseW x baseH is the
+    // root's size in its layout, in pixels (layout units times Scale()).
+    void Resize(Widget root, float w, float h, float baseW, float baseH)
+    {
+        if (!root)
+            return;
+
+        // A widget read before its first layout pass may answer zeros: one Update per root.
+        if (m_Seen.Find(root) == -1)
+        {
+            m_Seen.Insert(root);
+            root.Update();
+        }
+        root.SetSize(w, h);
+        Kids(root, w - baseW, h - baseH);
+    }
+
+    // A text's width in pixels as it is drawn now.
+    static int TextWidth(TextWidget t)
+    {
+        int w;
+        int h;
+        if (!t)
+            return 0;
+        t.Update();
+        t.GetTextSize(w, h);
+        return w;
+    }
+
+    // A box as wide as the text in it: the box (and its ground, if given) gets the text's
+    // width and `pad` pixels on each side, the text stands `pad` in. Returns the new width.
+    static float Hug(Widget box, Widget ground, TextWidget t, float pad)
+    {
+        float w;
+        float h;
+        float x;
+        float y;
+        if (!box || !t)
+            return 0;
+        int tw = TextWidth(t);
+        box.GetSize(w, h);
+        w = tw + pad * 2;
+        box.SetSize(w, h);
+        if (ground)
+            ground.SetSize(w, h);
+        t.GetPos(x, y);
+        t.SetPos(pad, y);
+        t.GetSize(x, h);
+        t.SetSize(tw + 2, h);
+        return w;
+    }
+
+    // Colour a drawn part of a box and, when the box is a pill, its two round ends: the
+    // part is named <name> (a box's ground "XBg", its frame "XEdge"), its ends <name>L and
+    // <name>R. Looked up under root.
+    static void Paint(Widget root, string name, int color)
+    {
+        if (!root)
+            return;
+        Widget w = root.FindAnyWidget(name);
+        if (w)
+            w.SetColor(color);
+        w = root.FindAnyWidget(name + "L");
+        if (w)
+            w.SetColor(color);
+        w = root.FindAnyWidget(name + "R");
+        if (w)
+            w.SetColor(color);
+    }
+
+    // Forget a widget tree that is gone (rows unlinked, a page closed).
+    void Forget(Widget root)
+    {
+        if (!root)
+            return;
+        int i = m_Seen.Find(root);
+        if (i != -1)
+            m_Seen.Remove(i);
+        m_Recs.Remove(root);
+        Widget c = root.GetChildren();
+        while (c)
+        {
+            Forget(c);
+            c = c.GetSibling();
+        }
+    }
+
+    protected MyMod_FlexRec Rec(Widget w)
+    {
+        MyMod_FlexRec r;
+        if (m_Recs.Find(w, r))
+            return r;
+
+        float x;
+        float y;
+        float ww;
+        float hh;
+        w.GetPos(x, y);
+        w.GetSize(ww, hh);
+        if (ww <= 0 && hh <= 0)
+            return null;
+
+        r = new MyMod_FlexRec();
+        r.X = x;
+        r.Y = y;
+        r.W = ww;
+        r.H = hh;
+        m_Recs.Set(w, r);
+        return r;
+    }
+
+    protected void Kids(Widget parent, float dw, float dh)
+    {
+        Widget c = parent.GetChildren();
+        int id;
+        int nx;
+        int ny;
+        int nw;
+        int nh;
+        float w;
+        float h;
+        MyMod_FlexRec r;
+        while (c)
+        {
+            id = c.GetUserID();
+            if ((id & FLAG) != 0)
+            {
+                r = Rec(c);
+                if (r)
+                {
+                    nx = id & 15;
+                    ny = (id >> 4) & 15;
+                    nw = (id >> 8) & 15;
+                    nh = (id >> 12) & 15;
+                    w = r.W + dw * nw / 12.0;
+                    h = r.H + dh * nh / 12.0;
+                    if (w < 0)
+                        w = 0;
+                    if (h < 0)
+                        h = 0;
+                    c.SetPos(r.X + dw * nx / 12.0, r.Y + dh * ny / 12.0);
+                    c.SetSize(w, h);
+                    if (nw != 0 || nh != 0)
+                        Kids(c, w - r.W, h - r.H);
+                }
+            }
+            c = c.GetSibling();
+        }
+    }
+}
+
+// The rows of one list: made from a row template into the list's spacer, each as wide as
+// the list. The script fills a row's named parts itself (row.FindAnyWidget).
+class MyMod_FlexRows
+{
+    protected MyMod_Flex m_Flex;
+    protected Widget m_Host;
+    protected Widget m_Scroll;
+    protected string m_Layout;
+    protected string m_RootName;
+    protected float  m_BaseW;
+    protected float  m_BaseH;
+    protected ref array<Widget> m_Rows;
+    protected ref array<string> m_Keys;
+
+    // host: the spacer the rows go into (its parent is the list's ScrollWidget); layout:
+    // the row template's path; rootName: its root's name; unitsW x unitsH: the template's
+    // size in layout units (the tool's report names all four).
+    void MyMod_FlexRows(MyMod_Flex flex, Widget host, string layout, string rootName, float unitsW, float unitsH)
+    {
+        m_Flex = flex;
+        m_Host = host;
+        if (host)
+            m_Scroll = ScrollWidget.Cast(host.GetParent());
+        m_Layout = layout;
+        m_RootName = rootName;
+        m_BaseW = unitsW;
+        m_BaseH = unitsH;
+        m_Rows = new array<Widget>();
+        m_Keys = new array<string>();
+    }
+
+    Widget Host()
+    {
+        return m_Host;
+    }
+
+    int Count()
+    {
+        return m_Rows.Count();
+    }
+
+    Widget Row(int i)
+    {
+        if (i < 0 || i >= m_Rows.Count())
+            return null;
+        return m_Rows[i];
+    }
+
+    string Key(int i)
+    {
+        if (i < 0 || i >= m_Keys.Count())
+            return "";
+        return m_Keys[i];
+    }
+
+    int Find(string key)
+    {
+        return m_Keys.Find(key);
+    }
+
+    // The row that holds w: w itself or anything inside a row. -1 when w is no part of the list.
+    int IndexOf(Widget w)
+    {
+        int i;
+        while (w && w != m_Host)
+        {
+            i = m_Rows.Find(w);
+            if (i != -1)
+                return i;
+            w = w.GetParent();
+        }
+        return -1;
+    }
+
+    // A new row at the end; null when the template did not load. Call Fit() after the last one.
+    Widget Add(string key)
+    {
+        if (!m_Host)
+            return null;
+        Widget row = MyMod_Flex.Create(m_Layout, m_Host, m_RootName);
+        if (!row)
+            return null;
+        m_Rows.Insert(row);
+        m_Keys.Insert(key);
+        return row;
+    }
+
+    void Clear()
+    {
+        int i;
+        for (i = 0; i < m_Rows.Count(); i++)
+        {
+            if (m_Rows[i])
+            {
+                if (m_Flex)
+                    m_Flex.Forget(m_Rows[i]);
+                m_Rows[i].Unlink();
+            }
+        }
+        m_Rows.Clear();
+        m_Keys.Clear();
+    }
+
+    // The list's width in pixels now: its spacer's (the rule of its layout keeps that as
+    // wide as the list), else the template's own.
+    float Width()
+    {
+        float w;
+        float h;
+        m_Host.GetSize(w, h);
+        if (w > 0)
+            return w;
+        return m_BaseW * MyMod_Flex.Scale();
+    }
+
+    // A row's height in pixels.
+    float RowHeight()
+    {
+        return m_BaseH * MyMod_Flex.Scale();
+    }
+
+    // Every row as wide as the list, the spacer and the scroll told. Call after adding rows
+    // and after the window was resized.
+    void Fit()
+    {
+        if (!m_Host)
+            return;
+        float s = MyMod_Flex.Scale();
+        float w = Width();
+        int i;
+        for (i = 0; i < m_Rows.Count(); i++)
+        {
+            if (m_Rows[i] && m_Flex)
+                m_Flex.Resize(m_Rows[i], w, m_BaseH * s, m_BaseW * s, m_BaseH * s);
+        }
+        m_Host.Update();
+        if (m_Scroll)
+            m_Scroll.Update();
+    }
+}
