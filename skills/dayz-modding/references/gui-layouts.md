@@ -2233,6 +2233,20 @@ was measured while building it, on a diag client at 1920x1080 (a unit is a pixel
   100 and covered it, although the strip's parent-level sibling (the content frame itself)
   has priority 5. Moved into the content frame (`AddChild`) with `SetSort(200)` it stands
   over the page. Give what overlays a page the page's own parent and a higher sort.
+- **A `TextWidget` cuts its text at its own width.** "MARKERS LONGER" written into a caption
+  42 units wide drew "MARKE" (a preview at 1920x1080, FNT3 face, `"text halign" left`). A
+  caption that may grow -- another language, a value a script writes -- needs the room: the
+  converter widens every line into what its row leaves free, and a script that writes into a
+  tight widget sets the width itself (`Update()`, `GetTextSize`, `SetSize`) and moves what
+  stands after it.
+- **`"text halign"` works on an `EditBoxWidgetClass`** in a layout: `right` and `center` drew
+  the typed number at that side of the box (same preview). The converter writes it for an
+  input whose CSS aligns its text.
+- **A fieldset's box is not its border.** The browser's rectangle of a `<fieldset>` starts at
+  its legend's top; the border is drawn from the legend's middle and is broken under the
+  legend. Written as the box says, the frame stood 7 units too high and ran through the
+  caption. The frame is written from the legend's middle and the legend gets the ground it
+  stands on (a panel in the colour behind it), which breaks the line.
 - **What has no answer**: rounded corners other than a full pill, dashed borders, soft
   shadows, gradients, letter spacing (§32: bake it into a face -- extra advance per glyph),
   a native checkbox, select or slider (drawn as a box with a mark, a button with a caption,
