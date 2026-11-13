@@ -2258,3 +2258,15 @@ was measured while building it, on a diag client at 1920x1080 (a unit is a pixel
   atlas's own size whatever `"exact text size"` says (§30): one atlas per size it is used at.
 - **Below its design size a page is not laid out again.** The rule is measured growing. A
   window smaller than the page clips it (`clipchildren` on what holds it).
+- **A wrapped text's lines can come out wider than its widget.** A `RichTextWidgetClass`
+  with `wrap 1` (an SDF face with letter spacing baked in, §32) broke a paragraph for its
+  824-px width and then drew a line `GetTextSize` measured at 830: the widget cut the
+  overhang, the last letters of the line's last word gone -- in English only, where the words
+  broke elsewhere (measured 2026-11-13). Keep about 2 % of a paragraph's room in reserve.
+- **VPP stretches a toolbar button's image over its box.** `VPPButton`
+  (`VPPAdminTools/GUI/Layouts/AdminToolBar/VPPButton.layout`) loads the image a mod hands
+  `InsertButton(permission, name, image, description)` with `LoadImageFile(0, image)` into
+  an `ImageWidget` 0.25 x 0.9 of the button, `stretch_w_h`, colour `1 1 1 0.784`: 70 x 56 px
+  at 1920x1080 (`ui_find`, 2026-11-13). A square icon comes out a quarter wider than high:
+  draw it in a 5:4 canvas. `set:<imageset> image:<name>` works once the mod lists its
+  imageset in `CfgMods`; a coloured image keeps its colours, at 78 % alpha.
