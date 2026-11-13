@@ -215,3 +215,20 @@ def test_run_refuses_a_page_the_config_does_not_name(tmp_path):
     cfg = config(tmp_path)
     with pytest.raises(css2layout.ConvertError):
         css2layout.run(tmp_path / "css2layout.json", ["nope"], reuse=True)
+
+
+def test_what_a_scroll_holds_past_the_pages_edge_is_kept(tmp_path):
+    p = Page()
+    far = p.text("far below", lambda w, h: [20, h + 100, 60, 15])
+    tail = p.el("div", lambda w, h: [10, h + 90, w - 20, 40], [far], bg={"c": "#131312"})
+    area = p.el("div", lambda w, h: [0, 0, w, h], [tail], of=["visible", "auto"], sc=[W, H + 140, W, H], dz={"name": "Area"})
+    lost = p.text("screen reader only", lambda w, h: [-9999, 0, 100, 15])
+    root = p.el("div", lambda w, h: [0, 0, w, h], [area, lost], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    assert "far below" in text                 # the scroll's tail is its content
+    assert "screen reader only" not in text    # what the page keeps off itself is not drawn
+    assert any("off the page" in note for note in conv.rep.notes)
+    # the scrolled frame is as tall as what it holds
+    assert f"size {W} {H + 140}" in widget(text, "AreaBody")

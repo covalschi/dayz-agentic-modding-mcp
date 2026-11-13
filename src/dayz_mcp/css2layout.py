@@ -580,13 +580,16 @@ class Converter:
     # ---- emission
 
     def emit(self, n: dict, st: dict) -> list[Wd]:
-        # what the page keeps off its own box (a label for screen readers at -9999) is not drawn
+        # what the page keeps off its own box (a label for screen readers at -9999) is not
+        # drawn -- but what a scrolling area holds past the page's edge is its content, not
+        # something kept off the page: under a scrolling ancestor nothing is left out
         r = self.a[n["i"]]
         page = self.a[self.probe["tree"]["i"]]
-        if st.get("mode") != "row" and (r[0] + r[2] < page[0] - 1 or r[1] + r[3] < page[1] - 1
-                                        or r[0] > page[0] + page[2] + 1 or r[1] > page[1] + page[3] + 1):
-            if "t" in n and (n.get("of") or n.get("k")) and r[2] > 0 and r[3] > 0 and not (n.get("dz") or {}):
-                pass
+        if st.get("mode") != "row" and not st.get("scrolled") and (
+                r[0] + r[2] < page[0] - 1 or r[1] + r[3] < page[1] - 1
+                or r[0] > page[0] + page[2] + 1 or r[1] > page[1] + page[3] + 1):
+            self.rep.notes.append("left out, it lies off the page: %s at %d,%d" % (
+                ('"%s"' % n["text"][:40]) if "text" in n else n.get("t", "?"), r[0], r[1]))
             return []
         if "text" in n:
             return self.emit_text(n, st)
@@ -641,6 +644,8 @@ class Converter:
         sc = n.get("sc") or [0, 0, 0, 0]
         row_kids = [k for k in (n.get("k") or []) if "t" in k and "row" in (k.get("dz") or {})]
         scrolls = of[1] in ("auto", "scroll") and (sc[1] > sc[3] + 1)
+        if of[1] in ("auto", "scroll") or of[0] in ("auto", "scroll"):
+            st = dict(st, scrolled=True)
         is_scroll = kind == "scroll" or scrolls or (of[1] in ("auto", "scroll") and bool(row_kids))
         clips = of[1] in ("hidden", "clip") or of[0] in ("hidden", "clip")
         decorated = bool(d["bg"] or d["uniform"] or d["lines"] or d["bars"])
@@ -739,7 +744,7 @@ class Converter:
             return [box]
 
         if is_scroll:
-            box.kids += self.emit_scroll(n, inner, rect, row_kids, named, pool)
+            box.kids += self.emit_scroll(n, dict(inner, scrolled=True), rect, row_kids, named, pool)
         else:
             box.kids += self.emit_kids(n, inner)
         return [box]
