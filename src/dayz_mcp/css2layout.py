@@ -567,7 +567,7 @@ class Converter:
                     self.rep.drop("box-shadow (a soft shadow)")
         if n.get("rad"):
             r_ = self.a[n["i"]]
-            if not ((self.cfg.get("icons") or {}).get("disc") and n["rad"] >= r_[3] / 2 - 1 and 6 <= r_[3] <= 48):
+            if not ((self.cfg.get("icons") or {}).get("disc") and n["rad"] >= r_[3] / 2 - 1 and 4 <= r_[3] <= 48):
                 self.rep.drop("border-radius")
         if n.get("bgi"):
             self.rep.drop("background-image")
@@ -730,7 +730,7 @@ class Converter:
                 box = Wd("FrameWidgetClass", self.claim(named, pool) if named else self.fresh(pool), rect)
                 self.fill_decor(box, d, drect, pool, n, box.name if named else "")
             elif decorated and (n.get("rad") or 0) >= rect.a[3] / 2 - 1 and (self.cfg.get("icons") or {}).get("disc") \
-                    and 6 <= rect.a[3] <= 48:
+                    and 4 <= rect.a[3] <= 48:
                 box = Wd("FrameWidgetClass", self.fresh(pool), rect)
                 self.fill_decor(box, d, rect, pool, n)
             elif d["uniform"]:
@@ -782,11 +782,20 @@ class Converter:
         disc = (self.cfg.get("icons") or {}).get("disc")
         rad = n.get("rad") or 0
         h = rect.a[3]
-        pill = bool(disc and self.icons.set and rad >= h / 2 - 1 and 6 <= h <= 48 and rect.a[2] > h
-                    and not d["lines"] and not d["bars"])
+        w_ = rect.a[2]
+        rounded = bool(disc and self.icons.set and rad >= h / 2 - 1 and 4 <= h <= 48 and not d["lines"] and not d["bars"])
+        # a circle (as wide as high) is one disc; a pill is a middle and two round ends
+        circle = rounded and abs(w_ - h) <= 1 and rad >= w_ / 2 - 1
+        pill = rounded and w_ > h + 1
 
         def ground(suffix: str, r: R3, hx: str) -> None:
-            """One filled shape of the box: a panel, or for a pill a middle and two round ends."""
+            """One filled shape of the box: a panel, a disc, or a pill's middle and round ends."""
+            if circle:
+                round_ = Wd("ImageWidgetClass", part(suffix), r)
+                round_.color = hx
+                round_.set("image0", f'"set:{self.icons.set} image:{disc}"').set("mode", "blend").set(key("src alpha"), "1")
+                box.kids.append(round_)
+                return
             if not pill:
                 box.kids.append(self.panel(part(suffix), r, hx))
                 return

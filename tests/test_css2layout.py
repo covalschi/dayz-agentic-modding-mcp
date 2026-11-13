@@ -303,3 +303,15 @@ def test_a_caption_may_name_its_own_key(tmp_path):
     conv, files = convert(cfg, p.probe(root))
     assert 'text "#STR_MY_NODE"' in files["mymod_page.layout"]
     assert not conv.rep.captions
+
+
+def test_a_round_dot_is_one_disc(tmp_path):
+    p = Page()
+    dot = p.el("span", lambda w, h: [10, 10, 8, 8], bg={"c": "#66c75c"}, rad=4, dz={"name": "Dot"})
+    root = p.el("div", lambda w, h: [0, 0, w, h], [dot], bg={"c": "#0c0c0c"})
+    cfg = config(tmp_path)
+    cfg["icons"]["disc"] = "disc"
+    _conv, files = convert(cfg, p.probe(root))
+    text = files["mymod_page.layout"]
+    assert 'ImageWidgetClass DotBg {' in text and 'image:disc' in widget(text, "DotBg")
+    assert "DotBgL" not in text

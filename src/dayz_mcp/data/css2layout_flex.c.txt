@@ -220,7 +220,7 @@ class MyMod_FlexRows
 {
     protected MyMod_Flex m_Flex;
     protected Widget m_Host;
-    protected Widget m_Scroll;
+    protected ScrollWidget m_Scroll;
     protected string m_Layout;
     protected string m_RootName;
     protected float  m_BaseW;
@@ -343,14 +343,60 @@ class MyMod_FlexRows
             return;
         float s = MyMod_Flex.Scale();
         float w = Width();
+        SizeRows(w, s);
+        m_Host.Update();
+        if (!m_Scroll)
+            return;
+        m_Scroll.Update();
+
+        // A vertical scrollbar is drawn OVER exact-size content (10 layout units, only
+        // while the content is taller than the view): rows as wide as the list would have
+        // their right end under it. While it shows, the rows give way.
+        if (Overflows())
+        {
+            SizeRows(w - BAR * s, s);
+            m_Host.Update();
+            m_Scroll.Update();
+        }
+    }
+
+    static const float BAR = 10;
+
+    protected void SizeRows(float w, float s)
+    {
         int i;
         for (i = 0; i < m_Rows.Count(); i++)
         {
             if (m_Rows[i] && m_Flex)
                 m_Flex.Resize(m_Rows[i], w, m_BaseH * s, m_BaseW * s, m_BaseH * s);
         }
-        m_Host.Update();
-        if (m_Scroll)
-            m_Scroll.Update();
+    }
+
+    // Whether the list's content is taller than its view: the scroll's own answer, else the
+    // rows' heights added up (a widget laid out this frame may not have answered yet).
+    protected bool Overflows()
+    {
+        float vw;
+        float vh;
+        m_Scroll.GetSize(vw, vh);
+        if (vh <= 0)
+            return false;
+        if (m_Scroll.IsScrollbarVisible())
+            return true;
+        float content = m_Scroll.GetContentHeight();
+        if (content <= 0)
+        {
+            float rw;
+            float rh;
+            int i;
+            for (i = 0; i < m_Rows.Count(); i++)
+            {
+                if (!m_Rows[i])
+                    continue;
+                m_Rows[i].GetSize(rw, rh);
+                content += rh;
+            }
+        }
+        return content > vh + 0.5;
     }
 }
