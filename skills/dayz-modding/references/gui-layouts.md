@@ -80,7 +80,7 @@ Script classes, all in enwidgets.c unless noted:
 | `RichTextWidget` :224 | GetContentHeight, SetContentOffset(offset, snapToLine), ElideText, GetNumLines | inline tags, see §8 |
 | `HtmlWidget` (gameplay.c:316) | LoadFile(path) | extends RichTextWidget |
 | `EditBoxWidget` :347 | **GetText()** :349, SetText | needs SetFocus to type, §10 |
-| `MultilineEditBoxWidget` :313 | GetText(out), SetLine/GetLine, GetLinesCount | |
+| `MultilineEditBoxWidget` :313 | GetText(out), SetLine/GetLine, GetLinesCount | extends `TextWidget`, not `EditBoxWidget`; `SetText` puts its caret at the start (§37) |
 | `ButtonWidget` :381 | GetState/SetState, SetText, GetText(out) :389 | only widget with reliable OnClick |
 | `CheckBoxWidget` :418 | IsChecked, SetChecked, SetText | |
 | `SliderWidget` :358 | SetMinMax, GetCurrent/SetCurrent, SetStep | |
@@ -2296,3 +2296,16 @@ it while the box's text changed (a search of class names):
   and reading 15 `stringtable.csv` files took 633-670 ms of script work, done 3 ms a frame over
   some 210 frames. `string.IndexOf` of a two-letter text over 13 788 prepared strings in a
   script loop: 1.5 ms; a text that only grew, looked for in the last hits only: 0.04-0.25 ms.
+- **A box of many lines is no `EditBoxWidget`** (measured 2026-11-14). `MultilineEditBoxWidget`
+  extends `TextWidget` (enwidgets.c:313), `EditBoxWidget` extends `UIWidget` (:347):
+  `EditBoxWidget.Cast(GetFocus())` is null on a focused multiline box, and a list that followed
+  its boxes that way never opened on one. Cast to both; read the second with
+  `GetText(out string)`, write it with `SetText`.
+- **`SetText` puts a multiline box's caret at the very start of its text** (an `EditBoxWidget`
+  keeps its caret after the text), and neither class can move a caret: `GetCarriageLine` and
+  `GetCarriagePos` only read it. A pick that kept the focus on the box left its caret blinking
+  before the first letter, where the next key lands; `SetFocus(null)` after the pick, and the
+  user's click puts the caret where they go on.
+- **Enter over a multiline box with the list open.** Read the keys before comparing the text,
+  and build the replacement from the text the results were found for: the pick then held no
+  line break, whether the box kept the focus or not.
