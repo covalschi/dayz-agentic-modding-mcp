@@ -1136,6 +1136,18 @@ rectangles, not estimates), diag client, windows 3840x1600 and 1920x1080.
   above is 1600/1080 — a 3840x1600 window, not a mystery constant.
   On a 2.4:1 screen the virtual width is 2592 units, not 1920: everything
   proportional in width stretches, pixel-sized widgets do not.
+- **NARROWER than 16:9 the unit is STILL `H / 1080`** (measured 2026-11-18, diag
+  1.30, client windows 1920x1200 and 1600x1200, engine rectangles through
+  `ui_find`): a stand mod's exact-size block of 1840x1032 units centred with
+  `center_ref` read `-62 27 2044 1147` at 16:10 and `-222 27 2044 1147` at 4:3 --
+  2044 px wide both times, on a 1920 and a 1600 px screen, cut equally on both
+  sides; its script-placed tiles (units x `H / 1080` from `GetScreenSize`)
+  matched the engine at both. The virtual width is `1080 * W / H` units: 1920 at
+  16:9, 1728 at 16:10, 1620 at 3:2, 1440 at 4:3, 1350 at 5:4. Nothing shrinks a
+  pixel-sized layout to fit the width: a screen meant for every aspect keeps its
+  exact-size width within the narrowest virtual width it supports, or narrows or
+  scales itself from script (`SetPos`/`SetSize` take pixels; `TextWidget` has
+  `SetTextExactSize(int)`, enwidgets.c:193).
 - **`-x=W -y=H` set the client window size** (both sizes honoured, windowed).
 - **`SetScreenSize(w, h)` on an exact-size FrameWidget takes real PIXELS** (asked
   1306x518, read back 1306x518 px at 1600 rows). (Reconciles the §2 note:
