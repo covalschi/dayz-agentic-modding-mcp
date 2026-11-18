@@ -1147,7 +1147,12 @@ rectangles, not estimates), diag client, windows 3840x1600 and 1920x1080.
   pixel-sized layout to fit the width: a screen meant for every aspect keeps its
   exact-size width within the narrowest virtual width it supports, or narrows or
   scales itself from script (`SetPos`/`SetSize` take pixels; `TextWidget` has
-  `SetTextExactSize(int)`, enwidgets.c:193).
+  `SetTextExactSize(int)`, enwidgets.c:193). Resizing the client window
+  (`SetWindowPos` on it) shut the open scripted menu on that stand both times
+  it was tried, once with nothing in the menu reacting to the new size, and
+  `GetScreenSize` read the new size at once; CF, VPP and other mods were
+  loaded, so a vanilla client is not proven to do the same. A menu that fits
+  itself to the screen therefore fits at its own opening.
 - **`-x=W -y=H` set the client window size** (both sizes honoured, windowed).
 - **`SetScreenSize(w, h)` on an exact-size FrameWidget takes real PIXELS** (asked
   1306x518, read back 1306x518 px at 1600 rows). (Reconciles the §2 note:
