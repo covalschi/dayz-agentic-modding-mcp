@@ -1362,6 +1362,60 @@ Stand: a storage-mod probe (stock, blob save/load, inspect and nest operations).
   terrain, `PlayerBase.CanPlaceItem`. Retail has no `DIAG_DEVELOPER` details: a
   `modded class Hologram` re-running the checks after `super.EvaluateCollision()` and writing
   them with `ErrorEx` is the way to see them.
+- **What the hologram takes as a base** (read in the 1.30 scripts on 2026-11-23, not measured
+  in game; `4_world/classes/hologram.c`). The hologram sits where a ray from the camera along
+  the view meets fire geometry (`GetProjectionEntityPosition`, :1136): the ground, a floor, a
+  table top. When the first thing hit is an `InventoryItem` the point snaps to that item's own
+  position (:1176), so aiming at an item never puts the hologram on top of it. `IsBaseViable`
+  (:638) sends four rays down from the corners of the projection's box: all four must meet the
+  same object or all the bare ground (`IsBaseIntact`), within the class's `slopeTolerance` of
+  the projection's height (`IsBaseFlat`), and the object must be a building, a plain map object
+  or a base-building part (`IsObjectStatic`, :746). Anything that can be carried or driven
+  away is refused on purpose: a thing placed on top of it "would stay floating in the air".
+  The test goes by class, not by how the object got there: furniture mapped with a
+  `StaticObj_*` or `Land_*` class is a `House` (`StaticObj_Furniture_*: HouseNoDestruct:
+  House`) and `Building.IsBuilding()` is true (`3_game/entities/building.c:267`); a terrain
+  object without a config class is a plain object (`object.c:965`); decoration made of an
+  item class stays an `InventoryItem` and is refused however firmly it was fixed.
+  The bbox tests lift the projection's box by half its height plus 5 cm (`IsCollidingBBox`,
+  :540), so the surface under it does not count and clutter standing on it does. Height: within
+  1.5 m of the player's feet (`DEFAULT_MAX_PLACEMENT_HEIGHT_DIFF`) and not above the camera
+  (`IsClippingRoof`, :475). `IsBaseViable` and `IsClippingRoof` answer "fine" on a dedicated
+  server, so the server does not check the base again. Each check has a server-wide off switch
+  in cfggameplay (`CfgGameplayHandler.GetDisable...Check()`); a mod that needs another answer
+  for its own projection overrides the method in a `modded class Hologram` and looks at
+  `m_Projection`.
+- **A hologram on mapped furniture (measured 2026-11-23, DayZDiag 1.30, a stand probe).** All
+  215 `StaticObj_Furniture_*` classes stood on flat concrete one at a time: 82 have a top of
+  0.12 m2 or more at 0.35-1.25 m, and a downward fire-geometry ray meets at least 90 % of it
+  in 59, part of it in 16, under 20 % in 7; every table, desk, counter and workbench is
+  among the 59. Under a live client hologram aimed at the middle of the top, with a flat box
+  of 0.5 x 0.35 x 0.03 m, 35 of 80 were accepted (every plain table) and 40 refused: 36 by the
+  base test (the top is smaller than the box, a corner ray falls to the floor), 18 by the box
+  test (something stands on the top). One refusal is not geometry: on
+  `StaticObj_Furniture_office_desk` `IsUnderwater` answers true on dry concrete with every
+  other check passing. The projection's box is its model's collision box
+  (`GetProjectionCollisionBox`), and a borrowed model can stand tall (0.43 x 0.56 x 0.10 m for
+  the burlap sack); overriding that method in a `modded class Hologram` for one projection
+  class gave the checks the flat box. The whole kit flow on a table top went through with
+  the game's own two actions; a 7 s hold of the deploy input was too short, 14 s was enough.
+- **Walkable furniture (same probe).** `SurfaceRoadY3D(x, y + 0.05, z,
+  RoadSurfaceDetection.UNDER)` from just above a furniture top returns the top itself for 18
+  of those 82 classes, the main tables among them (`table_DZ`, `kitchen_table_a`,
+  `office_desk`, `lab_bench`, `long_bench`), and for beds and sofas: they carry a roadway.
+  "Height over the floor" read that way is zero on such a table; read the floor beside the
+  object, not under the point.
+- **What the queries cost (same probe).** A scan of 160 801 columns -- 4.35 million
+  `RaycastRV` calls and 0.6 million `SurfaceRoadY3D` -- took 76 s on an otherwise idle
+  dedicated server paced at 6 ms a frame: 17 microseconds a ray at most. Sixteen body-sized
+  `IsBoxColliding` boxes with as many rays and floor queries took 0.13 ms on open ground;
+  a ring of 85-132 such boxes took 0.37 ms beside one table in the open and 1.5-8.5 ms among
+  village houses, and the same on a client (4.1 ms where the server's best was 4.5).
+- **Small things the same probe ran into.** `ObjectDelete` leaves the object answering
+  `SurfaceRoadY3D` until the frame ends. A plain map object answers `GetType()` with an
+  empty string and `GetModelName()` with `UNKNOWN_P3D_FILE`. A `RaycastRV` that ends on the
+  terrain returns an empty object set. The first stick input after a virtual pad attaches is
+  swallowed (camera turn rate at full stick: about 290 degrees a second).
 - **Retail client logging**: `Print` reaches no file (no script log on the client);
   `ErrorEx(text, ErrorExSeverity.WARNING)` lands in the .RPT, `INFO` does not.
 - **Inventory icon shading**: the icon's "Color" panel (`icon.layout`, priority 2) sits BEHIND the
@@ -1553,6 +1607,42 @@ loaded the world save, could not create the classes it did not know, and on its 
 were gone at the next boot of the stand with the full mod set. Nothing in either log says so. On a shared
 stand, never run a second profile against the same mission folder unless it loads every
 mod whose entities the save holds -- or give it its own mission copy.
+
+## A world saved with CF loaded, booted once without it, is damaged for good (measured 2026-11-24)
+
+A diag stand world (default Chernarus economy, its own `instanceId`) had last been saved
+with Community Framework and a mod built on it loaded. One boot of the same world with
+neither (a stand mod alone, which needs neither):
+
+- 22 408 lines `Reason: [EntityAI::OnStoreLoad] :: [WARNING] :: Scripted variables
+  corrupted upon "<class>".`, one for every stored entity, and 1 482 engine error lines
+  (`Function: 'Error'`, `scripts/1_Core/proto/endebug.c:92`); a log verdict fails on them.
+- The server WROTE the storage again at the end of its load, with no player connected:
+  that boot was killed (not closed) two minutes in, and the damage was on disk all the
+  same. The file times of the next boot show the write: started 00:42:03, ready line
+  00:43:02, `data\building_*.bin` and `animals.bin` stamped 00:43:03. So "no players, no
+  autosave" (the 2026-08-28 section above) holds for the minutes after a boot, not for the
+  boot itself: a forced kill does not undo what a wrong boot loaded.
+- The next boot WITH CF and the mod back failed too: 40 145 error lines (`[ERROR]	Failed
+  to read unknown data type <n> for mod unknown<<a>,<b>>`) and 3 350 `Scripted variables
+  corrupted`.
+- The other direction is clean: a world created with no CF, booted with CF and a mod on
+  it, loaded with no warning (two boots).
+
+Decide once per world whether CF is loaded and keep it: a stand tool that needs no CF still
+loads it on a world that has seen it. The remedy for a stand world is to delete its
+`storage_<instanceId>` folder; the next boot makes a fresh one.
+
+## A string that is not JSON: LoadData answers false AND writes an error line (measured 2026-11-24)
+
+`JsonFileLoader<MyMod_Save>.LoadData(text, record, err)` on a text that does not parse (a
+valid save with every `[` replaced by `{`) returned false, as it should, and the script log
+got `SCRIPT    (E): JSON ERROR <file>:<line>` (with CF loaded the file named is CF's own
+error handler, `JM/CF/Scripts/3_Game/communityframework/game/dayzgame.c:46`). A caller
+that expects broken input -- a save file, an admin's JSON -- handles the false, but a log
+verdict that counts `(E)` lines still fails on it: take the verdict before a step that feeds
+a broken text on purpose. A text that parses and merely misses a member (`Version` renamed)
+or holds a wrong value wrote nothing.
 
 ## RemoteObjectTreeCreate: the client's fresh copy starts from the config (measured 2026-09-26)
 

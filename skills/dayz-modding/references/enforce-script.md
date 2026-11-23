@@ -231,6 +231,11 @@ void Fn()
   (playerbase.c:1828-1832, `ref array<ActionBase_Basic> action_array` later assigned
   `new array<ActionBase_Basic>`; also areadamage.c:175, 41 such locals in 1.30). House style
   here: no `ref` on locals (see the 2026-09-06 section below and its note).
+- A function PARAMETER is not a strong reference and cannot take `new`: `if (!dice) dice =
+  new MyMod_Dice();` on a parameter `MyMod_Dice dice` fails with `Variable 'dice' is not
+  strong ref (missing 'ref'?)`, the module does not compile and the server stops on the
+  compile dialog (measured 2026-11-24, 1.30 diag server, a 3_Game class). Take the
+  fallback into a local: `MyMod_Dice used = dice; if (!used) used = new MyMod_Dice();`.
 - Entities in the world (ItemBase, PlayerBase, …) are owned by the engine — never hold
   `ref` to them (dangling entity = crashes); store them weak and null-check, or store
   identifiers instead.
