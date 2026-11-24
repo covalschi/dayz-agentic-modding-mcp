@@ -2035,3 +2035,36 @@ nothing here was measured live yet.
   `disableVoN = 1` and the broadcast on would settle it. Nothing here opens a way to put audio
   into the VoN stream; a mod's own radio sound is a server-chosen event played client-side on
   the radio, which was possible before 1.30 too.
+
+## Where a body can stand: not every floor is a road surface, and a server holds the map only near players (measured 2026-11-24, diag 1.30.164289)
+
+Found while seats were worked out around a thing laid on the top of a concrete wall of a
+third-party terrain (`Land_wall_indcnc_10`): the wall's top is about a metre wide and carries a
+road surface; 0.86 m under it the wall has a step a player walks and stands on; the ground is
+another 1.36 m down.
+
+- **A walkable step need not be a road surface.** `SurfaceRoadY3D(x, y, z,
+  RoadSurfaceDetection.UNDER)` from above the step answered the ground under it, as if the step
+  were not there. A ray straight down (`DayZPhysics.RaycastRV`, `ObjIntersectGeom`, and the Fire
+  and View kinds alike) answered the step, with the wall in its object set. Code that asks "where
+  would a body rest here" has to ask both and take the higher: a reader of road surfaces alone
+  found no floor to stand on beside that wall, while the tester stood on it.
+- **A dedicated server holds the map's objects only where a player is.** Straight after a start,
+  nobody connected, the same two calls along that wall answered the bare ground everywhere, 2.4 m
+  under the wall's top: no road surface, no geometry, an empty object set (an item lying on the
+  wall's top still answered the ray, hanging over nothing). With a player's character standing
+  there they answered the wall. So anything a server works out from the map's geometry far from
+  every player -- at world load, on a timer, for a thing restored from storage -- is worked out
+  in a world without buildings and furniture; do it when a player is near, or keep the answer
+  that was worked out when one was.
+- **What the extra ray costs.** Sixteen directions read eight times each plus the candidates:
+  9 ms a pass with a ray at every read, where road-surface reads alone had taken 2 to 3 ms at
+  the same spot. Spend the ray only where the road surface is not right under the start.
+- **A raised top told by where the placer stands.** "The floor is lower in most directions"
+  misses a long thing (a wall's top, a bench): its floor is lower on one side or two. The placer
+  standing 0.4 to 1.3 m below the thing, over a fall of 0.35 m or more between two reads 0.2 m
+  apart on his side (an edge, not a slope), told it right at that wall.
+- **Things a client makes for itself are its own to remove.** Marks made with `ECE_LOCAL` around a
+  networked thing stayed after the server deleted the thing: nothing told them. `EEDelete` runs
+  on the client too when a networked entity leaves its world; an invoker fired there, with the
+  thing's own id, is where a client's companions of it are cleared.
