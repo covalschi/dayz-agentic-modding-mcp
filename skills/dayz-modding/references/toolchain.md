@@ -856,3 +856,25 @@ Four small models built unattended -- a Blender script a model, the MLOD export,
 - In an `.imageset`, `mpix` only orders a set's textures by size: vanilla sets with one texture
   carry 0, 1 or 3. An atlas whose gaps keep the neighbour's edge colour at alpha 0 does not pull
   black into a card's rim when the engine filters; `ImageToPAA` keeps that colour.
+
+## A stand's character starves, and a stand mod can feed it (measured 2026-11-24, diag 1.30.164289)
+
+A character left logged in on a stand for a few hours stood with water and energy at nothing and
+lost health at 0.055 a second (4.48 points in 81 s): half an hour from full health to none.
+Setting health alone only winds that clock back. What ended it, from the server side of a stand
+mod: `player.ResetPlayer(true)` -- the diag menu's own reset: stomach, modifiers, bleeding, agents,
+stats, then water and energy to their maximum; its whole body is under `#ifdef DIAG_DEVELOPER`, so
+a retail build compiles it to nothing -- and after it, for any build,
+`GetStatWater().Set(GetStatWater().GetMax())`, the same for `GetStatEnergy()`, and
+`SetHealth("", "", GetMaxHealth("", ""))` with `"Blood"` and `"Shock"` beside it. Health read 100
+at once and for the seven minutes it was watched after. A body the script makes and nobody plays
+is spared the matter by `SetAllowDamage(false)` (a precaution: none was seen to die).
+
+## The virtual pad's first hold is cut short by its own arrival (measured 2026-11-24)
+
+`client_trigger` and `client_move` attach the virtual controller on their first call of a client
+session (`"opened": true` in the answer), and the game needs a moment to see a new controller. A
+hold measured from that call is shorter in the game than was asked for: a deploy that a 5 s hold
+completes got nothing from a 5 s hold that was also the pad's first call, and the same 5 s placed
+it on the next boot, after an idle `client_move(0, 0, 1)` had attached the pad. When the length of
+a hold is the thing measured, attach the pad with an idle move first.
