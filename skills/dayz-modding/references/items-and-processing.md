@@ -1205,3 +1205,40 @@ beside a framework, an admin tool and one terrain with its objects:
   cargo held fifty-two (`GetCargo().GetItemCount()`). A cargo wider than the game's own ten
   columns is taken by the engine; how the inventory screen draws it was not looked at.
 - A slot with no proxy in the holder's model works and shows nothing on the model.
+
+## A kit that goes into what it placed (read in the game's scripts and measured 2026-11-24, diag 1.30.164289)
+
+A stand mod's deployable kit (`MyMod_Deck`: `IsBasebuildingKit()` true, placed with the game's own
+`ActionDeployObject` and a hologram) makes a mat (`MyMod_Mat`) in `OnPlacementComplete` and has to end
+up INSIDE that mat, as its attachment, with the fifty-two attachments it carries itself.
+
+- **The game deletes a placed kit when the action ends**: `ActionDeployObject.OnEndServer`
+  (actiondeployobject.c:205-238) calls `m_MainItem.Delete()` when the item was placed and
+  `IsBasebuildingKit()`. A kit is not dropped while it is being placed (`ActionDeployBase.DropDuringPlacing`
+  returns for a kit) and is not moved to the spot (`MoveEntityToFinalPosition` returns for a kit): at
+  `OnPlacementComplete` it is still in the placer's hands.
+- **Sparing it**: a flag on the kit that makes `IsBasebuildingKit()` answer false, raised only for the
+  length of `super.OnEndServer(action_data)` in an override of the action (a `modded class
+  ActionDeployObject`, or the mod's own action class). A statement later it is a kit again: back in the
+  hands, the client offers "Choose placement" for it.
+- **Into the mat**: in `OnPlacementComplete` on the server,
+  `player.ServerTakeEntityToTargetAttachmentEx(mat, this, slotId)`, which is what the game does in
+  `ActionCreateIndoorFireplace.OnExecuteServer`. The call answered `true` and the kit's parent was still
+  the player when it returned: a move out of a player's hands is a hand event, stored
+  (`DayZPlayerInventory.HandEvent`) and sent through a juncture (`HandleHandEvent`, SERVER mode), and
+  `HumanInventory.RedirectToHandEvent` answers true whether or not the event is taken. The mat's
+  `EEItemAttached` fired 73 ms later (one client, on the same machine). After that the mat held the kit,
+  the kit its fifty-two attachments, and the hands were empty on the server and on the client. Whoever
+  asks has to look again; the answer of the call says nothing.
+- **The placer's own client is asked too**: `HandGuardCanMove` (hand_guards.c:290-313) calls
+  `GameInventory.LocationCanMoveEntity` unless the event is another player's, so the target's
+  `CanReceiveAttachment` has to say yes on that client. Not measured: what a "no" on the client does.
+- **A restart**: the mat came back from storage holding the kit and the kit its fifty-two attachments.
+  `EEItemAttached` fires for the kit while the mat is being loaded.
+- **Back out**: `mat.GetInventory().DropEntityWithTransform(InventoryMode.SERVER, mat, kit, transform)`
+  had the kit on the ground inside the call (no parent at once: `GameInventory.TakeToDst` in SERVER mode
+  is `LocationSyncMoveEntity` and a message to the clients), so the mat can be deleted in the same tick
+  without taking the kit with it. `player.ServerTakeEntityToHands(kit)` (the game: `ActionRepackTent`)
+  then had it in the player's hands, attachments and all, within three seconds, on both sides.
+- The bridge's `world_delete` does not reach a thing in a player's hands (0 deleted);
+  `GetGame().ObjectDelete(item)` on the server does, and the hands are free a tick later.
