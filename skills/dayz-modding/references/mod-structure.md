@@ -295,3 +295,9 @@ wiki/community dumps).
 - Feature-detect other mods at runtime: `GetGame().ConfigIsExisting("CfgMods StalkerPackX")`
   or CF `ModLoader.Contains("...")` (bool; `ModLoader.Find(name, out ModStructure mod)` when
   you need the entry) — degrade gracefully when absent.
+
+## The language `Original` shows the English column (measured 2026-11-24)
+
+A client whose `DayZ.cfg` says `language="Original";` drew a mod's string table from its `english`
+column: a table with another language in `original` and in every column but `english` showed
+English. To see the other text set a real language (`Russian`, `Czech` ...).

@@ -886,3 +886,23 @@ work at once. Rule: when a class has a static method named X, do not call `obj.X
 class on any object -- give the other method a different name. The same-name trap does not
 need `super`, overloading or inheritance to bite.
 
+
+## Math.RandomInt starts every server from the same place (measured 2026-11-24, diag 1.30.164289)
+
+A stand mod that shuffles a deck with `Math.RandomInt` dealt the same trump and the same hands as
+the first deal of two different boots of one server. Nothing seeds the generator for a script:
+`Math.Randomize(-1)` ("-1 will use time", enmath.c) once at mission start ended it -- the first deal
+of the next three boots differed. Anything whose first random draw after a start must not repeat (a
+shuffle, a lottery, a generated id) needs that call; a mod that draws only after players have been
+busy for a while takes its chance from their timing and never notices.
+
+## More names that are vanilla classes: `Head`, `Player`, `Pos` (measured 2026-11-24)
+
+Three more for the rule that a mod's own class may not name a method or a field like a class:
+a method `Head()` called unqualified inside its own class failed with `Method 'Object' is private`
+at the call line (the compiler took it for the constructor of vanilla's `class Head`); a field
+`Head` failed with `Variable name 'Head' already used as type name`; `class Player` and
+`class Pos` exist too. And `UIScriptedMenu` already has a `Refresh()`: a menu's own method of that
+name fails with `Overriding function 'Refresh' but not marked as 'override'`. One more of the same
+family, a local declared twice in one function: `Multiple declaration of variable 'mine'` names the
+second declaration, however far apart the two blocks are.

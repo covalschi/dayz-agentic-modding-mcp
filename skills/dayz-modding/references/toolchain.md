@@ -843,3 +843,16 @@ players normally.
 the thread `IPC:CSteamEngin`, RIP and every frame of a stack scan inside `steamclient.so`, no
 frame of the server or of a preloaded library. The four other stops of that set, two of them
 with a player in the world, were clean: a shutdown race in Steam's client library, not a mod's.
+
+## Small models built by script: what the build measured (2026-11-24)
+
+Four small models built unattended -- a Blender script a model, the MLOD export, `binarize`:
+- `binarize` does not read `autocenter` from a visual LOD. A model with no Geometry LOD at all came
+  out with its bounding centre in the middle of its visual LOD whether the named property was
+  there or not; with no Geometry LOD, one faceless point mirrored under the origin makes the box
+  symmetric and the centre 0,0,0.
+- `sections[]` in `model.cfg` is what makes a selection a hidden selection: the same model built
+  with an empty `sections[]` was 326 bytes smaller and its faces were not split.
+- In an `.imageset`, `mpix` only orders a set's textures by size: vanilla sets with one texture
+  carry 0, 1 or 3. An atlas whose gaps keep the neighbour's edge colour at alpha 0 does not pull
+  black into a card's rim when the engine filters; `ImageToPAA` keeps that colour.

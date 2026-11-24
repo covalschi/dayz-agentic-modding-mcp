@@ -1123,3 +1123,68 @@ counted one item fewer ("`ObjectDelete` frees the place within the call" above),
 `Delete()` the item still stood at its cell. The walk that still met the entity was on the
 retail build of 2026-09, on an unannounced container.
 
+
+## A class of scope 1 is not saved with the world (measured 2026-11-24, diag 1.30.164289)
+
+Three things made by one `CreateObjectEx(type, pos, ECE_PLACE_ON_SURFACE | ECE_NOLIFETIME)` on one
+spot of a stand's own world, then the server stopped by its window (which writes the world) and
+started again: the two whose config class had `scope = 1` were gone, the one of `scope = 2` stood
+where it was made. A stand mod's `Inventory_Base` class of `scope = 1`, given `SetLifetime` when it
+was made and an `OnStoreSave` of its own, never had that `OnStoreSave` called at the save (a line
+printed in it never appeared); the same class at `scope = 2` was written, read back
+(`OnStoreLoad`, then `EEOnAfterLoad`) and stood after the restart. So `scope = 1` is not only
+"hidden from spawn lists": **the world's storage skips the class.** Use it for what must never be
+saved -- a hologram's projection, a marker made on one client, an item that exists only while it is
+held -- and give `scope = 2` to anything that must come back after a restart.
+
+## A kit's deploy: the hold is longer than the deploy time (measured 2026-11-24)
+
+`ActiondeployObjectCB` asks the kit for `GetDeployTime()` and the progress runs that long, but the
+full-body deploy animation kneels the character down first. A one-handed kit with a
+`GetDeployTime()` of 2 s: a hold of 5 s placed nothing, 6 s and 9 s placed it (virtual gamepad
+trigger, diag client). With the game's default deploy time a hold of 7 s was too short and 14 s
+enough (2026-11-23).
+
+On the server the action makes a hologram of its own, and its projection is a REAL object:
+`Hologram`'s constructor creates it with `ECE_PLACE_ON_SURFACE` when
+`IsMultiplayer() && IsServer()` and with `ECE_TRACE | ECE_LOCAL` otherwise (hologram.c, 1.30). The
+server's `ActionConditionContinue` calls that hologram's `EvaluateCollision` on every tick of the
+hold, and `OnFinishProgressServer` calls it once more and returns without placing when it collides;
+a kit is deleted only after it was placed. So a `modded class Hologram` that adds a refusal for its
+own projection refuses on the server too, and the kit stays in the player's hands. What the action
+sends with the deploy is its to extend: an action that inherits `ActionDeployObject` writes one more
+value after `super.WriteToContext`, reads it after `super.ReadFromContext` into a receive-data class
+of its own (made BEFORE the call to `super`, which only makes one when none was handed in) and takes
+it in `HandleReciveData` -- a value chosen while aiming reached the server that way.
+
+## A hidden selection blanked in EEInit, and shown again (measured 2026-11-24)
+
+An item held in hands whose eight hidden selections were emptied with `SetObjectTexture(i, "")` in the
+client's `EEInit` (its synchronised count still 0) and given their texture in the first
+`OnVariablesSynchronized` drew nothing at all, on its holder and on two other characters, while a
+`Print` in the same function said "6 of 6 shown" with the right texture path. Left as the config
+made it until the synchronised count arrived, and given
+`SetObjectMaterial(i, <its hiddenSelectionsMaterials entry>)` together with the texture when shown,
+it drew. Both changes went in together, so which of the two was needed is not known; the rule that
+came out: blank nothing before the first synchronisation, and set the material when a selection is
+shown again. Blanking a selection of a model that is drawn does work
+(`SetObjectTexture(i, "")` hid the cards a hand did not hold).
+
+## The server does not turn a player; the client's heading model does (measured 2026-11-24)
+
+`player.SetPosition(p)` on the server puts a connected player on the point. `SetOrientation(o)`
+beside it left the client's view facing where it had faced: where a body faces is its own client's
+heading. The client turns it through one frame of the heading model -- a `modded class PlayerBase`
+whose `HeadingModel(float pDt, SDayZPlayerHeadingModel pModel)` sets `pModel.m_fHeadingAngle` and
+`pModel.m_fOrientationAngle` to `-yaw * Math.DEG2RAD` (the heading is in radians and counts the
+other way round) and returns true once, then goes back to `super`. A body facing 180 was put on a
+spot whose wanted facing was 90 and faced 90 after that frame.
+
+## Health cannot be read on a client (measured 2026-11-24)
+
+`player.GetHealth("", "")` in a client's menu `Update` threw
+`Virtual Machine Exception -- Reason: Object::GetHealth cannot be called on client` on every frame
+(a script log of 76,000 lines in three minutes); the function ends at that line, so everything a
+menu did after it never ran. A client learns that its player was hit from
+`PlayerBase.OnPlayerRecievedHit()` -- the call on which the game closes its own map -- and a mod's
+window that must close on a hit listens there.
