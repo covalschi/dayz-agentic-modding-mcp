@@ -1965,7 +1965,13 @@ byte-identical between client and server. Experimental got the same build on 202
   in `DayZPlayerInventory.HandleHandEvent` (`dayzplayerinventory.c:4549`, `GetPlugin()` in the
   stack) and `OnHandleStoredJunctureData` (`:670`), reached through VPP's modded
   `PlayerBase.CommandHandler`. No mod class in the stack; diag-only noise. Whether it needs
-  VPP was not checked.
+  VPP was not checked. The same `:670` exception on a diag SERVER (measured 2026-11-24, a
+  server script put an item into the hands of a seated player): the line stands under
+  `#ifdef DIAG_DEVELOPER` and asks `GetPlugin(PluginInventoryDebug)`, which a server does not
+  register, so the log says `Module PluginInventoryDebug is not Registred in PluginManager.c!`
+  and then throws; the item arrived all the same. A retail server has no such branch. A log
+  verdict that forbids `NULL pointer to instance` fails on it: read the stack before
+  blaming the mod.
 - `ENGINE (E): Can't load settings ./$CurrentDir:DayZSetting.xml` on a diag server is vanilla
   noise (every boot on 164200 and 164289), as are `Unknown object class 'thing'` warnings for
   vanilla `dz\structures\...` models: several hundred per boot on both builds.
