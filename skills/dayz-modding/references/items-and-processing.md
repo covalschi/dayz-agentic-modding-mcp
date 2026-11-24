@@ -1188,3 +1188,20 @@ spot whose wanted facing was 90 and faced 90 after that frame.
 menu did after it never ran. A client learns that its player was hit from
 `PlayerBase.OnPlayerRecievedHit()` -- the call on which the game closes its own map -- and a mod's
 window that must close on a hit listens there.
+
+## Fifty-two more inventory slots, and what a thing full of attachments costs (measured 2026-11-24, diag 1.30.164289)
+
+A stand mod declared fifty-two slots of its own (`CfgSlots`, `class Slot_MyMod_C00 { name =
+"MyMod_C00"; ... }` to `C51`), a box whose `attachments[]` names them all, fifty-two small items
+each with one of the names in `inventorySlot[]`, and the same box as a cargo of 13 by 4. Loaded
+beside a framework, an admin tool and one terrain with its objects:
+
+- **Every one of the fifty-two names answered a slot id** (`InventorySlots.GetSlotIdFromString`,
+  none `INVALID`). No documented ceiling on the number of slots was found; a server with a heavy
+  modpack, whose slot table every mod shares, was not measured.
+- **`InventorySlots.COUNT` is not the number of slots**: it read 32 with the fifty-two declared.
+- **Filling**: fifty-two `CreateAttachmentEx(type, slotId)` took 14.1 ms and the box held fifty-two
+  (`AttachmentCount`); fifty-two `CreateEntityInCargo` into the 13-wide grid took 6.1 ms and the
+  cargo held fifty-two (`GetCargo().GetItemCount()`). A cargo wider than the game's own ten
+  columns is taken by the engine; how the inventory screen draws it was not looked at.
+- A slot with no proxy in the holder's model works and shows nothing on the model.
