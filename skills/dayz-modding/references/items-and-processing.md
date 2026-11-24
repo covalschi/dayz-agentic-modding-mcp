@@ -1197,8 +1197,13 @@ each with one of the names in `inventorySlot[]`, and the same box as a cargo of 
 beside a framework, an admin tool and one terrain with its objects:
 
 - **Every one of the fifty-two names answered a slot id** (`InventorySlots.GetSlotIdFromString`,
-  none `INVALID`). No documented ceiling on the number of slots was found; a server with a heavy
-  modpack, whose slot table every mod shares, was not measured.
+  none `INVALID`). The list of slot names is one for all mods, and no ceiling on it is documented:
+  `inventoryslots.c` names 32 "pre-populated" slots and no maximum. Counted on 2026-11-24 in PBO
+  configs (the `Slot_*` class names of every `config.bin`, nothing booted): the game's own declare
+  about 470, the seventy mods of one live server's pack about 1500 more, so two thousand slots on a
+  server are an everyday thing. A slot's id is no small index either:
+  `InventorySlots.GetSlotIdFromString("Body")` read 5119774. Do not write "a heavy modpack's slot
+  table" down as a risk without a source: it was written so once here, as a guess.
 - **`InventorySlots.COUNT` is not the number of slots**: it read 32 with the fifty-two declared.
 - **Filling**: fifty-two `CreateAttachmentEx(type, slotId)` took 14.1 ms and the box held fifty-two
   (`AttachmentCount`); fifty-two `CreateEntityInCargo` into the 13-wide grid took 6.1 ms and the
