@@ -2326,3 +2326,31 @@ it while the box's text changed (a search of class names):
 - **Enter over a multiline box with the list open.** Read the keys before comparing the text,
   and build the replacement from the text the results were found for: the pick then held no
   line break, whether the box kept the focus or not.
+
+## 38. Turned widgets: a picture is cut to its own box, a frame's children turn whole (measured 2026-11-25)
+
+Measured on the diag 1.30 client at 1920x1080 and 3840x1600, in a stand mod's card-table
+window that lays its cards with `Widget.SetRotation(0, 0, deg)`.
+
+- **The third angle turns in the screen's plane, clockwise for a positive value, about the
+  widget's middle.** The game passes `(0, 0, deg)` everywhere it turns a widget (the
+  radial menu, `ContinuousActionProgress`, `MapMenu`). A card placed by its middle and
+  turned 90 lay centred on the point it was placed at.
+- **A turned `ImageWidget` is cut to its own unturned box.** An 84x118 card turned 90 under
+  a pile of others stuck out 30 units where it should have shown 47: exactly to the edge of
+  its unturned box. The cards of a fan, turned up to 20 degrees, lost their corners; an
+  index "10" in a corner read "0". Nothing in the log.
+- **The children of a turned `FrameWidget` turn with it, whole.** The same picture as the
+  child of a square frame (`clipchildren 0`, the picture placed at fractions of the frame)
+  turns with its corners: give the frame room for the picture at any angle, a side of
+  1.1 x sqrt(w^2 + h^2), and place the frame by its middle. A shadow and a glow beside the
+  picture in the same frame turn along. The game's radial menu works the same way: it
+  turns the roots of the layouts it makes.
+- **Picking a turned picture with the pointer**: the stand mod laid one transparent
+  `ButtonWidget` under all the pictures (with `style Empty`: a style-less one painted a light
+  box over everything it covered, §31) and, on its `OnClick` and every frame for hover,
+  took the pointer from `GetMousePos` minus the window's `GetScreenPos`, divided by the
+  window's pixels a unit, and tested the turned rectangles from the uppermost down
+  (`along = dx cos a + dy sin a`, `across = dy cos a - dx sin a`, inside when both are
+  within half the size). A real cursor lifted the card under it and a real click played
+  it. Whether the engine's own hit test follows a turn was not measured.
