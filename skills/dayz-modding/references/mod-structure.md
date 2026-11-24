@@ -301,3 +301,17 @@ wiki/community dumps).
 A client whose `DayZ.cfg` says `language="Original";` drew a mod's string table from its `english`
 column: a table with another language in `original` and in every column but `english` showed
 English. To see the other text set a real language (`Russian`, `Czech` ...).
+
+## A keybinding group is a tab only while it holds a key (read 2026-11-24, 1.30)
+
+The Controls menu makes one tab per `<sorting>` group, titled by the group's `loc`, and only for
+a group whose list of inputs is not empty
+(`5_mission\gui\newui\keybindings\keybindingsmenu.c:91-95`:
+`InputUtils.GetInputActionSortingMap()`, `GetUApi().SortingLocalization(index)`). The engine
+keeps a group's name apart from its title (`SortingName(index)`, `uainput.c:259`). A family of
+mods that wants ONE tab names the same group in each mod's inputs.xml and carries the title's
+key in each mod's own string table, so the tab has its title whichever of them is loaded; a
+group of a mod's own (`mymod_games` beside `mymod`) is a second tab, which is what a player
+sees as "a tab for every mod". NOT measured: that the engine joins two groups of one name
+coming from two mods' files into one tab -- look at the menu with both loaded before promising
+it.

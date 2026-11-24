@@ -878,3 +878,38 @@ hold measured from that call is shorter in the game than was asked for: a deploy
 completes got nothing from a 5 s hold that was also the pad's first call, and the same 5 s placed
 it on the next boot, after an idle `client_move(0, 0, 1)` had attached the pad. When the length of
 a hold is the thing measured, attach the pad with an idle move first.
+
+## The diag client's own keys: Home is a free camera that moves the player (read and met 2026-11-24, 1.30)
+
+`4_world\plugins\pluginbase\pluginkeybinding.c:60-66`, under `#ifdef DIAG_DEVELOPER`, binds with
+no menu open: `[Insert]` -> `PluginDeveloper.TeleportAtCursor` ("Teleport player to cursor
+position"), `[Home]` -> `ToggleFreeCamera` ("Toggle free camera and teleport player to its
+position"), numeric `[/]` -> `ToggleFreeCameraBackPos` ("Toggle free camera, no player
+teleport"), `[LCtrl]+[NUMPAD9]` and `[LCtrl]+[B]` -> toggle game focus. A retail client has none
+of them. A person who presses Home on a diag stand for an admin tool's panel (a common binding
+of such tools) finds the character somewhere else and blames the mod list: it is the build, not
+a mod. With the admin tool loaded the same press does both.
+
+## A third-party terrain on a stand (measured 2026-11-24, diag 1.30.164289)
+
+- **The world's name** is the class in the terrain mod's `CfgWorlds`, which is also its `.wrp`
+  file's name; the mission folder is `<anything>.<WorldName>`, and `template=` in the server
+  config names that folder.
+- **Which mods a terrain needs can be read out of its `.wrp`.** In OPRW version 28 the model
+  paths are plain text: a stored `.wrp` read out of its pbo and searched for `*.p3d` gave 4588
+  distinct paths in a 263 MB file within seconds. Grouped by the first path component and
+  matched against the `prefix` of every pbo of the candidate mods, they were all answered by
+  the game (`dz\`) and by four pbos of one objects mod. Nothing left unanswered means nothing
+  else is needed for the map to stand whole.
+- **The mission the map's author ships** (a folder beside `addons`, described by its own
+  readme as "not fully working") booted as it was: ready in 40 s, no error and no warning in
+  the script log, a client in the world 30 s after its start.
+- **An empty world for a stand**: `db\economy.xml` with `init="0" respawn="0"` on `dynamic`,
+  `animals`, `zombies` and `vehicles` (`load` and `save` left at 1 on `dynamic`, `vehicles`,
+  `building` and `player`). Seen after it: no `Inventory_Base` within 300 m of a town's centre
+  and no `DayZInfected` within 400 m of a player standing in that town.
+- **A world gets a `-profiles` directory of its own** whenever a loaded mod keeps files there
+  that belong to things in the world. A mod that deletes its file when the thing is not in the
+  world is right on a server and wrong on a stand where two worlds share one profile: each
+  boot of one world throws away the other's files. A stand root per world, with the client's
+  profile as a junction to the shared one, kept both.
