@@ -1286,3 +1286,50 @@ of its own and a few loose cards in a small cargo.
   `EEInit` that looks at the flag, fills a new box once and never an old one; nothing of the box's own is
   written to storage for it. The price: boxes that existed before the build that added the contents come
   back empty.
+
+## Textures, the inventory picture, the ground and the hand (measured 2026-11-24, diag 1.30)
+
+**Textures that differ only by their folder were drawn as one.** A stand mod's card item has
+two hidden selections, `face` and `back`, and gets its pictures by `SetObjectTexture` on the
+server and on each client. Two decks of such cards kept their pictures in two folders under
+the same names (`MyMod\data\cards\red\c_2s_co.paa`, `MyMod\data\cards\blue\c_2s_co.paa`).
+With both decks open in one inventory, every card of a face drew the same picture in both
+decks: one deck's for some faces, the other's for the rest. A `Print` beside each
+`SetObjectTexture` showed the right path for every card on the server and on the client,
+and the files in the pbo were the right ones (decoded back to PNG). Renamed to
+`red_2s_co.paa` and `blue_2s_co.paa`, nothing else changed, each deck drew its own. Give
+every texture a file name no other texture has: the mod's prefix and the variant in the
+NAME, not only in the folder.
+
+**The inventory picture's camera is in the model.** The game's `icon.c` gives the preview
+the item (`SetItem`), the orientation `"0 0 0"` and `SetView(GetViewIndex())`; the camera
+stands at the Memory LOD point `invView` and frames the points `boundingbox_min` and
+`boundingbox_max`. A card standing in its model (in X-Y, thin along Z) and a box of cards
+had neither point and were drawn edge-on. With `invView` 0.30 in front of the card's -Z
+side and the box points 2 mm round it, the slot showed the card's face; a box with
+`invView` 0.24 in front of one large side, a little aside and above, showed that side and
+two edges. The game's own models carry the same points with `ce_center` and `ce_radius`
+beside them; `invView` of PunchedCard is (-0.0145, 0.0116, -0.352), of Cassette (0.0544,
+0.0216, -0.2348), of Matchbox (-0.2171, 0.2961, -0.3394), of Paper (-0.2745, -0.2918, 0.2992)
+(read off the unpacked models).
+
+**`rotationFlags = 16` lays an item with +Z on top.** On the ground, the model's Z axis
+stood upright and its +Z side faced the sky: a card standing in its model lay with its +Z
+side up, a box standing in its model likewise, and the same box modelled lying (Z along its
+length) stood on its end. `rotationFlags = 32` left the standing box standing on its end.
+Only 16 and 32 were tried. The values in the game's own configs (the unpacked `dz`, 1.30):
+1 (168 classes: books, mushrooms), 2 (69: bags, masks, ammunition), 4 and 8 (car doors, a
+value a side), 12 (46), 16 (55: hats, optics, Paper), 17 (223: weapon parts), 32 (3:
+TunaCan, CarRadiator, LegsCover_Improvised), 34 (56: eyewear, crossbow bolts), 63 (7: tins),
+64 (6: bottles, fireplaces), 256 (1: PileOfWoodenPlanks).
+
+**The game's hold poses can be borrowed.** In a `modded class ModItemRegisterCallbacks`,
+`RegisterOneHanded`:
+`pType.AddItemInHandsProfileIK("MyMod_Card", "dz/anims/workspaces/player/player_main/player_main_1h.asi", pBehavior, "dz/anims/anm/player/ik/gear/PunchedCard.anm");`
+Seen on a character: `PunchedCard.anm` holds a card standing in its model, origin at its
+middle, by its end between thumb and fingers, the -Z side seen from in front of the
+character; `Matchbox.anm` holds a box in the palm with the model's -Z towards the thigh;
+`paper.anm` holds a sheet by a corner; `cassette.anm` holds a cassette by an end, edge-on.
+So a box that shows +Z on the ground (`rotationFlags = 16`) and is held in the Matchbox
+pose turns its -Z side to its holder's body: if both are to show the same picture, give
+both sides that picture.
