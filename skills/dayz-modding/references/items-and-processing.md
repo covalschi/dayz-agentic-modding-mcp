@@ -1242,3 +1242,42 @@ up INSIDE that mat, as its attachment, with the fifty-two attachments it carries
   then had it in the player's hands, attachments and all, within three seconds, on both sides.
 - The bridge's `world_delete` does not reach a thing in a player's hands (0 deleted);
   `GetGame().ObjectDelete(item)` on the server does, and the hands are free a tick later.
+
+## Universal slots, a container that is shut, and hands that are too far (measured 2026-11-24, diag 1.30.164289)
+
+A stand mod's box (`MyMod_Deck`) lists sixty-two attachment slots of the mod's own (`MyMod_Card01` to
+`MyMod_Card62`; a smaller box lists the first fifty-two), and every one of fifty-two item classes
+(`MyMod_Card_*`) names all sixty-two in `inventorySlot[]`. A mat (`MyMod_Mat`) holds one such box in a slot
+of its own and a few loose cards in a small cargo.
+
+- **An item that fits many slots goes into the first free one.** `box.GetInventory().CreateAttachment(type)`
+  fifty-two times filled the fifty-two slots of the smaller box; in the larger one ten further cards went
+  into the ten further slots. For an item that exists already,
+  `box.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ATTACHMENT, loc)` names a
+  free slot and `TakeToDst(InventoryMode.SERVER, src, loc)` puts it there inside the call.
+- **What a player sees of it.** An item in the hands shows its attachment slots under its picture in the
+  inventory, eight to a row: a filled slot as the attachment's picture, an empty one as the slot's ghost
+  icon. The cursor over a filled slot names the attachment (its `displayName` and `descriptionShort`), over
+  an empty one the slot (`CfgSlots` `displayName`). With the real mouse: a drag from a slot into clothing
+  took the attachment out; a drag from clothing onto an empty slot put it in; a drop on the hands item's
+  own picture did NOT attach it, the game swapped the hands (the dragged item into the hands, the box with
+  all its attachments into the clothing, where it takes the cells of its own size); a double click on an
+  attachment in its slot took nothing out.
+- **A container that says no to everything still gets its own back from storage.** The mat's
+  `CanReceiveAttachment`, `CanReleaseAttachment`, `CanReceiveItemIntoCargo` and `CanReleaseCargo` answered
+  false on the server when it stopped. After the restart it held its box, the box its sixty-two
+  attachments, and the cargo its loose cards, read before any client joined: the storage load does not
+  ask those four. So a thing may be shut to players for good and opened only for the moments its own
+  server code moves something (a time stamp the four overrides look at).
+- **Hands that are too far take nothing, and the call does not say so.** `player.ServerTakeEntityToHands(item)`
+  with the item on the ground 0.7 m from the player: in the hands within the next few seconds. Twelve
+  metres away: the hands stayed empty and the item lay where it was. The take is the game's hand event,
+  and it checks its source against `GameInventory.c_MaxItemDistanceRadius`, 2.5 m (inventory.c:815;
+  `HandEventTake.CheckRequestSrc`, hand_events.c:222-224). An action whose cursor reaches farther than
+  that (`CCTCursor(3.2)`) can therefore hand a player something his hands will not take: leave the thing
+  where a player finds it.
+- **An item with attachments that was ever stored can be told from a new one for free**: `OnStoreLoad`
+  runs only for the former. A flag set there, and a fill deferred by a fraction of a second after
+  `EEInit` that looks at the flag, fills a new box once and never an old one; nothing of the box's own is
+  written to storage for it. The price: boxes that existed before the build that added the contents come
+  back empty.

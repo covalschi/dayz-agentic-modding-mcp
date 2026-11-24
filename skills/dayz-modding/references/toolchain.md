@@ -913,3 +913,25 @@ a mod. With the admin tool loaded the same press does both.
   world is right on a server and wrong on a stand where two worlds share one profile: each
   boot of one world throws away the other's files. A stand root per world, with the client's
   profile as a junction to the shared one, kept both.
+
+## Dragging in the inventory with the real mouse (measured 2026-11-24)
+
+The MCP's client tools click, press and type; none drags, and the inventory is all drags. What worked,
+with the client in a window:
+
+1. `ui_find(class_name="ItemPreviewWidget", root="screen")` with the inventory open (it is no scripted
+   menu, so `root="menu"` finds nothing): the hands container's attachment slots are `Render0`, `Render1`
+   and so on, with their rectangles in client pixels.
+2. `ui_click(path=..., root="screen", via="cursor")` on one of them. It puts the real cursor there, and its
+   answer carries the same point twice: `click.client` and `click.screen`. Their difference is the
+   window's offset on this desktop; every other point of the client is that offset away from its
+   screenshot coordinates.
+3. A PowerShell line that loads `user32.dll` (`Add-Type` with `mouse_event`, `SetCursorPos`,
+   `GetCursorPos`): check that the cursor is still where the click left it, press the left button
+   (`mouse_event(2, ...)`), move in about twenty steps of 30 ms with `SetCursorPos` and a
+   `mouse_event(1, 0, 0, ...)` after each (the game wants to see the mouse move while the button is
+   down), wait 300 ms, release (`mouse_event(4, ...)`).
+
+A double click is two press-and-release pairs 90 ms apart, sent the same way. The path of an inventory
+widget is only good until the inventory redraws: after a drag that changed what the hands hold, walk the
+tree again.
