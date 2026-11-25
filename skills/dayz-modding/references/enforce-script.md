@@ -194,6 +194,11 @@ modded class PluginRecipesManagerBase
   day — declaring the field on `Weapon_Base` as well fails with
   `Multiple declaration of variable`). Read it through `ItemBase.Cast(e)`. One
   `modded class X` per class per mod: add the field to the reopening you already have.
+  In a 4_World file the same declaration fails differently, as
+  `Unknown type 'EntityAI'` at the `modded class` line (measured 2026-11-19,
+  1.30.164289 retail) -- the same refusal, not a module-order problem. A method
+  `EntityAI` declares (e.g. `IsServerCheck`) is overridden on `modded class ItemBase`
+  instead, and every item's calls reach it.
 - `#ifndef NO_GUI ... #endif` guards client-only STATEMENTS and MEMBERS (NO_GUI is defined
   on server builds, 1_core/defines.c:29). Vanilla 1.30 has 171 such guards: none around a
   class declaration, 11 around members (missionserver.c:59-62 guards three fields), 160

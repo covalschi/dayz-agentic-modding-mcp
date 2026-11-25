@@ -639,6 +639,55 @@ do. `Magazine` overrides `SplitItemToInventoryLocation` to move half the
 cartridges ONE AT A TIME with their own damage and type; the stack-max split
 works on quantity and therefore does nothing to a pile.
 
+### A client-local copy takes no item variables: every setter asks `IsServerCheck` (measured 2026-11-19, 1.30.164289)
+
+A fresh client-local entity (`ECE_LOCAL`, or made into a client-local container)
+starts from its config. The game's own way to copy state onto another item --
+`EntityAI.GetVariablesFloat()` on the server (the variable mask, then temperature,
+frozen and freeze progress, quantity, wet, liquid type, colour, cleanness; mods extend
+it through `SerializeNumericalVars` / `DeSerializeNumericalVars`), sent as floats,
+`TransferVariablesFloat(floats)` on the client -- **does nothing there**:
+`SetTemperatureDirect`, `SetWet`, `SetLiquidType`, `SetCleanness` and `SetQuantity` all
+open with `IsServerCheck(allow_client)` (entityai.c:2753), which on a multiplayer client
+logs `Attempting to change variable client side...` and returns. `ItemBase.OnStoreLoad`
+restores the same variables through the same setters, so an `OnStoreSave` blob replayed
+on a client loses them too. (`SetFrozen` has no such guard.)
+
+What works, measured on a stand mod's client-local container (tooltip and cell colour
+showed the temperature band, `GASOLINE` / `VODKA`, `DRENCHED`, `DISINFECTED` and a
+250 ml quantity exactly as the server held them; no Error in the client log):
+
+* `override bool IsServerCheck(bool allow_client)` in `modded class ItemBase` that
+  answers true for the one entity being dressed and its hierarchy children while a
+  static is set, `super` otherwise. Not on `EntityAI`: it cannot be modded
+  (enforce-script.md).
+* `DeSerializeNumericalVars` eats its array (`RemoveOrdered` in the `EntityAI` part):
+  hand it a copy. `GetVariablesFloat()` returns the shared
+  `CachedObjectsArrays.ARRAY_FLOAT`: copy it before the next item's call.
+* To keep the quantity away from `SetQuantity` (its destroy-on-min, its
+  `OnQuantityChanged`) without touching the SOURCE item: `SetStoreLoad(true)` on the target
+  around `TransferVariablesFloat`. `ItemBase.DeSerializeNumericalVars` then parks the
+  quantity in the store-load slot (`SetStoreLoadedQuantity`) instead of setting it; empty
+  the slot right after (`SetStoreLoadedQuantity(float.LOWEST)`), or the next `SetQuantity`
+  takes itself for a load and skips `OnQuantityChanged`, then set the quantity your own
+  way. A quarter-full canteen read `REMAINING: 25%` this way, after two record round
+  trips. Vanilla's own `exclude_quantity` (`TransferEntityVariables`) instead strips the
+  bit from the SOURCE's `m_VariablesMask` and puts it back -- a write to the source item
+  that a server copying out of a container it saves should not make.
+
+**The food stage is outside that channel.** It is netsynced
+(`m_FoodStage.m_FoodStageType`) and the visuals follow it on the server
+(`OnFoodStageChange` -> `UpdateVisualsEx`; the engine replicates the textures), so a
+client-local copy gets neither and draws RAW. `Edible_Base.ChangeFoodStage(stage)` on
+the client changes the texture there (no server guard; `FoodStage.OnFoodStageChange`
+skips only the first change, from NONE): raw, baked and burned fillets drawn side by side.
+
+**No temperature in the tooltip is not 0 °C.** `InspectMenuNew.UpdateItemInfoTemperature`
+prints nothing in the NEUTRAL band (`STATE_NEUTRAL_TEMP` 15 to `STATE_HOT_LVL_ONE` 35),
+and that band's cell tint (`Colors.TEMPERATURE_NEUTAL`, 0x999999) barely shows over the
+slot (pixels 93,87,82 against an empty cell's 88,84,81). Only exactly 0 leaves a cell
+untinted: `ColorManager.GetItemColor` tests `if (temperature)`.
+
 ### Right-click split never touches the split methods
 
 `Icon.MouseClick` calls `ItemBase.OnRightClick`, which on a client does not
@@ -742,6 +791,16 @@ server's items every time.
 
 **Do:** delete with `ObjectDelete` when the same call needs the room; never count on
 `DeleteSafe()` having happened by any particular frame.
+
+**A list of a container's items is a promise about one frame** (measured 2026-11-19,
+1.30.164289). Walk the cargo (`GetItemCount` / `GetItem`) in the frame an item was
+`Delete()`d -- by script or by vanilla code replacing it -- and the item is still listed;
+walk that same list over the next frames, as a paced writer does, and it is null. A
+serialiser that writes "N roots" up front and then one per root over several frames comes
+out short: a stand mod's paced writer said 1000 and carried 990, and its reader refused
+the file. Drop `IsSetForDeletion()` items when the list is made, and check each entry again
+(null, `IsSetForDeletion()`) at the moment it is written; when one has gone, start the
+write over from what the container holds then, rather than send a count that lies.
 
 ### `SetQuantity`'s bool means "destroyed"; zero frees the cell a frame late; an ammo pile at zero stays
 

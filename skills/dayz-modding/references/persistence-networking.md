@@ -1288,7 +1288,24 @@ Stand: a storage-mod probe (stock, blob save/load, inspect and nest operations).
   Backpacks refuse: `Clothing_Base.CanPutInCargoClothingConditions` allows clothing into cargo
   only when `GetNumberOfItems() == 0` (or the parent is a player / UndergroundStash) --
   `FindFreeLocationFor` returned false for all 5 filled `TaloonBag_Blue`. Vanilla rule, not a
-  restriction to fight.
+  restriction to fight. The other way round holds too (measured 2026-11-19, 1.30.164289):
+  an EMPTY backpack created into a box's cargo takes nothing into its own -- 11 backpacks in a
+  server-local box refused every item. And no non-clothing container short of a tent gives
+  back more cells than it takes (1.30 config: `FirstAidKit` 3x3 holds 3x3, `GiftBox_Small` 2x2
+  holds 2x2, the teddy bears 2x3 hold 2x3), so a 10x100 box tops out near 1000 roots of one
+  cell; attachments are the only way past that (a stress load reached 1116 entities).
+- **Vanilla replacement inside a server-local container lands in the world** (observed
+  2026-11-19). `Bait` / `BoneBait` created in a server-local (`ECE_LOCAL`) container and given
+  a new health and quantity by script were deleted within the frame, and `Hook` / `BoneHook`
+  lay on the ground at the container's position -- networked world items, 12 + 12 of them.
+  Whatever vanilla code replaces an item there, its replacement does not land back in the
+  container.
+- **Some scope-2 classes claim one cell and are not items you can place at a cell** (1.30):
+  `GardenPlotPolytunnel`, `GardenPlotGreenhouse`, `PowerGeneratorStatic` have `itemSize[] =
+  {1,1}`; `CreateEntityInCargo(cls)` took them into a box's cargo, but re-creating them at
+  the cell they had been saved at -- `CreateEntityInCargoEx(cls, 0, row, col, flip)`, then
+  `CreateEntityInCargo(cls)` anywhere, in a box with free cells -- failed every time. A stress
+  load built from "every one-cell class" wants them filtered out.
 - **`LocationSyncMoveEntity` moves the item and tells no client** (measured 2026-09-17; it cost a
   live bug). It is the raw local move. `GameInventory.TakeToDst(InventoryMode.SERVER, src, dst)`
   does the same move AND sends the `SYNC_MOVE` command to the clients
