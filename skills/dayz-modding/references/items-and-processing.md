@@ -381,6 +381,20 @@ class CfgSoundSets
   until mission end (leak; see comment at :41). Guard with `!GetGame().IsDedicatedServer()`.
 - Looped sounds never auto-end: `StopSoundSet` on power-off and in `EEDelete`/destructor.
 - Drive state audio client-side from `OnVariablesSynchronized()` off netsync device state.
+- **A mod's own sounds play** (measured 2026-11-25, 1.30 diag client): mono 44.1 kHz Ogg
+  Vorbis written by ffmpeg's `libvorbis` (quality 4), a shader that inherits
+  `baseCharacter_SoundShader` and a set that inherits `baseCharacter_SoundSet`, the sample
+  named without its extension under the mod's prefix, `DZ_Sounds_Effects` in
+  `requiredAddons` (whether it is needed was not tested). Played as `CreateSound` ->
+  `SetParent(obj)` -> `SetLocalPosition(vector.Zero)` -> `SoundPlay()` ->
+  `SetAutodestroy(true)` (the steps of `PlaySoundOnObject`, done by hand to read what
+  `SoundPlay` answers), it returned true for all ten sets of a stand mod. A set that loads
+  cleanly leaves nothing in the client's RPT: the RPT names a set (`AUDIO : Loading
+  SoundSet '<x>'`) only beside an `AUDIO (E)` line. ffmpeg's libvorbis with `-fflags
+  +bitexact -flags:a +bitexact -map_metadata -1` writes byte-identical files from the same
+  WAV, so generated sounds can be checked by digest.
+- A `CallLater` on `CALL_CATEGORY_SYSTEM` that steps through a run of sounds by their
+  lengths started each within 1-6 ms of the length (measured 2026-11-25).
 
 ## Making items spawn in the world (Central Economy)
 

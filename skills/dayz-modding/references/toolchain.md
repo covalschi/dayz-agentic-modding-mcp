@@ -935,3 +935,15 @@ with the client in a window:
 A double click is two press-and-release pairs 90 ms apart, sent the same way. The path of an inventory
 widget is only good until the inventory redraws: after a drag that changed what the hands hold, walk the
 tree again.
+
+## The MCP's eyes on a client: what they cannot see (measured 2026-11-25)
+
+- **The client half of the bridge answers 1.7-2 s after a server command.** A UI state that lasts
+  under a second (a card in flight, a 0.45 s shake) cannot be caught with `ui_tree`/`ui_find`; log
+  it from the mod instead.
+- **`ui_find`/`ui_tree` return an empty `text` for a label in Cyrillic** while its `text_size` is
+  not zero. Read such a label from the mod's own log, or check the language by a Latin label.
+- **A black `client_shot`** (`lit_fraction` 0) on a desktop whose monitors are off: the window
+  draws nothing to capture. `Get-PnpDevice -Class Monitor` shows them `Present=False`.
+- `mod_build`'s pbo carries `config.cpp` as text (no `config.bin`), so a search of the pbo for
+  a file name also finds the names written in the config.

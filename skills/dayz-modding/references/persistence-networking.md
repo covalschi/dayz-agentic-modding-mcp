@@ -445,6 +445,21 @@ restored from storage in its default state never passes through any code path th
 If a client-side action condition gates on that variable, prompts silently fail to appear
 until something touches the entity. Push once in `EEInit` (server side).
 
+### A client's first `OnVariablesSynchronized` depends on how the entity arrives (measured 2026-11-25, 1.30 diag)
+
+- An item made with `CreateObjectEx` whose net-synced ints are set, with `SetSynchDirty()`,
+  in the same server frame: the client's first call carries the DEFAULTS (0); the values
+  come in the next call, about 26 ms later (9 of 9).
+- An existing item coming back into a client's network range (the player walked 400 m away
+  and back, default ranges): the first call carries the current values.
+- An item made with `CreateAttachment` whose own net-synced int never changes: no call at
+  all while it stays attached (about 3 minutes watched, debug on, 8 of 8); the first call
+  comes when that int first changes.
+
+So a client that reacts to a synced counter (a sound once a step) takes its first call as
+the baseline, not as an event, or a client arriving later replays old events; and a value
+that clients must see on an attachment has to change at least once.
+
 ### Worn equipment is RESTORED, not attached — `EEItemAttached` may not fire
 
 When a character loads, attachments come back already worn. Logic hanging on
