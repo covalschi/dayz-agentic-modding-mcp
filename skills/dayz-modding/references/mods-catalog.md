@@ -786,6 +786,16 @@ Distilled cross-cutting lessons live in references/patterns-cookbook.md.
   - T: Custom .imageset for icons + overridden inspect/icon layouts
   - T: modded Ammunition_Base adding getter methods only (fully additive)
 
+## GSC Stalker Inventory Official (S.T.A.L.K.E.R. 2-style inventory reskin)
+- category: inventory UI reskin | source: workshop, read 2026-11-03 | popularity: 363 subscribers (427 lifetime), created 2026-10 | license: Copyright 2026 Paul Harkness; the listing asks for repack permission on the author's Discord
+- url: https://steamcommunity.com/sharedfiles/filedetails/?id=3824883510
+- desc: Client-side reskin by Harkness, no server logic and no CF: requiredAddons are DZ_Data and DZ_Scripts. 34 layouts (three width sets: compact, standard, wide; plus shared and screens), 20 plain-text script files, two atlases, one styles file. Columns: stash/ground, equipment over the character, backpack. The gear tiles keep the 150-unit scroller, so a third row scrolls (gui-layouts.md §33).
+  - T: modded class WidgetLayoutName redeclares the layout consts at its own paths; vanilla's classes pick them up unchanged
+  - T: SetParentWidget runs after SetLayoutName and before the layout loads: setting m_LayoutName there survives another mod's SetLayoutName without super (done for Namalsk Survival)
+  - T: CheckWidth re-picks the width set by width/height * 1080 * frame fraction against each set's summed column widths; vanilla's `float ratio = m_Width / m_Height` divides two ints (inventorymenu.c:44), so 16:9 and 16:10 fall to NARROW
+  - T: Layouts carry the widget names another mod's scripts look for (ColdResistanceBar, Frostbite) so that mod drives them here; shown only when ConfigIsExisting finds the mod
+  - T: Weight bar with bands from CfgGameplayHandler stamina values; condition bars refreshed in SlotsIcon/Icon UpdateInterval; PlayerPreview zoom in even steps (vanilla's wheel / 25 is integer division)
+
 ## Uncuepas Civilian Clothing
 - category: clothing content pack | source: local-modpack | popularity:  | license: 
 - url: https://steamcommunity.com/sharedfiles/filedetails/?id=1762444175

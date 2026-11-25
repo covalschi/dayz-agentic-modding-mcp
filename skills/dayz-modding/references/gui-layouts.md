@@ -91,7 +91,7 @@ Script classes, all in enwidgets.c unless noted:
 | `CanvasWidget` :341 | DrawLine, Clear — entire API | §7 |
 | `ItemPreviewWidget` (gameplay.c:286) | SetItem(EntityAI), SetView, SetModelOrientation/Position, SetForceFlip | §8; since 1.30 extends `PreviewWidget` (:276), which now holds Set/GetModelOrientation/Position + ApplyToCamera |
 | `PlayerPreviewWidget` (gameplay.c:305) | SetPlayer(DayZPlayer), UpdateItemInHands, Refresh | also `: PreviewWidget` since 1.30 |
-| `GridSpacerWidget` / `WrapSpacerWidget` :473-479 | + AddChildAfter, SetContentAlignmentH/V (SpacerWidget) | dynamic node grids; GridSpacer overrides children's size |
+| `GridSpacerWidget` / `WrapSpacerWidget` :473-479 | + AddChildAfter, SetContentAlignmentH/V (SpacerWidget) | dynamic node grids; GridSpacer overrides children's size; `Columns`/`Rows` are layout-only, no script setter (§33) |
 | `ScrollWidget` :481 | GetContentWidth/Height, V/HScrollToPos, VScrollToPos01, VScrollToWidget, GetVScrollPos, IsScrollbarVisible | see gotchas below |
 | `VideoWidget`, `RenderTargetWidget`, `RTTextureWidget` | | |
 | frames and panels | — | NO script class: there is no `class FrameWidget` or `class PanelWidget` (only `FrameWidgetTypeID`); `ClassName()` says `Widget` (§23a) — hold them as `Widget` |
@@ -1962,6 +1962,57 @@ retail client at 3840x1600 (UA) and 1920x1080 (EN).
   the fog's fade and the opaque fog under it). Each rectangle rounds to whole pixels on its own,
   and one row of what lies beneath showed between them at 3840x1600 (about 10 % at 1080). Lay the
   later widget one unit over the earlier one where both are opaque there.
+
+## 33. Moving the player's gear tiles from script (measured 2026-11-03)
+
+Measured on 1.30.164200 on a diag stand with an inventory reskin mod and a probe mod, 22 worn
+slots, in 1920x1080, 1600x1000, 1280x960 and 3840x1600 windows.
+
+- **Why the gear slots scroll.** `right_area.layout` declares `ScrollerSlotsContent` 150 units
+  high (vanilla's wide set, all three sets of the reskin): two rows of 66. `PlayerContainer`
+  builds its rows from `playerSlots` (§23), `ITEMS_IN_ROW` = 8 to a row, and vanilla has 13 slots,
+  8 + 5. The 17th slot opens a third row and the scrollbar appears.
+- **A row cannot be turned from script.** `GridSpacerWidget` declares nothing of its own
+  (enwidgets.c:473): `Columns` and `Rows` exist only in the layout. A vertical copy of the row
+  layout is no answer on its own: `WidgetLayoutName.InventorySlotsContainer*` is the layout of
+  every `SlotsContainer`, so a held item's attachments and the vicinity would change with it.
+- **Re-parenting the tiles works.** `myFrame.AddChild(icon.GetMainWidget())` takes an `Icon<N>`
+  frame out of its row (`SlotsIcon` holds its children and never asks for a parent); `SetPos` and
+  `SetSize` then place it, in screen pixels. Afterwards the engine's hit test answers the tile's
+  `PanelWidget<N>` at the new rectangle, and the hover outline, the tooltip, a drag to and from a
+  slot, a swap and the reserved tile all behaved as before. Tiles a row never showed stay hidden
+  in it; `IsVisible()` tells them apart.
+- **Take the pitch from the row, not from the layout.** The row is declared 66 units and measured
+  64 px at 1080 rows on the first `Inventory.Update` of an open menu; the tile is declared 64.
+- **Hiding `ScrollerSlotsContent` takes the drop handler on its `SlotsContent` with it**
+  (`Inventory.InitDragAndDropEvents` registers by name). Register your own container:
+  `WidgetEventHandler.GetInstance().RegisterOnDropReceived(frame, inventory, "OnRightPanelDropReceived")`
+  and `RegisterOnDraggingOver(frame, inventory, "DraggingOverRightPanel")`. A rifle dropped from the
+  hands on the empty part of the frame then went to the first slot that fitted.
+- **The hands panel grows to half the screen**: `HandsArea.UpdateInterval` passes
+  `InventoryMenu.GetHeight() * 0.5` to `ResizeParentToChild`. Measured at 1080 rows in the reskin:
+  208 px with empty hands, 314 with a rifle, 540 with a backpack. Clamping after `super`
+  (`m_Scroller.SetSize(w, limit)`) holds the limit, the panel scrolls by the wheel, and nothing
+  jumped in the frames taken.
+- **A grey tile with a hand on it is the reservation, not a bug.** `reserved_icon.layout` is a
+  63 % grey tile plus `set:dayz_inventory image:hands`. An item that goes from an attachment slot to
+  the hands reserves that slot (itembase.c:1041-1054), and the slot shows it until the item is back.
+  Reproduced by dragging a rifle from the shoulder slot to the hands.
+- **A `ScrollWidget` whose content is exactly its own height still showed its scrollbar** at
+  1600x1000 (both rectangles 164x437), and not at 1920x1080, where a unit is a pixel. Where nothing
+  should scroll, use a plain frame.
+- **Grid order is free on PC.** `Inventory.Update` moves the grid cursor only under
+  `#ifdef PLATFORM_CONSOLE`, so tiles can stand in any order without breaking keyboard or gamepad
+  navigation: a PC build has none. On a live client the D-pad moved nothing among the tiles.
+- **An item dropped from the ground on hands that already hold something does nothing** in the wide set
+  of that reskin, with or without the moved tiles (a backpack on a rifle): not a defect of the move.
+- **Another mod's `PlayerContainer.OnDropReceivedFromGhostArea`, `PlayerContainer.MouseClick` and `SlotsIcon`
+  overlay keep working on moved tiles**: they read `w.GetUserData` and the icon's own widgets. Measured
+  with a storage mod's slot exchange, its Alt+click and its search shading.
+- **Two stand notes from that run.** `ui_text` sets an edit box without firing its `OnChange`: a handler
+  listening there sees nothing until a real key lands in the field (click it, then `client_type(" ")`). A
+  held Alt can be sent: `SendInput` with `KEYEVENTF_SCANCODE`, scancode 0x38, held 250 ms before a click
+  also sent by `SendInput`, is seen by a handler reading `KeyState(KC_LMENU)`.
 
 ## 34. A VPP submenu window: order, drag, maximize, resize (measured 2026-11-09)
 
