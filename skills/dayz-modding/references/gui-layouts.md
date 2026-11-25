@@ -2354,3 +2354,8 @@ window that lays its cards with `Widget.SetRotation(0, 0, deg)`.
   (`along = dx cos a + dy sin a`, `across = dy cos a - dx sin a`, inside when both are
   within half the size). A real cursor lifted the card under it and a real click played
   it. Whether the engine's own hit test follows a turn was not measured.
+- **Children with exact flags turn with the frame too** (measured 2026-11-25): two more
+  pictures in the same square frame, each with `hexactpos`/`hexactsize` 1, placed by script
+  with `SetPos`/`SetSize` in screen pixels worked out from the frame's own side (a small
+  sign at its place on a card's back, a note in its corner), turned with the frame at 180,
+  -90 and 90 and stayed where they belong on the turned picture, none cut off.

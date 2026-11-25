@@ -277,6 +277,38 @@ fails too. Always set it explicitly per result. Actual craft duration =
 `m_AnimationLength * 4.0` seconds (read 2026-11-01: recipebase.c:97 returns
 `m_AnimationLength * CRAFTING_TIME_UNIT_SIZE`, and constants.c:675 sets that to 4.0).
 
+### A recipe that makes nothing, and what bites in `CanDo` (measured 2026-11-25, diag 1.30)
+
+A stand mod's "tool and card" recipe: the tool in the hands, a card dragged onto it, the card
+changed in `Do`, nothing made.
+
+- **No `AddResult` is fine**: `SpawnItems` loops over no results and `Do` runs (vanilla
+  `PurifyWater` makes nothing either). Set every per-ingredient field in `Init`: the
+  constructor leaves them 0 and 0 is not "off" (`m_MaxDamageIngredient` 0 refuses all but a
+  pristine item, `m_IngredientSetHealth` 0 ruins it); -1 is "no check" or "do nothing".
+- **Do not hand `ingredients` on to `super.CanDo`.** An override that began
+  `if (!super.CanDo(ingredients, player)) return false;` and then read `ingredients[0]` threw
+  `Index out of range (0 >= 0) 'ingredients'` there, and the virtual machine's exception
+  left the override's answer to chance: the same tool and card crafted once and were refused
+  the next time. Read the two items into locals first and do the base's one check yourself
+  (no ingredient with attachments, recipebase.c:551-561); the game's own overrides of
+  `CanDo` do not call super either.
+- **`GetLengthInSecs()` may be overridden**, for a length from settings: the gesture asks the
+  recipe on both sides (`CAContinuousCraft.Setup`), so a client needs the value too. From
+  the press of the button to the server's `Do`: 10.3 s for a length of 8, 7.3 s for 5 --
+  the length and about 2.3 s more, the character crouching first.
+- **From the inventory**: an item dragged from a pocket or a backpack onto the item in the
+  hands shut the inventory and offered `<m_Name> [HOLD]`. Let go early and the gesture
+  breaks and the offer goes with it: drag again. An item in an attachment slot of a
+  container lying in cargo cannot be dragged at all: the inventory draws such a container as
+  one picture with no slots.
+- **A `CanDo` that reads a synchronised setting refuses on the client too**: with the
+  setting off, the dropped item made no action and the inventory stayed open.
+- **The server's half without the gesture**, for a stand: `PerformRecipeServer(id, a, b,
+  player)` with `RecipeIDFromClassname`; it calls `Error()` when its own check fails, so ask
+  the recipe's `CheckIngredientMatch` (`CheckRecipe` does not ask what the two items are)
+  and `CheckRecipe` first.
+
 ## Powered devices (optional realism: lab needs electricity)
 
 `ComponentEnergyManager` (3_Game/tools/Component/ComponentEnergyManager.c). Config:
