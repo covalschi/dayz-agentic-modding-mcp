@@ -1098,6 +1098,27 @@ every item in the world.
   ADD_AS_CARGO, SWAP_MAGAZINE, SWAP (`CanSwapEntitiesEx`), FSWAP (`CanForceSwapEntitiesEx`),
   else nothing at all, silently.
 
+## A hidden player slot (read from source 2026-11-09, 1.30; not measured on a stand)
+
+A slot in `SurvivorBase attachments[]` and NOT in `InventoryEquipment playerSlots[]` is a
+real slot the inventory screen never draws (gui-layouts.md §23). Vanilla keeps four of its
+seventeen player slots that way: `Head`, `Hands`, `LeftHand`, `Splint_Right` (characters_data
+config). For an item the player carries but never sees:
+
+- **Bodies hide it too.** Another player who opens a dead, unconscious or restrained
+  character gets the same `PlayerContainer`, built from the same `playerSlots` list
+  (vicinitycontainer.c:497-513, playercontainer.c:681-704).
+- **Hidden is not unreachable.** The free-place search walks every slot: `ActionTakeItem`
+  asks `FindFreeLocationFor(item, FindInventoryLocationType.ANY, il)` (actiontakeitem.c:76),
+  a drop on the inventory header asks `PredictiveTakeEntityToInventory(CARGO | ATTACHMENT,
+  item)` (playercontainer.c:725-727). Either can put ANY item whose `inventorySlot[]` names
+  the slot there, and the item vanishes from view. Let one dedicated class name it.
+- **Gate removal, not arrival.** Block `CanReleaseAttachment` if needed, never the receive
+  hooks ("Inventory hooks" above). Create it on the server with
+  `GetInventory().CreateAttachmentEx(type, InventorySlots.GetSlotIdFromString("MyMod_Hidden"))`.
+- **Hidden from the screen, not from code.** `EnumerateInventory` returns attachments
+  ("Inventory hooks" above), and the owning client holds the item like any attachment.
+
 ## Nesting containers: only under a slot (read from source, measured 2026-09-26)
 
 `Container_Base.CanPutInCargo(parent)` and `CanReceiveItemIntoCargo(item)`
