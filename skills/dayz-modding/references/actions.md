@@ -230,6 +230,19 @@ see `ActionFertilizeSlot.c` for the full selection→slot resolution example.
   (fullbody, `m_FullBody = true`) or `CMD_ACTIONMOD_*` (additive). The list is
   `enum DayZPlayerConstants` in `3_game/dayzplayer.c:601` (there is no DayZPlayerConstants.c);
   `CMD_ACTIONFB_INTERACT` is the generic reach-out.
+- **A placed item without `itemBehaviour` makes the placer lie down and drink.**
+  `ActionDeployObject` (hologram placement) picks its animation per item in
+  `SetupAnimation(item)` (actiondeployobject.c:306): `CMD_ACTIONFB_DEPLOY_*` or
+  `CMD_ACTIONFB_PLACING_*` by the config's `itemBehaviour` 0 (heavy), 1 (one hand) or
+  2 (two hands). With no `itemBehaviour` in the config `m_ItemBehaviour` is -1
+  (itembasetype.c:101), no branch matches, a `Debug.Log` is all, and `m_CommandUID` keeps
+  the constructor's 0 = `CMD_ACTIONFB_DRINK`, a prone animation (seen 2026-11-25, diag
+  1.30). Give the item an `itemBehaviour`, or override `SetupAnimation` in a subclass.
+  For a stance per placement, override `GetStanceMaskEx(player, target, item)`: a
+  full-body action is not hidden by its stance mask (actionbase.c:931), the mask is the
+  stance the engine starts it in (`StartCommand_Action`, animatedactionbase.c:343);
+  vanilla's crouched reach-out is `ActionFertilizeSlot` (`CMD_ACTIONFB_INTERACT`,
+  `STANCEMASK_CROUCH`). The stance switch is read in the scripts, not yet measured live.
 - `m_Text` shows in the HUD prompt; use a `#stringtable_key` for localization.
 - Progress bar appears automatically for continuous actions.
 
