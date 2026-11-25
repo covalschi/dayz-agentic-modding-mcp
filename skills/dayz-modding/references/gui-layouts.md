@@ -2359,3 +2359,10 @@ window that lays its cards with `Widget.SetRotation(0, 0, deg)`.
   with `SetPos`/`SetSize` in screen pixels worked out from the frame's own side (a small
   sign at its place on a card's back, a note in its corner), turned with the frame at 180,
   -90 and 90 and stayed where they belong on the turned picture, none cut off.
+- **A turned frame's child reports its unturned rectangle** (measured 2026-11-25, two
+  samples): the screen position a child of a frame turned with `SetRotation` gives (as a
+  bridge that lists widgets reads it) is where the child would be without the turn. A
+  12-pixel dot on a card turned 12 degrees was listed at x 780 and drawn at x 770, where a
+  12-degree turn about the card's middle puts it; on a card turned a few degrees the two
+  differed by about 3 pixels. A check that matches widget positions against the pixels of
+  a screenshot has to turn the rectangle itself.
