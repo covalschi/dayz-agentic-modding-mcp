@@ -1447,8 +1447,13 @@ beside them; `invView` of PunchedCard is (-0.0145, 0.0116, -0.352), of Cassette 
 **`rotationFlags = 16` lays an item with +Z on top.** On the ground, the model's Z axis
 stood upright and its +Z side faced the sky: a card standing in its model lay with its +Z
 side up, a box standing in its model likewise, and the same box modelled lying (Z along its
-length) stood on its end. `rotationFlags = 32` left the standing box standing on its end.
-Only 16 and 32 were tried. The values in the game's own configs (the unpacked `dz`, 1.30):
+length) stood on its end. `rotationFlags = 32` left the standing box standing on its end
+-- on its OTHER end: 32 turns the model upside down. Measured 2026-11-25 (diag 1.30) on an
+open tray modelled the way it stands on a table, its open side towards +Y and the origin
+under the middle of its underside: dropped with 32 it lay upside down, showing its
+underside; with 0 it lay as modelled, open side up. 0 is also what the game's own Pot,
+Candle and gas canisters get, which name no `rotationFlags` and stand upright.
+Only 0, 16 and 32 were tried. The values in the game's own configs (the unpacked `dz`, 1.30):
 1 (168 classes: books, mushrooms), 2 (69: bags, masks, ammunition), 4 and 8 (car doors, a
 value a side), 12 (46), 16 (55: hats, optics, Paper), 17 (223: weapon parts), 32 (3:
 TunaCan, CarRadiator, LegsCover_Improvised), 34 (56: eyewear, crossbow bolts), 63 (7: tins),
@@ -1460,7 +1465,11 @@ TunaCan, CarRadiator, LegsCover_Improvised), 34 (56: eyewear, crossbow bolts), 6
 Seen on a character: `PunchedCard.anm` holds a card standing in its model, origin at its
 middle, by its end between thumb and fingers, the -Z side seen from in front of the
 character; `Matchbox.anm` holds a box in the palm with the model's -Z towards the thigh;
-`paper.anm` holds a sheet by a corner; `cassette.anm` holds a cassette by an end, edge-on.
+`paper.anm` holds a sheet by a corner; `cassette.anm` holds a cassette by an end, edge-on;
+`tuna.anm` (TunaCan and TunaCan_Opened) holds a round tray modelled upright, origin under
+its middle, by its rim with the open side turned outwards -- the way the game shows its own
+open tins in the hand: `foodcan100g.anm` holds Pate_Opened with its opening towards
+whoever looks at the character too (seen 2026-11-25).
 So a box that shows +Z on the ground (`rotationFlags = 16`) and is held in the Matchbox
 pose turns its -Z side to its holder's body: if both are to show the same picture, give
 both sides that picture.
