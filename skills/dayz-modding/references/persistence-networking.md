@@ -460,6 +460,15 @@ So a client that reacts to a synced counter (a sound once a step) takes its firs
 the baseline, not as an event, or a client arriving later replays old events; and a value
 that clients must see on an attachment has to change at least once.
 
+### An item loaded with a character gets no `EEOnAfterLoad` state (measured 2026-11-25, 1.30 diag)
+
+A field a stand mod's card item computed in `EEOnAfterLoad` (which deck look it wears, from
+a saved style name) kept its constructor value on a card carried in a player's pockets,
+loaded with the character from the players' database: after a restart and a reconnect it
+read 0 where it had been 1, and a game that matched its cards by that value lost them.
+Computing the field in `OnStoreLoad`, right after reading what it is made from, fixed it.
+Items in the world's storage were not affected; derive loaded state in `OnStoreLoad`.
+
 ### Worn equipment is RESTORED, not attached — `EEItemAttached` may not fire
 
 When a character loads, attachments come back already worn. Logic hanging on

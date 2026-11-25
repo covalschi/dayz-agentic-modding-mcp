@@ -1004,6 +1004,15 @@ retail client, keys as scancodes through SendInput -- `client_type` reaches poll
   visibility check (`Widget.IsVisibleHierarchy()` exists if one ever does).
 - **Chat closed with Escape**: T fired again on the next press.
 
+**A menu that keeps push-to-talk** (measured 2026-11-25, diag 1.30): the game's "menu" input
+group (`bin\specific.xml`) holds `UAVoiceOverNet`, `UAVoiceOverNetToggle`,
+`UAVoiceOverNetMute` and `UAVoiceLevel`, so `AddActiveInputExcludes({"menu"})` shuts the
+player's voice off while the menu is open. A stand mod's game window instead excluded the
+inventory group, the hotbar, walking and the inventory key: `AddActiveInputExcludes` takes
+single input names beside group names, as the game's script console does. Measured with a
+client log line on the voice going on and off and the push-to-talk key held 1.5 s: before,
+on/off only with the window closed; after, on/off with it open, and walking still blocked.
+
 ## 21. MapWidget never fires OnClick — a menu's click routing goes silent
 
 A single click on a `MapWidget` produces `OnMouseButtonDown` and

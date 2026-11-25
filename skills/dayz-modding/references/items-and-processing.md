@@ -395,6 +395,11 @@ class CfgSoundSets
   WAV, so generated sounds can be checked by digest.
 - A `CallLater` on `CALL_CATEGORY_SYSTEM` that steps through a run of sounds by their
   lengths started each within 1-6 ms of the length (measured 2026-11-25).
+- **Moving an item on the server between a player's pockets and a container** (measured
+  2026-11-25, diag 1.30): `GameInventory.LocationSyncMoveEntity(src, dst)` followed by
+  `SendServerMove` took a stand mod's card from a player's inventory into a free slot of a
+  deck lying in a container's slot, into that container's cargo, and back into the
+  player's pockets; the cards stayed where they had been moved through a restart.
 
 ## Making items spawn in the world (Central Economy)
 
