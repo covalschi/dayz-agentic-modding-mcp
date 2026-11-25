@@ -201,6 +201,14 @@ DayZDiag_x64.exe -profiles=<clientLogs> -mod=... -connect=127.0.0.1 -port=2302 ^
 
 ### The retail client writes NO script lines to its .RPT (verified 2026-08-31, 1.29)
 
+**No longer true on 1.30.164289** (measured 2026-11-10, a retail client started by a
+community launcher with BattlEye, joined to a public server): it writes
+`script_<date>_<time>.log` with the mods' `Print` lines (`[ZEN|...]`, a mod's
+`sync received: ...`) and complete `Virtual Machine Exception` blocks, and its `.RPT`
+carries `SCRIPT (W)/(E)` lines as well. Whether 1.30 changed this or the launch differs
+(the 1.29 client was started by a harness) is not established. What follows is the 1.29
+measurement.
+
 Measured on a live retail client joined to a dedicated stand: the whole
 session's `DayZ_x64_*.RPT` contained **zero** `SCRIPT` lines -- engine lines
 only (`[Inputs] Loading inputs default ...`, animation errors, the module
@@ -246,6 +254,70 @@ instruction. `movzx r9d, word ptr [r9+24h]` preceded by
 COOKIE CHECK -- i.e. heap corruption, detected during an unrelated
 allocation. The crash site then says nothing about the culprit: it is where
 the damage was noticed, not where it was done.
+
+### A client that dies without a line: native stack overflow (measured 2026-11-10, 1.30.164289)
+
+Two retail-client sessions on a 72-mod server ended mid-play with NOTHING from
+the engine: the `.RPT` stopped in the middle of a line (its write buffer died
+with the process), no `ENGINE (F): Crashed` block, nothing new in
+`crash_*.log`, no `.mdmp`. Windows still saw it: Application log event 1000
+`Faulting module name: unknown, version: 0.0.0.0`, `Exception code:
+0xc0000005`, event 1001 `StackHash_0000`. Under BattlEye, WER cannot read the
+game's memory, so module and version always come out blank and `Fault offset`
+is the ABSOLUTE address.
+
+Mapping that address needs no dump. Within one boot the exe keeps its ASLR base
+while its image stays cached: create `DayZ_x64.exe` with `CREATE_SUSPENDED` (none
+of its code runs), read the image base at PEB+0x10 (`NtQueryInformationProcess`
+class 0, then `ReadProcessMemory`), terminate it. RVA = address - base. Find the
+function in `.pdata` (the exception directory's `RUNTIME_FUNCTION` table gives
+every function's bounds) and disassemble it (capstone). Check the base: every
+crash address of that boot must fall on an instruction boundary, on an
+instruction that touches memory. A wrong base fails that at once.
+
+What 1.30.164289 `DayZ_x64.exe` showed:
+
+| RVA | what | meaning |
+|---|---|---|
+| 0x10DF998 | `mov byte ptr [r11],0` in `__chkstk` (0x10DF960) | the stack probe hit the end of the stack: STACK OVERFLOW |
+| 0x270CA0 | the function that writes `Virtual Machine Exception` | allocates 36 944 bytes of stack (calls `__chkstk`) |
+| 0x2488B0 | the script interpreter (`NULL pointer to instance`, `Division by zero`) | frame under 4 KB |
+
+The main thread's stack is 1 MB (`SizeOfStackReserve` = commit = 0x100000).
+Every script error goes through the 37 KB reporter, and so does the VM's own
+`Stack overflow`. A script error raised with less than ~37 KB of native stack
+left, or a runaway recursion, therefore kills the client inside `__chkstk`, and
+no handler gets to write a line. Nothing on the client names the culprit then:
+bisect the mod set, and read the server's logs at the moment of the crash.
+
+**The last error in the log is not necessarily the killer (2026-11-14).** On a
+70-mod live server one retail client died at RVA 0x10DF998 at every join for a
+day, each time within the second after a `String CORRUPTED`: a third-party mod
+pushes its whole config (~37 KB JSON, one string) from
+`MissionServer.OnClientReadyEvent`, so every join with an existing character
+throws it (the 1023-byte string cap, persistence-networking.md). A local stand with
+the same 70 mods, the same terrain and that client's own profile got the same
+error at the same moment of the join -- right after the HUD build, before the
+client's `NETWORK : Network simulation` RPT line -- and survived it 3 of 3. So the
+error was not sufficient; whatever filled the stack lived only on the live server or
+in that character, and the player's items are created in exactly those seconds.
+To narrow such a crash: reproduce the join on a stand first, then move the
+server-side and character-side factors over one at a time.
+
+When the engine's handler does run, its `.RPT` block reads `Exception code:
+C0000005 ACCESS_VIOLATION at XXXXXXXX` -- only the LOW 32 BITS of the address.
+The low 16 bits survive ASLR (bases are 64 KB-aligned), so the same site is
+recognizable across boots.
+
+**Crash at quit.** `Destroying game` -> `Cleaning up script module globals
+'World'` -> `ENGINE (F): Crashed`, `C0000005` at RVA 0x2C6B61 / 0x2C6B6E (a
+refcount release, `lock xadd [rcx+8]` / `call [rax+8]`, on an object already
+freed; once `C0000374` heap corruption during the `'Game'` cleanup). In all 5
+cases (2026-11-05..09) it came right after a third-party `~PlayerBase` (SFP4)
+threw `NULL pointer to instance. Variable 'g_Game' during call
+'DayZGame.GetPlayer'`: during `Destroying game` `g_Game` is already null. That
+the throw causes the crash is not proven, but a destructor must not touch the
+game anyway: `if (!g_Game) return;` first.
 
 ### The client build must match the server build (verified 2026-08-31, 1.29)
 

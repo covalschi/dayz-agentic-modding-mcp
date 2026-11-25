@@ -194,6 +194,14 @@ mod named in parentheses). Full per-mod entries: references/mods-catalog.md. Tha
   statics skip power checks — model for static vs portable split.
 - **Inventory UI slot grouping**: GUIInventoryAttachmentsProps groups a device's slots
   into labeled icon-tagged sections (Input / Consumables / Output) — GSC Yanova.
+  **At most 7 categories if the item also has cargo** (1.30.164200 source; hit on a
+  1.30.164289 client 2026-11-10): `AttachmentCategoriesContainer.InitIconsContainers`
+  counts rows as ceil((categories + 1) / 8), but `InitGhostSlots` fetches the cargo icon
+  from the last row by index `categoriesCount`, not `% ITEMS_IN_ROW` (8). With 8+ categories
+  that index does not exist, `GetSlotIcon` returns null (attachmentcategoriescontainer.c:368,
+  :382), `m_CargoSlotsIcon` stays null, and `UpdateInterval` (:107 / :113) throws
+  `NULL pointer to instance. Variable 'm_MainWidget'` EVERY FRAME while the item is shown,
+  in vicinity or inventory: 18 000 exceptions in 12 minutes, a 110 MB `crash_*.log`.
 - **Cross-mod slots**: custom attachment slots are the interop currency — CfgSlots +
   ProxyAttachment + inventorySlot[]; a device can accept a FOREIGN mod's slot by name
   (SGE artifact container accepts NH's `NHArt1` slot) without hard dependency.
